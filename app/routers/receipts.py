@@ -71,6 +71,33 @@ async def dedupe_cleanup():
 
     return {"deleted": deleted_total, "kept": kept_total}
 
+class ReceiptPatch(BaseModel):
+    category: Optional[str] = None
+    payment: Optional[str] = None
+    org: Optional[str] = None
+
+@router.patch("/{id}")
+async def patch_receipt(id: int, r: ReceiptPatch):
+    p = await get_pool()
+    fields, values = [], []
+    for i, (k, v) in enumerate([("category", r.category), ("payment", r.payment), ("org", r.org)], start=1):
+        if v is not None:
+            fields.append(f"{k}=${i}")
+            values.append(v)
+    if not fields:
+        row = await p.fetchrow("SELECT * FROM receipts WHERE id=$1", id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Not found")
+        return dict(row)
+    values.append(id)
+    row = await p.fetchrow(
+        f"UPDATE receipts SET {', '.join(fields)} WHERE id=${len(values)} RETURNING *",
+        *values
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    return dict(row)
+
 @router.delete("/{id}")
 async def delete_receipt(id: int):
     p = await get_pool()

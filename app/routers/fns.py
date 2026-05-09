@@ -53,4 +53,5 @@ async def check_receipt(req: CheckRequest):
             }
             for item in j.get("items", [])
         ],
+        "raw": j,
     }
