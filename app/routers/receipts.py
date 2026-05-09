@@ -1,5 +1,6 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from app.database import get_pool
+from app.categorization import auto_categorize
 from pydantic import BaseModel
 from typing import Optional
 from datetime import date
@@ -13,6 +14,7 @@ class ReceiptIn(BaseModel):
     payment: Optional[str] = None
     amount: float
     employee: Optional[str] = None
+    fn: Optional[str] = None
 
 @router.get("/")
 async def get_receipts():
@@ -23,11 +25,42 @@ async def get_receipts():
 @router.post("/")
 async def create_receipt(r: ReceiptIn):
     p = await get_pool()
+
+    if r.fn:
+        existing = await p.fetchrow("SELECT id FROM receipts WHERE fn=$1", r.fn)
+        if existing:
+            raise HTTPException(status_code=409, detail={"error": "duplicate", "existing_id": existing["id"]})
+
+    category = r.category
+    if not category or category == "Не указано":
+        category = auto_categorize(r.org)
+
     row = await p.fetchrow(
-        "INSERT INTO receipts (date,org,category,payment,amount,employee) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *",
-        r.date, r.org, r.category, r.payment, r.amount, r.employee
+        "INSERT INTO receipts (date,org,category,payment,amount,employee,fn) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
+        r.date, r.org, category, r.payment, r.amount, r.employee, r.fn
     )
     return dict(row)
+
+@router.post("/dedupe-cleanup/")
+async def dedupe_cleanup():
+    p = await get_pool()
+    rows = await p.fetch("""
+        SELECT MIN(id) AS keep_id, date, amount, org, COUNT(*) AS cnt
+        FROM receipts
+        GROUP BY date, amount, org
+        HAVING COUNT(*) > 1
+    """)
+    deleted_total = 0
+    kept_total = 0
+    for row in rows:
+        await p.execute(
+            "DELETE FROM receipts WHERE date=$1 AND amount=$2 AND org=$3 AND id <> $4",
+            row["date"], row["amount"], row["org"], row["keep_id"]
+        )
+        deleted_total += row["cnt"] - 1
+        kept_total += 1
+
+    return {"deleted": deleted_total, "kept": kept_total}
 
 @router.delete("/{id}")
 async def delete_receipt(id: int):

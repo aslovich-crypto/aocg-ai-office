@@ -35,4 +35,7 @@ async def init_db():
                 report_id INTEGER REFERENCES reports(id) ON DELETE CASCADE,
                 receipt_id INTEGER REFERENCES receipts(id)
             );
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS fn TEXT;
+            CREATE UNIQUE INDEX IF NOT EXISTS receipts_fn_unique
+                ON receipts(fn) WHERE fn IS NOT NULL;
         """)
