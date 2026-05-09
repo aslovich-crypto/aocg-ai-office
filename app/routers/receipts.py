@@ -15,12 +15,21 @@ class ReceiptIn(BaseModel):
     amount: float
     employee: Optional[str] = None
     fn: Optional[str] = None
+    raw_data: Optional[dict] = None
 
 @router.get("/")
 async def get_receipts():
     p = await get_pool()
     rows = await p.fetch("SELECT * FROM receipts ORDER BY date DESC")
     return [dict(r) for r in rows]
+
+@router.get("/{id}")
+async def get_receipt(id: int):
+    p = await get_pool()
+    row = await p.fetchrow("SELECT * FROM receipts WHERE id=$1", id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    return dict(row)
 
 @router.post("/")
 async def create_receipt(r: ReceiptIn):
@@ -36,8 +45,8 @@ async def create_receipt(r: ReceiptIn):
         category = auto_categorize(r.org)
 
     row = await p.fetchrow(
-        "INSERT INTO receipts (date,org,category,payment,amount,employee,fn) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
-        r.date, r.org, category, r.payment, r.amount, r.employee, r.fn
+        "INSERT INTO receipts (date,org,category,payment,amount,employee,fn,raw_data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *",
+        r.date, r.org, category, r.payment, r.amount, r.employee, r.fn, r.raw_data
     )
     return dict(row)
 

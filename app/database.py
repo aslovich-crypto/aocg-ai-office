@@ -1,12 +1,16 @@
 import asyncpg
+import json
 import os
 
 pool = None
 
+async def _init_conn(conn):
+    await conn.set_type_codec('jsonb', encoder=json.dumps, decoder=json.loads, schema='pg_catalog')
+
 async def get_pool():
     global pool
     if pool is None:
-        pool = await asyncpg.create_pool(os.environ.get("DATABASE_URL"))
+        pool = await asyncpg.create_pool(os.environ.get("DATABASE_URL"), init=_init_conn)
     return pool
 
 async def init_db():
@@ -38,4 +42,5 @@ async def init_db():
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS fn TEXT;
             CREATE UNIQUE INDEX IF NOT EXISTS receipts_fn_unique
                 ON receipts(fn) WHERE fn IS NOT NULL;
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS raw_data JSONB;
         """)
