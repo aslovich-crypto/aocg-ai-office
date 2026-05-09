@@ -12,7 +12,7 @@ class CheckRequest(BaseModel):
 @router.post("/check")
 async def check_receipt(req: CheckRequest):
     token = os.getenv("PROVERKACHEKA_TOKEN", "")
-    print(f"[FNS] token present={bool(token)}", flush=True)
+    print(f"[FNS] token present={bool(token)} len={len(token)} repr={repr(token)}", flush=True)
     if not token:
         print("[FNS] aborting — PROVERKACHEKA_TOKEN not set", flush=True)
         raise HTTPException(status_code=503, detail="PROVERKACHEKA_TOKEN not set")
