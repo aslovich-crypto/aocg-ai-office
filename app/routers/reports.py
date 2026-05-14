@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from app.database import get_pool
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
