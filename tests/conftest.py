@@ -77,13 +77,17 @@ class FakePool:
             self.receipts.append(row)
             return dict(row)
         if q.startswith("UPDATE receipts SET"):
-            set_part = q.split("SET", 1)[1].split("WHERE", 1)[0]
-            fields = [f.split("=")[0].strip() for f in set_part.split(",")]
-            rid = args[-1]
+            set_part, where_part = q.split("SET", 1)[1].split("WHERE", 1)
+            assignments = []
+            for pair in set_part.split(","):
+                m = re.match(r"\s*(\w+)\s*=\s*\$(\d+)", pair)
+                assignments.append((m.group(1), int(m.group(2)) - 1))
+            where_idx = int(re.search(r"\$(\d+)", where_part).group(1)) - 1
+            rid = args[where_idx]
             for r in self.receipts:
                 if r["id"] == rid:
-                    for i, f in enumerate(fields):
-                        r[f] = args[i]
+                    for field, idx in assignments:
+                        r[field] = args[idx]
                     return dict(r)
             return None
         if q.startswith("INSERT INTO reports"):

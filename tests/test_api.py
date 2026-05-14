@@ -47,6 +47,34 @@ async def test_create_receipt_duplicate_fn_returns_409(client):
     assert detail["existing_id"] == first.json()["id"]
 
 
+# ─── PATCH /api/receipts/{id} ─────────────────────────────────────────
+async def test_patch_receipt_single_field(client, seeded):
+    resp = await client.patch("/api/receipts/1", json={"payment": "Личная карта"})
+    assert resp.status_code == 200
+    assert resp.json()["payment"] == "Личная карта"
+    assert resp.json()["org"] == "Лукойл"  # unchanged
+
+
+async def test_patch_receipt_multiple_fields(client, seeded):
+    resp = await client.patch("/api/receipts/1", json={
+        "category": "Прочее", "org": "Газпром"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["category"] == "Прочее"
+    assert body["org"] == "Газпром"
+
+
+async def test_patch_receipt_no_fields_returns_existing(client, seeded):
+    resp = await client.patch("/api/receipts/1", json={})
+    assert resp.status_code == 200
+    assert resp.json()["org"] == "Лукойл"
+
+
+async def test_patch_receipt_not_found(client):
+    resp = await client.patch("/api/receipts/999", json={"category": "X"})
+    assert resp.status_code == 404
+
+
 # ─── DELETE /api/receipts/{id} ────────────────────────────────────────
 async def test_delete_receipt(client):
     created = await client.post("/api/receipts/", json={

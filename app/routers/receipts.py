@@ -90,10 +90,10 @@ class ReceiptPatch(BaseModel):
 async def patch_receipt(id: int, r: ReceiptPatch):
     p = await get_pool()
     fields, values = [], []
-    for i, (k, v) in enumerate([("category", r.category), ("payment", r.payment), ("org", r.org)], start=1):
+    for k, v in [("category", r.category), ("payment", r.payment), ("org", r.org)]:
         if v is not None:
-            fields.append(f"{k}=${i}")
             values.append(v)
+            fields.append(f"{k}=${len(values)}")
     if not fields:
         row = await p.fetchrow("SELECT * FROM receipts WHERE id=$1", id)
         if not row:
