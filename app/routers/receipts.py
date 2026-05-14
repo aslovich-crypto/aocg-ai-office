@@ -111,5 +111,8 @@ async def patch_receipt(id: int, r: ReceiptPatch):
 @router.delete("/{id}")
 async def delete_receipt(id: int):
     p = await get_pool()
-    await p.execute("DELETE FROM receipts WHERE id=$1", id)
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM report_items WHERE receipt_id=$1", id)
+            await conn.execute("DELETE FROM receipts WHERE id=$1", id)
     return {"ok": True}
