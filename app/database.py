@@ -43,4 +43,12 @@ async def init_db():
             CREATE UNIQUE INDEX IF NOT EXISTS receipts_fn_unique
                 ON receipts(fn) WHERE fn IS NOT NULL;
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS raw_data JSONB;
+            CREATE TABLE IF NOT EXISTS cards (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+            INSERT INTO cards (name)
+            SELECT * FROM (VALUES ('Личная карта'), ('Корпоративная карта')) AS v(name)
+            WHERE NOT EXISTS (SELECT 1 FROM cards);
         """)

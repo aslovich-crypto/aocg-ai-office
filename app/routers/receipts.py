@@ -23,6 +23,16 @@ async def get_receipts():
     rows = await p.fetch("SELECT * FROM receipts ORDER BY date DESC")
     return [dict(r) for r in rows]
 
+@router.get("/suggest-payment")
+async def suggest_payment(org: str):
+    p = await get_pool()
+    row = await p.fetchrow("""
+        SELECT payment FROM receipts
+        WHERE org=$1 AND payment IS NOT NULL AND payment <> 'Не указано'
+        GROUP BY payment ORDER BY COUNT(*) DESC LIMIT 1
+    """, org)
+    return {"payment": row["payment"] if row else None}
+
 @router.get("/{id}")
 async def get_receipt(id: int):
     p = await get_pool()

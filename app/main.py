@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import init_db
-from app.routers import receipts, reports, fns
+from app.routers import receipts, reports, fns, cards
 
 app = FastAPI(title="AOCG AI Офис API")
 
@@ -19,6 +19,7 @@ async def startup():
 app.include_router(receipts.router)
 app.include_router(reports.router)
 app.include_router(fns.router)
+app.include_router(cards.router)
 
 @app.get("/")
 async def root():
