@@ -35,7 +35,8 @@ class FakePool:
         self.reports = []
         self.report_items = []
         self.cards = []
-        self._rid = self._repid = self._cid = 0
+        self.consents = []
+        self._rid = self._repid = self._cid = self._consid = 0
 
     async def fetch(self, query, *args):
         q = _norm(query)
@@ -113,11 +114,24 @@ class FakePool:
                     c["name"] = args[0]
                     return dict(c)
             return None
+        if q.startswith("INSERT INTO user_consents"):
+            self._consid += 1
+            row = dict(id=self._consid, user_id=args[0], ip_address=args[1],
+                       policy_version=args[2], consent_text=args[3],
+                       consent_at=datetime.utcnow())
+            self.consents.append(row)
+            return dict(row)
+        if q.startswith("SELECT id, consent_at, policy_version FROM user_consents"):
+            matches = [c for c in self.consents if c["user_id"] == args[0]]
+            if not matches:
+                return None
+            latest = max(matches, key=lambda c: c["consent_at"])
+            return dict(latest)
         raise NotImplementedError(f"fetchrow: {q}")
 
     async def execute(self, query, *args):
         q = _norm(query)
-        if q.startswith(("CREATE TABLE", "ALTER TABLE", "CREATE UNIQUE INDEX")) \
+        if q.startswith(("CREATE TABLE", "ALTER TABLE", "CREATE UNIQUE INDEX", "CREATE INDEX")) \
            or "INSERT INTO cards (name) SELECT" in q:
             return "OK"
         if q.startswith("DELETE FROM receipts WHERE date=$1"):

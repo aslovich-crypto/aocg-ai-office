@@ -51,4 +51,14 @@ async def init_db():
             INSERT INTO cards (name)
             SELECT * FROM (VALUES ('Личная карта'), ('Корпоративная карта')) AS v(name)
             WHERE NOT EXISTS (SELECT 1 FROM cards);
+            CREATE TABLE IF NOT EXISTS user_consents (
+                id              SERIAL PRIMARY KEY,
+                user_id         TEXT NOT NULL,
+                consent_at      TIMESTAMPTZ DEFAULT NOW(),
+                ip_address      TEXT,
+                policy_version  TEXT NOT NULL DEFAULT '1.0',
+                consent_text    TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS user_consents_user_id_consent_at_idx
+                ON user_consents(user_id, consent_at DESC);
         """)

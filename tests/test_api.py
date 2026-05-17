@@ -303,3 +303,55 @@ async def test_ocr_missing_api_key_returns_low_confidence(client, monkeypatch):
     resp = await client.post("/api/receipts/ocr/", files=files)
     assert resp.status_code == 200
     assert resp.json()["confidence"] == "low"
+
+
+# ─── POST /api/consent/ ───────────────────────────────────────────────
+async def test_post_consent_records_row(client, db):
+    resp = await client.post("/api/consent/", json={"user_id": "local_user"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] > 0
+    assert body["policy_version"] == "1.0"
+    assert body["consent_at"] is not None
+    # row landed in the store with the frozen text
+    assert len(db.consents) == 1
+    assert db.consents[0]["user_id"] == "local_user"
+    assert "Шукалович" in db.consents[0]["consent_text"]
+
+
+async def test_post_consent_with_ip(client, db):
+    resp = await client.post("/api/consent/", json={"user_id": "u1", "ip_address": "203.0.113.4"})
+    assert resp.status_code == 200
+    assert db.consents[0]["ip_address"] == "203.0.113.4"
+
+
+async def test_post_consent_appends_on_reagree(client, db):
+    """Re-agreement is intentional — we append rather than upsert."""
+    await client.post("/api/consent/", json={"user_id": "u1"})
+    await client.post("/api/consent/", json={"user_id": "u1"})
+    assert len(db.consents) == 2
+
+
+# ─── GET /api/consent/{user_id} ───────────────────────────────────────
+async def test_get_consent_returns_null_when_none(client):
+    resp = await client.get("/api/consent/never_consented")
+    assert resp.status_code == 200
+    assert resp.json() is None
+
+
+async def test_get_consent_returns_latest(client, db):
+    await client.post("/api/consent/", json={"user_id": "u1"})
+    second = await client.post("/api/consent/", json={"user_id": "u1"})
+    resp = await client.get("/api/consent/u1")
+    assert resp.status_code == 200
+    body = resp.json()
+    # 'latest' = highest id, which the POST returned
+    assert body["id"] == second.json()["id"]
+    assert body["policy_version"] == "1.0"
+
+
+async def test_get_consent_isolates_users(client, db):
+    await client.post("/api/consent/", json={"user_id": "alice"})
+    resp = await client.get("/api/consent/bob")
+    assert resp.status_code == 200
+    assert resp.json() is None
