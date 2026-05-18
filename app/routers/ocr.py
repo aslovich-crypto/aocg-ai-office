@@ -171,4 +171,10 @@ async def ocr_receipt(file: UploadFile = File(...)):
 
     org = parsed.get("org") or ""
     parsed["category"] = auto_categorize(org) if isinstance(org, str) else "Не указано"
+    # Echo the original photo back as base64 so the client can include it in
+    # the eventual POST /api/receipts/ body (it lands in raw_data.photo_base64
+    # and is served back via GET /api/receipts/{id}/photo). Temporary path
+    # before Cloudflare R2 is wired in — once R2 exists this becomes a URL
+    # via the receipts.photo_url column.
+    parsed["photo_base64"] = image_b64
     return parsed

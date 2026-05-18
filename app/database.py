@@ -43,6 +43,8 @@ async def init_db():
             CREATE UNIQUE INDEX IF NOT EXISTS receipts_fn_unique
                 ON receipts(fn) WHERE fn IS NOT NULL;
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS raw_data JSONB;
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual';
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS photo_url TEXT;
             CREATE TABLE IF NOT EXISTS cards (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(100) NOT NULL,

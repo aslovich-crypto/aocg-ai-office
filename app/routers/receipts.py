@@ -1,11 +1,26 @@
-from fastapi import APIRouter, HTTPException
-from app.database import get_pool
-from app.categorization import auto_categorize
-from pydantic import BaseModel
-from typing import Optional
+import base64
+import binascii
 from datetime import date
+from typing import Optional
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import RedirectResponse, Response
+from pydantic import BaseModel
+
+from app.categorization import auto_categorize
+from app.database import get_pool
 
 router = APIRouter(prefix="/api/receipts", tags=["receipts"])
+
+# Enumerable values for `source` — the channel a receipt arrived via.
+# We don't enforce at the DB level (TEXT column) but keep this list as the
+# authoritative reference for the frontend and analytics:
+#   manual    — user typed it in
+#   qr_scan   — scanned a fiscal QR; FNS lookup succeeded
+#   photo_ocr — OCR'd a photo via Claude Vision
+#   fns       — created from FNS data through some other flow (reserved)
+DEFAULT_SOURCE = "manual"
+
 
 class ReceiptIn(BaseModel):
     date: date
@@ -16,6 +31,8 @@ class ReceiptIn(BaseModel):
     employee: Optional[str] = None
     fn: Optional[str] = None
     raw_data: Optional[dict] = None
+    source: Optional[str] = None       # 'manual' | 'qr_scan' | 'photo_ocr' | 'fns'
+    photo_url: Optional[str] = None    # external URL (Cloudflare R2 etc.) when set
 
 @router.get("/")
 async def get_receipts():
@@ -32,6 +49,36 @@ async def suggest_payment(org: str):
         GROUP BY payment ORDER BY COUNT(*) DESC LIMIT 1
     """, org)
     return {"payment": row["payment"] if row else None}
+
+@router.get("/{id}/photo")
+async def get_receipt_photo(id: int):
+    """
+    Return the receipt's photo.
+
+    Resolution order:
+      1. photo_url  → 302 redirect (external storage; e.g. Cloudflare R2).
+      2. raw_data.photo_base64 → inline image bytes (temporary, before R2).
+      3. neither  → 404.
+
+    Until R2 is wired up, /api/receipts/ocr/ stuffs the source photo into
+    raw_data.photo_base64 and this endpoint serves it back as image/jpeg
+    (browsers content-sniff PNG/WEBP fine too).
+    """
+    p = await get_pool()
+    row = await p.fetchrow("SELECT photo_url, raw_data FROM receipts WHERE id=$1", id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Receipt not found")
+    if row["photo_url"]:
+        return RedirectResponse(url=row["photo_url"], status_code=302)
+    raw = row["raw_data"] if isinstance(row["raw_data"], dict) else {}
+    photo_b64 = raw.get("photo_base64") if raw else None
+    if not photo_b64:
+        raise HTTPException(status_code=404, detail="No photo for this receipt")
+    try:
+        photo_bytes = base64.b64decode(photo_b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=500, detail="Corrupt photo data")
+    return Response(content=photo_bytes, media_type="image/jpeg")
 
 @router.get("/{id}")
 async def get_receipt(id: int):
@@ -54,9 +101,13 @@ async def create_receipt(r: ReceiptIn):
     if not category or category == "Не указано":
         category = auto_categorize(r.org)
 
+    source = r.source or DEFAULT_SOURCE
+
     row = await p.fetchrow(
-        "INSERT INTO receipts (date,org,category,payment,amount,employee,fn,raw_data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *",
-        r.date, r.org, category, r.payment, r.amount, r.employee, r.fn, r.raw_data
+        "INSERT INTO receipts (date,org,category,payment,amount,employee,fn,raw_data,source,photo_url) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *",
+        r.date, r.org, category, r.payment, r.amount, r.employee, r.fn, r.raw_data,
+        source, r.photo_url,
     )
     return dict(row)
 

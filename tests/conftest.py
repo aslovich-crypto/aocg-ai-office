@@ -68,13 +68,22 @@ class FakePool:
             return {"payment": max(counts, key=counts.get)} if counts else None
         if q.startswith("SELECT * FROM receipts WHERE id=$1"):
             return next((dict(r) for r in self.receipts if r["id"] == args[0]), None)
+        if q.startswith("SELECT photo_url, raw_data FROM receipts WHERE id=$1"):
+            r = next((x for x in self.receipts if x["id"] == args[0]), None)
+            return dict(photo_url=r.get("photo_url"), raw_data=r.get("raw_data")) if r else None
         if q.startswith("SELECT id FROM receipts WHERE fn=$1"):
             return next(({"id": r["id"]} for r in self.receipts if r.get("fn") == args[0]), None)
         if q.startswith("INSERT INTO receipts"):
             self._rid += 1
+            # 10-arg insert; the trailing source/photo_url were added in the
+            # source+photo migration. Older callers (if any) would pass 8 args
+            # — pad with defaults so existing tests don't churn.
+            args = list(args) + [None] * (10 - len(args))
             row = dict(id=self._rid, date=args[0], org=args[1], category=args[2],
                        payment=args[3], amount=args[4], employee=args[5],
-                       fn=args[6], raw_data=args[7], created_at=datetime.utcnow())
+                       fn=args[6], raw_data=args[7],
+                       source=args[8] or "manual", photo_url=args[9],
+                       created_at=datetime.utcnow())
             self.receipts.append(row)
             return dict(row)
         if q.startswith("UPDATE receipts SET"):
@@ -210,7 +219,8 @@ def seeded(db):
     now = datetime.utcnow()
     db.receipts.append(dict(id=1, date=date(2026, 5, 10), org="Лукойл", category="Топливо",
                             payment="Корп.карта", amount=5000.0, employee=None,
-                            fn="FN-EXISTING-1", raw_data=None, created_at=now))
+                            fn="FN-EXISTING-1", raw_data=None,
+                            source="manual", photo_url=None, created_at=now))
     db._rid = 1
     db.cards.append(dict(id=1, name="Корп.карта", created_at=now))
     db._cid = 1

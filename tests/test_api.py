@@ -355,3 +355,88 @@ async def test_get_consent_isolates_users(client, db):
     resp = await client.get("/api/consent/bob")
     assert resp.status_code == 200
     assert resp.json() is None
+
+
+# ─── POST /api/receipts/  source + photo_url ──────────────────────────
+async def test_create_receipt_defaults_source_to_manual(client):
+    payload = {"date": "2026-05-17", "org": "Магнит", "amount": 100.0}
+    body = (await client.post("/api/receipts/", json=payload)).json()
+    assert body["source"] == "manual"
+    assert body["photo_url"] is None
+
+
+async def test_create_receipt_honors_explicit_source(client):
+    payload = {"date": "2026-05-17", "org": "Магнит", "amount": 100.0,
+               "source": "qr_scan"}
+    body = (await client.post("/api/receipts/", json=payload)).json()
+    assert body["source"] == "qr_scan"
+
+
+async def test_create_receipt_persists_photo_url(client):
+    payload = {"date": "2026-05-17", "org": "Магнит", "amount": 100.0,
+               "source": "photo_ocr", "photo_url": "https://r2.example/abc.jpg"}
+    body = (await client.post("/api/receipts/", json=payload)).json()
+    assert body["source"] == "photo_ocr"
+    assert body["photo_url"] == "https://r2.example/abc.jpg"
+
+
+async def test_get_receipts_returns_source_field(client, seeded):
+    body = (await client.get("/api/receipts/")).json()
+    assert "source" in body[0]
+    assert body[0]["source"] == "manual"  # seeded receipt defaults
+
+
+# ─── GET /api/receipts/{id}/photo ─────────────────────────────────────
+import base64 as _b64
+
+# A minimal 1×1 PNG so the byte-equality assertion is meaningful.
+_PNG_1x1_BYTES = _b64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+)
+
+
+async def test_get_photo_404_when_receipt_missing(client):
+    resp = await client.get("/api/receipts/9999/photo")
+    assert resp.status_code == 404
+
+
+async def test_get_photo_404_when_no_photo(client):
+    payload = {"date": "2026-05-17", "org": "Магнит", "amount": 100.0}
+    created = (await client.post("/api/receipts/", json=payload)).json()
+    resp = await client.get(f"/api/receipts/{created['id']}/photo")
+    assert resp.status_code == 404
+
+
+async def test_get_photo_returns_inline_bytes_from_base64(client):
+    photo_b64 = _b64.b64encode(_PNG_1x1_BYTES).decode("ascii")
+    payload = {"date": "2026-05-17", "org": "Магнит", "amount": 100.0,
+               "source": "photo_ocr",
+               "raw_data": {"photo_base64": photo_b64, "items": []}}
+    created = (await client.post("/api/receipts/", json=payload)).json()
+    resp = await client.get(f"/api/receipts/{created['id']}/photo")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("image/jpeg")
+    assert resp.content == _PNG_1x1_BYTES
+
+
+async def test_get_photo_redirects_when_photo_url_set(client):
+    payload = {"date": "2026-05-17", "org": "Магнит", "amount": 100.0,
+               "source": "photo_ocr", "photo_url": "https://r2.example/abc.jpg"}
+    created = (await client.post("/api/receipts/", json=payload)).json()
+    resp = await client.get(f"/api/receipts/{created['id']}/photo",
+                            follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "https://r2.example/abc.jpg"
+
+
+async def test_get_photo_prefers_url_over_base64(client):
+    """When both are present the external URL wins — R2 supersedes inline."""
+    photo_b64 = _b64.b64encode(_PNG_1x1_BYTES).decode("ascii")
+    payload = {"date": "2026-05-17", "org": "Магнит", "amount": 100.0,
+               "source": "photo_ocr",
+               "photo_url": "https://r2.example/abc.jpg",
+               "raw_data": {"photo_base64": photo_b64}}
+    created = (await client.post("/api/receipts/", json=payload)).json()
+    resp = await client.get(f"/api/receipts/{created['id']}/photo",
+                            follow_redirects=False)
+    assert resp.status_code == 302
