@@ -4,6 +4,8 @@ import httpx
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from app.categorization import auto_categorize
+
 router = APIRouter(prefix="/api/fns", tags=["fns"])
 
 PROVERKACHEKA_URL = "https://proverkacheka.com/api/v1/check/get"
@@ -66,12 +68,14 @@ async def check_receipt(req: CheckRequest):
         return PARTIAL_RESPONSE
 
     j = data.get("data", {}).get("json", {})
+    org = j.get("user", "") or ""
     return {
-        "status":  "ok",
-        "org":     j.get("user", ""),
-        "inn":     j.get("userInn", ""),
-        "address": j.get("retailPlaceAddress", ""),
-        "total":   j.get("totalSum", 0) / 100,
+        "status":   "ok",
+        "org":      org,
+        "category": auto_categorize(org),
+        "inn":      j.get("userInn", ""),
+        "address":  j.get("retailPlaceAddress", ""),
+        "total":    j.get("totalSum", 0) / 100,
         "items": [
             {
                 "name":     item.get("name", ""),

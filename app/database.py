@@ -50,6 +50,7 @@ async def init_db():
                 name VARCHAR(100) NOT NULL,
                 created_at TIMESTAMP DEFAULT NOW()
             );
+            ALTER TABLE cards ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT FALSE;
             INSERT INTO cards (name)
             SELECT * FROM (VALUES ('Личная карта'), ('Корпоративная карта')) AS v(name)
             WHERE NOT EXISTS (SELECT 1 FROM cards);
