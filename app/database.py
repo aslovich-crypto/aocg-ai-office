@@ -64,4 +64,20 @@ async def init_db():
             );
             CREATE INDEX IF NOT EXISTS user_consents_user_id_consent_at_idx
                 ON user_consents(user_id, consent_at DESC);
+            CREATE TABLE IF NOT EXISTS users (
+                id            SERIAL PRIMARY KEY,
+                first_name    TEXT,
+                last_name     TEXT,
+                patronymic    TEXT,
+                email         TEXT,
+                inn           TEXT,
+                region        TEXT DEFAULT 'Россия',
+                employee_id   TEXT,
+                role          TEXT DEFAULT 'employee',
+                is_active     BOOLEAN DEFAULT true,
+                created_at    TIMESTAMPTZ DEFAULT NOW()
+            );
+            INSERT INTO users (first_name, last_name, patronymic, email, role)
+            SELECT 'Алексей', 'Шукалович', 'Иванович', 'a.slovich@gmail.com', 'admin'
+            WHERE NOT EXISTS (SELECT 1 FROM users);
         """)
