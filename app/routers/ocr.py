@@ -25,6 +25,8 @@ OCR_MODEL = "claude-haiku-4-5"
 OCR_TIMEOUT_SECONDS = 15.0
 OCR_MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 OCR_ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
+PDF_MIME = "application/pdf"
+PDF_RENDER_DPI = 200  # first-page render resolution; ~1654×2339 for A4
 OCR_MAX_TOKENS = 2048
 
 OCR_PROMPT = """Это фото кассового чека. Извлеки данные и верни строго в JSON без markdown:
@@ -80,6 +82,23 @@ def _fallback() -> dict:
     return {**OCR_FALLBACK, "category": auto_categorize("")}
 
 
+def _pdf_first_page_to_jpeg(data: bytes) -> bytes:
+    """Render page 1 of a PDF to JPEG bytes so the rest of the OCR path can
+    treat it like any uploaded image. fitz is imported lazily — a missing
+    PyMuPDF only breaks PDF uploads, not app startup (same defensive style as
+    the lazy Anthropic client)."""
+    import fitz  # PyMuPDF
+
+    doc = fitz.open(stream=data, filetype="pdf")
+    try:
+        if doc.page_count == 0:
+            raise ValueError("PDF has no pages")
+        pix = doc.load_page(0).get_pixmap(dpi=PDF_RENDER_DPI)
+        return pix.tobytes("jpeg")
+    finally:
+        doc.close()
+
+
 def _extract_json(text: str) -> Optional[dict]:
     """Pull the JSON object out of Claude's text response.
 
@@ -104,11 +123,12 @@ def _extract_json(text: str) -> Optional[dict]:
 
 @router.post("/ocr/")
 async def ocr_receipt(file: UploadFile = File(...)):
-    """Extract structured receipt data from a photo via Claude Vision."""
-    if not file.content_type or file.content_type not in OCR_ALLOWED_MIME:
+    """Extract structured receipt data from a photo (or PDF) via Claude Vision."""
+    is_pdf = file.content_type == PDF_MIME
+    if not file.content_type or (file.content_type not in OCR_ALLOWED_MIME and not is_pdf):
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported image type {file.content_type!r}; expected JPEG, PNG, or WEBP",
+            detail=f"Unsupported type {file.content_type!r}; expected JPEG, PNG, WEBP, or PDF",
         )
 
     # Read one byte past the limit so we can distinguish "exactly at limit"
@@ -121,6 +141,18 @@ async def ocr_receipt(file: UploadFile = File(...)):
             status_code=400,
             detail=f"File exceeds {OCR_MAX_FILE_SIZE // (1024 * 1024)} MB limit",
         )
+
+    # Electronic receipts often arrive as PDF (email receipts, "Мой налог",
+    # hotel/taxi invoices). Flatten the first page to JPEG and fall through to
+    # the same Vision path. media_type then describes the rendered image.
+    media_type = file.content_type
+    if is_pdf:
+        try:
+            data = _pdf_first_page_to_jpeg(data)
+            media_type = "image/jpeg"
+        except Exception as e:  # noqa: BLE001 — bad/empty/encrypted PDF → manual fallback
+            print(f"[OCR] PDF conversion failed: {type(e).__name__}: {e}", flush=True)
+            return _fallback()
 
     if not os.getenv("ANTHROPIC_API_KEY"):
         print("[OCR] ANTHROPIC_API_KEY not set — returning low confidence", flush=True)
@@ -144,7 +176,7 @@ async def ocr_receipt(file: UploadFile = File(...)):
                             "type": "image",
                             "source": {
                                 "type": "base64",
-                                "media_type": file.content_type,
+                                "media_type": media_type,
                                 "data": image_b64,
                             },
                         },
