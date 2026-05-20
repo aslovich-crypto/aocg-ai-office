@@ -80,4 +80,7 @@ async def init_db():
             INSERT INTO users (first_name, last_name, patronymic, email, role)
             SELECT 'Алексей', 'Шукалович', 'Иванович', 'a.slovich@gmail.com', 'admin'
             WHERE NOT EXISTS (SELECT 1 FROM users);
+            -- Backfill: receipts with a fiscal number came via QR/FNS, not manual.
+            UPDATE receipts SET source='qr_scan'
+            WHERE (fn IS NOT NULL AND fn <> '') AND (source IS NULL OR source='manual');
         """)
