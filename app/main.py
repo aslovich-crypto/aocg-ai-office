@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import init_db
-from app.routers import receipts, reports, fns, cards, ocr, consent, users
+from app.routers import receipts, reports, fns, cards, ocr, consent, users, services
 
 
 @asynccontextmanager
@@ -27,6 +27,7 @@ app.include_router(cards.router)
 app.include_router(ocr.router)
 app.include_router(consent.router)
 app.include_router(users.router)
+app.include_router(services.router)
 
 @app.get("/")
 async def root():
