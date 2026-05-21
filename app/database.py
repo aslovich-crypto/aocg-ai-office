@@ -130,5 +130,7 @@ async def init_db():
             UPDATE receipts SET org_id=(SELECT id FROM organizations ORDER BY id LIMIT 1) WHERE org_id IS NULL;
             UPDATE reports  SET org_id=(SELECT id FROM organizations ORDER BY id LIMIT 1) WHERE org_id IS NULL;
             UPDATE cards    SET org_id=(SELECT id FROM organizations ORDER BY id LIMIT 1) WHERE org_id IS NULL;
+            -- Founding user (id=1) is the organization administrator.
+            UPDATE users SET role='admin' WHERE id=1;
         """)
 
