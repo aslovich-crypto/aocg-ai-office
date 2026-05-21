@@ -92,6 +92,45 @@ async def test_qr_receipt_dedupe_still_works_by_fn(client):
     assert second.json()["detail"]["existing_id"] == first.json()["id"]
 
 
+# ─── Fn-less soft-dedup now covers every source, not just manual ──────
+async def test_photo_ocr_duplicate_within_5min_returns_409(client):
+    # The real prod dup (id 39/41) was source=photo_ocr, 0.19s apart, no fn.
+    payload = {"date": "2026-05-21", "org": "ООО Теплопроводная пошла", "amount": 6400.0,
+               "category": "Питание", "payment": "Корпоративная 3950", "source": "photo_ocr"}
+    first = await client.post("/api/receipts/", json=payload)
+    assert first.status_code == 200
+
+    second = await client.post("/api/receipts/", json=payload)
+    assert second.status_code == 409
+    detail = second.json()["detail"]
+    assert detail["error"] == "duplicate"
+    assert detail["existing_id"] == first.json()["id"]
+
+
+async def test_manual_and_photo_ocr_cross_dedupe(client):
+    # Different sources, both fn-less, identical fields → dedup by fn IS NULL.
+    base = {"date": "2026-05-21", "org": "Кафе Уют", "amount": 1500.0,
+            "category": "Питание", "payment": "Наличные"}
+    first = await client.post("/api/receipts/", json={**base, "source": "manual"})
+    assert first.status_code == 200
+
+    second = await client.post("/api/receipts/", json={**base, "source": "photo_ocr"})
+    assert second.status_code == 409
+    assert second.json()["detail"]["existing_id"] == first.json()["id"]
+
+
+async def test_qr_with_fn_dedupe_still_by_fn(client):
+    # Receipts WITH a fiscal number keep deduping by fn, never the 5-min window.
+    payload = {"date": "2026-05-21", "org": "Лукойл", "amount": 3000.0,
+               "fn": "QR-FN-777", "source": "qr_scan"}
+    first = await client.post("/api/receipts/", json=payload)
+    assert first.status_code == 200
+
+    second = await client.post("/api/receipts/", json=payload)
+    assert second.status_code == 409
+    assert second.json()["detail"]["existing_id"] == first.json()["id"]
+
+
 # ─── PATCH /api/receipts/{id} ─────────────────────────────────────────
 async def test_patch_receipt_single_field(client, seeded):
     resp = await client.patch("/api/receipts/1", json={"payment": "Личная карта"})

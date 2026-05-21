@@ -92,12 +92,15 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
 
     source = r.source or DEFAULT_SOURCE
 
-    # Manual receipts carry no fiscal number, so the fn-dedup above can't catch
-    # accidental double-submits (impatient taps while the request is in flight).
-    # Reject a manual receipt identical to one created within the last 5 minutes.
-    # IS NOT DISTINCT FROM so NULL employee/payment/category still match NULL.
+    # No fiscal number → the fn-dedup above can't help. Double-submits happen on
+    # every fn-less channel: manual typing, but also impatient taps on the
+    # photo/OCR "Использовать" button (that's how dup id 39/41 slipped in, 0.19s
+    # apart, source=photo_ocr). Reject any fn-less receipt identical to one
+    # created within the last 5 minutes — regardless of source.
+    # IS NOT DISTINCT FROM so NULL employee/payment/category match NULL: dup
+    # 39/41 had employee=NULL, so plain '=' would never have caught it.
     # Compare against the *final* category — the one actually about to be stored.
-    if source == "manual":
+    if not r.fn:
         recent = await p.fetchrow(
             """SELECT id FROM receipts
                WHERE org_id = $1
@@ -106,13 +109,17 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                  AND employee IS NOT DISTINCT FROM $4
                  AND payment  IS NOT DISTINCT FROM $5
                  AND category IS NOT DISTINCT FROM $6
-                 AND source = 'manual'
+                 AND fn IS NULL
                  AND created_at > NOW() - INTERVAL '5 minutes'
                LIMIT 1""",
             user["org_id"], r.date, r.amount, r.employee, r.payment, category,
         )
         if recent:
-            raise HTTPException(status_code=409, detail={"error": "duplicate", "existing_id": recent["id"]})
+            raise HTTPException(status_code=409, detail={
+                "error": "duplicate",
+                "message": "Похожий чек уже добавлен",
+                "existing_id": recent["id"],
+            })
 
     row = await p.fetchrow(
         "INSERT INTO receipts (date,org,category,payment,amount,employee,fn,raw_data,source,photo_url,org_id) "
