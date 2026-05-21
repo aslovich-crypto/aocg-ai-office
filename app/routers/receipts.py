@@ -92,6 +92,28 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
 
     source = r.source or DEFAULT_SOURCE
 
+    # Manual receipts carry no fiscal number, so the fn-dedup above can't catch
+    # accidental double-submits (impatient taps while the request is in flight).
+    # Reject a manual receipt identical to one created within the last 5 minutes.
+    # IS NOT DISTINCT FROM so NULL employee/payment/category still match NULL.
+    # Compare against the *final* category — the one actually about to be stored.
+    if source == "manual":
+        recent = await p.fetchrow(
+            """SELECT id FROM receipts
+               WHERE org_id = $1
+                 AND date = $2
+                 AND amount = $3
+                 AND employee IS NOT DISTINCT FROM $4
+                 AND payment  IS NOT DISTINCT FROM $5
+                 AND category IS NOT DISTINCT FROM $6
+                 AND source = 'manual'
+                 AND created_at > NOW() - INTERVAL '5 minutes'
+               LIMIT 1""",
+            user["org_id"], r.date, r.amount, r.employee, r.payment, category,
+        )
+        if recent:
+            raise HTTPException(status_code=409, detail={"error": "duplicate", "existing_id": recent["id"]})
+
     row = await p.fetchrow(
         "INSERT INTO receipts (date,org,category,payment,amount,employee,fn,raw_data,source,photo_url,org_id) "
         "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *",

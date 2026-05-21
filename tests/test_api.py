@@ -4,6 +4,8 @@ Run against an in-memory fake pool (see conftest.py) — no real database is
 touched. Each test gets a fresh store via the `db` / `seeded` fixtures.
 """
 
+from datetime import date, datetime, timedelta
+
 
 # ─── GET /api/receipts/ ───────────────────────────────────────────────
 async def test_get_receipts_returns_list(client):
@@ -45,6 +47,49 @@ async def test_create_receipt_duplicate_fn_returns_409(client):
     detail = second.json()["detail"]
     assert detail["error"] == "duplicate"
     assert detail["existing_id"] == first.json()["id"]
+
+
+# ─── Manual-receipt soft-dedup (no fn) -> 409 within 5 minutes ────────
+async def test_manual_receipt_duplicate_within_5min_returns_409(client):
+    payload = {"date": "2025-05-21", "org": "ООО Тепленькая пошла", "amount": 6400.0,
+               "category": "Питание", "payment": "Корпоративная 3950", "source": "manual"}
+    first = await client.post("/api/receipts/", json=payload)
+    assert first.status_code == 200
+
+    # Identical manual receipt seconds later — the impatient double-tap case.
+    second = await client.post("/api/receipts/", json=payload)
+    assert second.status_code == 409
+    detail = second.json()["detail"]
+    assert detail["error"] == "duplicate"
+    assert detail["existing_id"] == first.json()["id"]
+
+
+async def test_manual_receipt_same_data_after_5min_succeeds(client, db):
+    # Same receipt, but the earlier one was created > 5 min ago: not a dup.
+    old = datetime.utcnow() - timedelta(minutes=6)
+    db.receipts.append(dict(id=1, date=date(2025, 5, 21), org="ООО Тепленькая пошла",
+                            category="Питание", payment="Корпоративная 3950",
+                            amount=6400.0, employee=None, fn=None, raw_data=None,
+                            source="manual", photo_url=None, org_id=1, created_at=old))
+    db._rid = 1
+
+    payload = {"date": "2025-05-21", "org": "ООО Тепленькая пошла", "amount": 6400.0,
+               "category": "Питание", "payment": "Корпоративная 3950", "source": "manual"}
+    resp = await client.post("/api/receipts/", json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["id"] != 1  # a brand-new receipt, not the stale one
+
+
+async def test_qr_receipt_dedupe_still_works_by_fn(client):
+    # QR/FNS path is untouched: dedup is by fiscal number, not the 5-min window.
+    payload = {"date": "2025-05-21", "org": "Лукойл", "amount": 3000.0,
+               "fn": "QR-FN-555", "source": "qr_scan"}
+    first = await client.post("/api/receipts/", json=payload)
+    assert first.status_code == 200
+
+    second = await client.post("/api/receipts/", json=payload)
+    assert second.status_code == 409
+    assert second.json()["detail"]["existing_id"] == first.json()["id"]
 
 
 # ─── PATCH /api/receipts/{id} ─────────────────────────────────────────
