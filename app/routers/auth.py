@@ -116,8 +116,27 @@ async def register(body: RegisterIn):
     email = body.email.strip().lower()
     _validate(email, body.password)
     p = await get_pool()
-    if await p.fetchrow("SELECT id FROM users WHERE lower(email)=$1", email):
-        raise HTTPException(status_code=409, detail="Этот email уже зарегистрирован")
+    existing = await p.fetchrow("SELECT * FROM users WHERE lower(email)=$1", email)
+    if existing:
+        if existing["password_hash"]:
+            raise HTTPException(status_code=409, detail="Этот email уже зарегистрирован")
+        # Claim a password-less seeded account (the pre-auth admin): set the
+        # password and keep its existing organization & data — don't make a new one.
+        auto_verify = not email_enabled()
+        verify_tok = None if auto_verify else uuid.uuid4().hex
+        row = await p.fetchrow(
+            """UPDATE users SET password_hash=$1,
+                      phone=COALESCE($2, phone),
+                      first_name=COALESCE(NULLIF($3,''), first_name),
+                      last_name=COALESCE(NULLIF($4,''), last_name),
+                      is_email_verified=$5, email_verify_token=$6
+               WHERE id=$7 RETURNING *""",
+            hash_password(body.password), body.phone, body.first_name, body.last_name,
+            auto_verify, verify_tok, existing["id"])
+        if auto_verify:
+            return await _auth_payload(p, row)
+        send_verification_email(email, f"{APP_URL}/verify-email?token={verify_tok}")
+        return {"verified": False, "message": "Проверьте email для подтверждения аккаунта"}
 
     org_type = "person" if body.org_type == "person" else "company"
     org_name = (body.org_name or "").strip() or (f"{body.first_name} {body.last_name}".strip() or "Личный кабинет")
