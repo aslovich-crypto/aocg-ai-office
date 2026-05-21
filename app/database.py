@@ -83,4 +83,52 @@ async def init_db():
             -- Backfill: receipts with a fiscal number came via QR/FNS, not manual.
             UPDATE receipts SET source='qr_scan'
             WHERE (fn IS NOT NULL AND fn <> '') AND (source IS NULL OR source='manual');
+
+            -- ─── AUTH & ORGANIZATIONS (feat/auth-system) ───
+            CREATE TABLE IF NOT EXISTS organizations (
+                id          SERIAL PRIMARY KEY,
+                name        TEXT NOT NULL,
+                inn         TEXT,
+                type        TEXT NOT NULL DEFAULT 'company',  -- 'person' | 'company'
+                owner_id    INTEGER,
+                created_at  TIMESTAMPTZ DEFAULT NOW()
+            );
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id INTEGER REFERENCES organizations(id);
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS is_email_verified BOOLEAN DEFAULT false;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verify_token TEXT;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_attempts INTEGER DEFAULT 0;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS org_id INTEGER;
+            ALTER TABLE reports  ADD COLUMN IF NOT EXISTS org_id INTEGER;
+            ALTER TABLE cards    ADD COLUMN IF NOT EXISTS org_id INTEGER;
+            CREATE TABLE IF NOT EXISTS invite_links (
+                id          SERIAL PRIMARY KEY,
+                token       TEXT UNIQUE NOT NULL,
+                org_id      INTEGER NOT NULL REFERENCES organizations(id),
+                role        TEXT NOT NULL DEFAULT 'employee',
+                created_by  INTEGER REFERENCES users(id),
+                expires_at  TIMESTAMPTZ NOT NULL,
+                max_uses    INTEGER DEFAULT 1,
+                uses_count  INTEGER DEFAULT 0,
+                is_active   BOOLEAN DEFAULT true,
+                created_at  TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE TABLE IF NOT EXISTS revoked_tokens (
+                id          SERIAL PRIMARY KEY,
+                token_hash  TEXT NOT NULL,
+                expires_at  TIMESTAMPTZ NOT NULL
+            );
+            -- Bootstrap a default org so existing single-tenant data isn't orphaned
+            -- once org filtering turns on; assign all current rows to it.
+            INSERT INTO organizations (name, type, owner_id)
+            SELECT 'АОЦГ', 'company', (SELECT id FROM users ORDER BY id LIMIT 1)
+            WHERE NOT EXISTS (SELECT 1 FROM organizations);
+            UPDATE users    SET org_id=(SELECT id FROM organizations ORDER BY id LIMIT 1) WHERE org_id IS NULL;
+            UPDATE receipts SET org_id=(SELECT id FROM organizations ORDER BY id LIMIT 1) WHERE org_id IS NULL;
+            UPDATE reports  SET org_id=(SELECT id FROM organizations ORDER BY id LIMIT 1) WHERE org_id IS NULL;
+            UPDATE cards    SET org_id=(SELECT id FROM organizations ORDER BY id LIMIT 1) WHERE org_id IS NULL;
         """)
+

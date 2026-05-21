@@ -1,0 +1,83 @@
+"""Password hashing + JWT tokens + the get_current_user dependency.
+
+Reads config from env (set these on Railway at cutover):
+  JWT_SECRET_KEY, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS
+A dev fallback secret is used when JWT_SECRET_KEY is unset so the branch boots,
+but it MUST be set in production.
+"""
+
+import os
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+
+from app.database import get_pool
+
+JWT_SECRET = os.getenv("JWT_SECRET_KEY", "dev-insecure-secret-change-me")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "30"))
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
+
+
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def verify_password(plain: str, hashed: Optional[str]) -> bool:
+    if not hashed:
+        return False
+    try:
+        return pwd_context.verify(plain, hashed)
+    except Exception:  # noqa: BLE001 — malformed hash → treat as mismatch
+        return False
+
+
+def _create_token(user_id: int, kind: str, expires: timedelta) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {"sub": str(user_id), "type": kind, "iat": now, "exp": now + expires}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def create_access_token(user_id: int) -> str:
+    return _create_token(user_id, "access", timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+
+
+def create_refresh_token(user_id: int) -> str:
+    return _create_token(user_id, "refresh", timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS))
+
+
+def verify_token(token: str, expected_type: str = "access") -> Optional[int]:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != expected_type:
+            return None
+        sub = payload.get("sub")
+        return int(sub) if sub is not None else None
+    except (JWTError, ValueError):
+        return None
+
+
+async def get_current_user(token: Optional[str] = Depends(oauth2_scheme)) -> dict:
+    """Resolve the bearer access token to an active user row, or 401."""
+    cred_exc = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Не авторизован",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if not token:
+        raise cred_exc
+    user_id = verify_token(token, "access")
+    if user_id is None:
+        raise cred_exc
+    p = await get_pool()
+    row = await p.fetchrow("SELECT * FROM users WHERE id=$1 AND is_active=true", user_id)
+    if not row:
+        raise cred_exc
+    return dict(row)

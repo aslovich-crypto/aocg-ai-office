@@ -3,18 +3,17 @@ import binascii
 from datetime import date
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse, Response
 from pydantic import BaseModel
 
+from app.auth import get_current_user
 from app.categorization import auto_categorize
 from app.database import get_pool
 
 router = APIRouter(prefix="/api/receipts", tags=["receipts"])
 
 # Enumerable values for `source` — the channel a receipt arrived via.
-# We don't enforce at the DB level (TEXT column) but keep this list as the
-# authoritative reference for the frontend and analytics:
 #   manual    — user typed it in
 #   qr_scan   — scanned a fiscal QR; FNS lookup succeeded
 #   photo_ocr — OCR'd a photo via Claude Vision
@@ -34,38 +33,28 @@ class ReceiptIn(BaseModel):
     source: Optional[str] = None       # 'manual' | 'qr_scan' | 'photo_ocr' | 'fns'
     photo_url: Optional[str] = None    # external URL (Cloudflare R2 etc.) when set
 
+
 @router.get("/")
-async def get_receipts():
+async def get_receipts(user: dict = Depends(get_current_user)):
     p = await get_pool()
-    rows = await p.fetch("SELECT * FROM receipts ORDER BY date DESC")
+    rows = await p.fetch("SELECT * FROM receipts WHERE org_id=$1 ORDER BY date DESC", user["org_id"])
     return [dict(r) for r in rows]
 
 @router.get("/suggest-payment")
-async def suggest_payment(org: str):
+async def suggest_payment(org: str, user: dict = Depends(get_current_user)):
     p = await get_pool()
     row = await p.fetchrow("""
         SELECT payment FROM receipts
-        WHERE org=$1 AND payment IS NOT NULL AND payment <> 'Не указано'
+        WHERE org=$1 AND org_id=$2 AND payment IS NOT NULL AND payment <> 'Не указано'
         GROUP BY payment ORDER BY COUNT(*) DESC LIMIT 1
-    """, org)
+    """, org, user["org_id"])
     return {"payment": row["payment"] if row else None}
 
 @router.get("/{id}/photo")
-async def get_receipt_photo(id: int):
-    """
-    Return the receipt's photo.
-
-    Resolution order:
-      1. photo_url  → 302 redirect (external storage; e.g. Cloudflare R2).
-      2. raw_data.photo_base64 → inline image bytes (temporary, before R2).
-      3. neither  → 404.
-
-    Until R2 is wired up, /api/receipts/ocr/ stuffs the source photo into
-    raw_data.photo_base64 and this endpoint serves it back as image/jpeg
-    (browsers content-sniff PNG/WEBP fine too).
-    """
+async def get_receipt_photo(id: int, user: dict = Depends(get_current_user)):
+    """Return the receipt's photo (photo_url redirect, or inline raw_data.photo_base64)."""
     p = await get_pool()
-    row = await p.fetchrow("SELECT photo_url, raw_data FROM receipts WHERE id=$1", id)
+    row = await p.fetchrow("SELECT photo_url, raw_data FROM receipts WHERE id=$1 AND org_id=$2", id, user["org_id"])
     if not row:
         raise HTTPException(status_code=404, detail="Receipt not found")
     if row["photo_url"]:
@@ -81,19 +70,19 @@ async def get_receipt_photo(id: int):
     return Response(content=photo_bytes, media_type="image/jpeg")
 
 @router.get("/{id}")
-async def get_receipt(id: int):
+async def get_receipt(id: int, user: dict = Depends(get_current_user)):
     p = await get_pool()
-    row = await p.fetchrow("SELECT * FROM receipts WHERE id=$1", id)
+    row = await p.fetchrow("SELECT * FROM receipts WHERE id=$1 AND org_id=$2", id, user["org_id"])
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
     return dict(row)
 
 @router.post("/")
-async def create_receipt(r: ReceiptIn):
+async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     p = await get_pool()
 
     if r.fn:
-        existing = await p.fetchrow("SELECT id FROM receipts WHERE fn=$1", r.fn)
+        existing = await p.fetchrow("SELECT id FROM receipts WHERE fn=$1 AND org_id=$2", r.fn, user["org_id"])
         if existing:
             raise HTTPException(status_code=409, detail={"error": "duplicate", "existing_id": existing["id"]})
 
@@ -104,28 +93,28 @@ async def create_receipt(r: ReceiptIn):
     source = r.source or DEFAULT_SOURCE
 
     row = await p.fetchrow(
-        "INSERT INTO receipts (date,org,category,payment,amount,employee,fn,raw_data,source,photo_url) "
-        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *",
+        "INSERT INTO receipts (date,org,category,payment,amount,employee,fn,raw_data,source,photo_url,org_id) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *",
         r.date, r.org, category, r.payment, r.amount, r.employee, r.fn, r.raw_data,
-        source, r.photo_url,
+        source, r.photo_url, user["org_id"],
     )
     return dict(row)
 
 @router.post("/dedupe-cleanup/")
-async def dedupe_cleanup():
+async def dedupe_cleanup(user: dict = Depends(get_current_user)):
     p = await get_pool()
     rows = await p.fetch("""
         SELECT MIN(id) AS keep_id, date, amount, org, COUNT(*) AS cnt
-        FROM receipts
+        FROM receipts WHERE org_id=$1
         GROUP BY date, amount, org
         HAVING COUNT(*) > 1
-    """)
+    """, user["org_id"])
     deleted_total = 0
     kept_total = 0
     for row in rows:
         await p.execute(
-            "DELETE FROM receipts WHERE date=$1 AND amount=$2 AND org=$3 AND id <> $4",
-            row["date"], row["amount"], row["org"], row["keep_id"]
+            "DELETE FROM receipts WHERE date=$1 AND amount=$2 AND org=$3 AND org_id=$4 AND id <> $5",
+            row["date"], row["amount"], row["org"], user["org_id"], row["keep_id"]
         )
         deleted_total += row["cnt"] - 1
         kept_total += 1
@@ -138,7 +127,7 @@ class ReceiptPatch(BaseModel):
     org: Optional[str] = None
 
 @router.patch("/{id}")
-async def patch_receipt(id: int, r: ReceiptPatch):
+async def patch_receipt(id: int, r: ReceiptPatch, user: dict = Depends(get_current_user)):
     p = await get_pool()
     fields, values = [], []
     for k, v in [("category", r.category), ("payment", r.payment), ("org", r.org)]:
@@ -146,13 +135,15 @@ async def patch_receipt(id: int, r: ReceiptPatch):
             values.append(v)
             fields.append(f"{k}=${len(values)}")
     if not fields:
-        row = await p.fetchrow("SELECT * FROM receipts WHERE id=$1", id)
+        row = await p.fetchrow("SELECT * FROM receipts WHERE id=$1 AND org_id=$2", id, user["org_id"])
         if not row:
             raise HTTPException(status_code=404, detail="Not found")
         return dict(row)
     values.append(id)
+    values.append(user["org_id"])
     row = await p.fetchrow(
-        f"UPDATE receipts SET {', '.join(fields)} WHERE id=${len(values)} RETURNING *",
+        f"UPDATE receipts SET {', '.join(fields)} "
+        f"WHERE id=${len(values) - 1} AND org_id=${len(values)} RETURNING *",
         *values
     )
     if not row:
@@ -160,10 +151,10 @@ async def patch_receipt(id: int, r: ReceiptPatch):
     return dict(row)
 
 @router.delete("/{id}")
-async def delete_receipt(id: int):
+async def delete_receipt(id: int, user: dict = Depends(get_current_user)):
     p = await get_pool()
     async with p.acquire() as conn:
         async with conn.transaction():
             await conn.execute("DELETE FROM report_items WHERE receipt_id=$1", id)
-            await conn.execute("DELETE FROM receipts WHERE id=$1", id)
+            await conn.execute("DELETE FROM receipts WHERE id=$1 AND org_id=$2", id, user["org_id"])
     return {"ok": True}
