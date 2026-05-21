@@ -101,6 +101,7 @@ async def init_db():
             ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_attempts INTEGER DEFAULT 0;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS employee_number VARCHAR(20);
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS org_id INTEGER;
             ALTER TABLE reports  ADD COLUMN IF NOT EXISTS org_id INTEGER;
             ALTER TABLE cards    ADD COLUMN IF NOT EXISTS org_id INTEGER;
