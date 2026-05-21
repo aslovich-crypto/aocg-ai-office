@@ -65,7 +65,7 @@ class LogoutIn(BaseModel):
 
 class InviteCreateIn(BaseModel):
     role: str = "employee"
-    expires_hours: int = 24
+    expires_hours: Optional[int] = None   # None = permanent (no expiry)
     max_uses: int = 1
 
 
@@ -243,7 +243,7 @@ def _require_admin(user: dict):
 async def invite_create(body: InviteCreateIn, user: dict = Depends(get_current_user)):
     _require_admin(user)
     token = secrets.token_urlsafe(32)
-    expires = datetime.now(timezone.utc) + timedelta(hours=body.expires_hours)
+    expires = None if body.expires_hours is None else datetime.now(timezone.utc) + timedelta(hours=body.expires_hours)
     p = await get_pool()
     row = await p.fetchrow(
         """INSERT INTO invite_links (token, org_id, role, created_by, expires_at, max_uses)
@@ -251,7 +251,7 @@ async def invite_create(body: InviteCreateIn, user: dict = Depends(get_current_u
         token, user["org_id"], body.role, user["id"], expires, body.max_uses)
     return {"token": token, "invite_url": f"{APP_URL}/join/{token}",
             "role": body.role, "max_uses": body.max_uses,
-            "expires_at": row["expires_at"].isoformat()}
+            "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None}
 
 
 @router.get("/invite/validate/{token}")
@@ -259,12 +259,14 @@ async def invite_validate(token: str):
     p = await get_pool()
     row = await p.fetchrow("SELECT * FROM invite_links WHERE token=$1", token)
     now = datetime.now(timezone.utc)
-    valid = bool(row and row["is_active"] and row["expires_at"] > now and row["uses_count"] < row["max_uses"])
+    valid = bool(row and row["is_active"]
+                 and (row["expires_at"] is None or row["expires_at"] > now)
+                 and row["uses_count"] < row["max_uses"])
     org = await _org(p, row["org_id"]) if row else None
     return {"is_valid": valid,
             "role": row["role"] if row else None,
             "org_name": org["name"] if org else None,
-            "expires_at": row["expires_at"].isoformat() if row else None}
+            "expires_at": row["expires_at"].isoformat() if row and row["expires_at"] else None}
 
 
 @router.post("/auth/register-by-invite")
@@ -274,7 +276,9 @@ async def register_by_invite(body: RegisterByInviteIn):
     p = await get_pool()
     inv = await p.fetchrow("SELECT * FROM invite_links WHERE token=$1", body.token)
     now = datetime.now(timezone.utc)
-    if not (inv and inv["is_active"] and inv["expires_at"] > now and inv["uses_count"] < inv["max_uses"]):
+    if not (inv and inv["is_active"]
+            and (inv["expires_at"] is None or inv["expires_at"] > now)
+            and inv["uses_count"] < inv["max_uses"]):
         raise HTTPException(status_code=400, detail="Ссылка недействительна или истекла")
     if await p.fetchrow("SELECT id FROM users WHERE lower(email)=$1", email):
         raise HTTPException(status_code=409, detail="Этот email уже зарегистрирован")
@@ -306,7 +310,7 @@ async def invite_list(user: dict = Depends(get_current_user)):
     rows = await p.fetch(
         "SELECT * FROM invite_links WHERE org_id=$1 AND is_active=true ORDER BY created_at DESC", user["org_id"])
     return [{"token": r["token"], "invite_url": f"{APP_URL}/join/{r['token']}", "role": r["role"],
-             "expires_at": r["expires_at"].isoformat(), "max_uses": r["max_uses"], "uses_count": r["uses_count"]}
+             "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None, "max_uses": r["max_uses"], "uses_count": r["uses_count"]}
             for r in rows]
 
 

@@ -116,6 +116,8 @@ async def init_db():
                 is_active   BOOLEAN DEFAULT true,
                 created_at  TIMESTAMPTZ DEFAULT NOW()
             );
+            -- Permanent (no-expiry) invite links: expires_at may be NULL.
+            ALTER TABLE invite_links ALTER COLUMN expires_at DROP NOT NULL;
             CREATE TABLE IF NOT EXISTS revoked_tokens (
                 id          SERIAL PRIMARY KEY,
                 token_hash  TEXT NOT NULL,
