@@ -131,6 +131,50 @@ async def test_qr_with_fn_dedupe_still_by_fn(client):
     assert second.json()["detail"]["existing_id"] == first.json()["id"]
 
 
+# ─── photo_ocr fn is unreliable → always dedupe by composite key ──────
+async def test_dedup_photo_ocr_with_fn_uses_composite_key(client):
+    # OCR-extracted fn can be off by a digit or hallucinated, so photo_ocr never
+    # dedupes by fn. Two photo_ocr receipts with the SAME composite keys but
+    # DIFFERENT fn are still a duplicate (composite branch catches it).
+    base = {"date": "2026-05-21", "org": "Кафе Уют", "amount": 1500.0,
+            "category": "Питание", "payment": "Наличные", "source": "photo_ocr"}
+    first = await client.post("/api/receipts/", json={**base, "fn": "AAAA"})
+    assert first.status_code == 200
+
+    second = await client.post("/api/receipts/", json={**base, "fn": "BBBB"})
+    assert second.status_code == 409
+    detail = second.json()["detail"]
+    assert detail["error"] == "duplicate"
+    assert detail["existing_id"] == first.json()["id"]
+
+
+async def test_dedup_qr_scan_uses_fn(client):
+    # qr_scan fn comes from FNS → trustworthy. Two qr_scan receipts with the same
+    # composite keys but DIFFERENT fn are two distinct receipts, not a dup.
+    base = {"date": "2026-05-21", "org": "Лукойл", "amount": 3000.0,
+            "category": "Топливо", "payment": "Корп.карта", "source": "qr_scan"}
+    first = await client.post("/api/receipts/", json={**base, "fn": "AAAA"})
+    assert first.status_code == 200
+
+    second = await client.post("/api/receipts/", json={**base, "fn": "BBBB"})
+    assert second.status_code == 200  # the create endpoint returns 200, not 201
+    assert second.json()["id"] != first.json()["id"]
+
+
+async def test_dedup_mixed_sources(client):
+    # qr_scan stores a trustworthy fn; the same receipt re-added via photo_ocr
+    # (carrying the same OCR'd fn) must still be caught by composite key —
+    # photo_ocr ignores its own fn for dedup.
+    base = {"date": "2026-05-21", "org": "Кафе Уют", "amount": 1500.0,
+            "category": "Питание", "payment": "Наличные", "fn": "AAAA"}
+    first = await client.post("/api/receipts/", json={**base, "source": "qr_scan"})
+    assert first.status_code == 200
+
+    second = await client.post("/api/receipts/", json={**base, "source": "photo_ocr"})
+    assert second.status_code == 409
+    assert second.json()["detail"]["existing_id"] == first.json()["id"]
+
+
 # ─── PATCH /api/receipts/{id} ─────────────────────────────────────────
 async def test_patch_receipt_single_field(client, seeded):
     resp = await client.patch("/api/receipts/1", json={"payment": "Личная карта"})

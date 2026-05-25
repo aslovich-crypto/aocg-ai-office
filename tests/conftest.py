@@ -77,15 +77,17 @@ class FakePool:
         if q.startswith("SELECT id FROM receipts WHERE fn=$1"):
             return next(({"id": r["id"]} for r in self.receipts if r.get("fn") == args[0]), None)
         if q.startswith("SELECT id FROM receipts WHERE org_id = $1 AND date = $2"):
-            # Soft-dedup for fn-less receipts (any source): same org/date/amount/
-            # employee/payment/category created within the last 5 minutes. Mirrors
-            # the router's IS NOT DISTINCT FROM (NULL == NULL), fn IS NULL, window.
+            # Composite-key dedup: same org/date/amount/employee/payment/category
+            # created within the last 5 minutes, regardless of fn. Mirrors the
+            # router's IS NOT DISTINCT FROM (NULL == NULL) + 5-min window — no
+            # 'fn IS NULL' filter, so photo_ocr (which keeps its unreliable fn)
+            # still dedupes by composite key.
             org_id, d, amount, employee, payment, category = args
             cutoff = datetime.utcnow() - timedelta(minutes=5)
             for r in self.receipts:
                 if (r.get("org_id") == org_id and r["date"] == d and r["amount"] == amount
                         and r.get("employee") == employee and r.get("payment") == payment
-                        and r.get("category") == category and r.get("fn") is None
+                        and r.get("category") == category
                         and r.get("created_at") and r["created_at"] > cutoff):
                     return {"id": r["id"]}
             return None

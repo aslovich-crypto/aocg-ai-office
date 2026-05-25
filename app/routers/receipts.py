@@ -80,8 +80,14 @@ async def get_receipt(id: int, user: dict = Depends(get_current_user)):
 @router.post("/")
 async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     p = await get_pool()
+    source = r.source or DEFAULT_SOURCE
 
-    if r.fn:
+    # Для source='photo_ocr' fn ненадёжен (OCR может ошибиться в одной цифре
+    # или сгаллюцинировать). photo_ocr всегда идёт в composite-ветку, даже
+    # если OCR извлёк fn. OCR-извлечённый fn сохраняется в БД для справки,
+    # но не используется для дедупа. Надёжный fn (qr_scan / fns / введённый
+    # осознанно в manual) дедупится по fiscal number — бессрочно.
+    if r.fn and source != "photo_ocr":
         existing = await p.fetchrow("SELECT id FROM receipts WHERE fn=$1 AND org_id=$2", r.fn, user["org_id"])
         if existing:
             raise HTTPException(status_code=409, detail={"error": "duplicate", "existing_id": existing["id"]})
@@ -90,17 +96,17 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     if not category or category == "Не указано":
         category = auto_categorize(r.org)
 
-    source = r.source or DEFAULT_SOURCE
-
-    # No fiscal number → the fn-dedup above can't help. Double-submits happen on
-    # every fn-less channel: manual typing, but also impatient taps on the
-    # photo/OCR "Использовать" button (that's how dup id 39/41 slipped in, 0.19s
-    # apart, source=photo_ocr). Reject any fn-less receipt identical to one
-    # created within the last 5 minutes — regardless of source.
-    # IS NOT DISTINCT FROM so NULL employee/payment/category match NULL: dup
-    # 39/41 had employee=NULL, so plain '=' would never have caught it.
-    # Compare against the *final* category — the one actually about to be stored.
-    if not r.fn:
+    # Composite-ветка: чеки без надёжного fn — fn-less (manual без fn) ЛИБО
+    # photo_ocr (его fn игнорируем). Матчит ВСЕ чеки с теми же composite-ключами
+    # за последние 5 минут, независимо от наличия fn (поэтому здесь больше нет
+    # 'AND fn IS NULL'). Ловит и двойной тап «Использовать» (дубль id 39/41, 0.19s
+    # apart, source=photo_ocr), и случай «qr_scan создан с верным fn → тот же чек
+    # приходит через photo_ocr с OCR-ошибкой в fn».
+    # IS NOT DISTINCT FROM — чтобы NULL employee/payment/category матчили NULL
+    # (у дубля 39/41 employee=NULL, plain '=' его бы не поймал). Сравниваем с
+    # *итоговой* category — той, что реально уйдёт в БД. Риск ложных срабатываний
+    # мал: composite-ключ включает employee/payment/category.
+    if not r.fn or source == "photo_ocr":
         recent = await p.fetchrow(
             """SELECT id FROM receipts
                WHERE org_id = $1
@@ -109,7 +115,6 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                  AND employee IS NOT DISTINCT FROM $4
                  AND payment  IS NOT DISTINCT FROM $5
                  AND category IS NOT DISTINCT FROM $6
-                 AND fn IS NULL
                  AND created_at > NOW() - INTERVAL '5 minutes'
                LIMIT 1""",
             user["org_id"], r.date, r.amount, r.employee, r.payment, category,
