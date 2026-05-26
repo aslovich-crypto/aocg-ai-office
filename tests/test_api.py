@@ -439,10 +439,12 @@ async def test_ocr_rejects_empty_file(client):
 
 async def test_ocr_happy_path(client, monkeypatch):
     payload = {
-        "org": "Магнит", "inn": "7707083893", "address": "Москва",
-        "date": "2026-05-15", "time": "13:42", "amount": 1234.56,
-        "items": [{"name": "Молоко", "qty": 1, "price": 89.0, "total": 89.0}],
-        "nds": 123.45, "payment_type": "card", "fn": "FN-1",
+        "org_legal": 'ООО "Тандер"', "org_brand": "Магнит", "org_inn": "7707083893",
+        "address": "Москва", "datetime": "2026-05-15T13:42:00", "amount": 1234.56,
+        "operation_type": "purchase", "payment_form": "card", "tax_system": "usn_income",
+        "vat_20": 123.45,
+        "items": [{"position": 1, "name": "Молоко", "quantity": 1, "price": 89.0,
+                   "sum": 89.0, "vat_rate": "20"}],
         "confidence": "high",
     }
     import json as _json
@@ -452,7 +454,8 @@ async def test_ocr_happy_path(client, monkeypatch):
     resp = await client.post("/api/receipts/ocr/", files=files)
     assert resp.status_code == 200
     body = resp.json()
-    assert body["org"] == "Магнит"
+    assert body["org_brand"] == "Магнит"
+    assert body["org"] == "Магнит"            # alias: org_brand or org_legal
     assert body["amount"] == 1234.56
     # auto-categorization picks up "Магнит" → "Продукты"
     assert body["category"] == "Продукты"
@@ -460,7 +463,7 @@ async def test_ocr_happy_path(client, monkeypatch):
 
 async def test_ocr_strips_markdown_fences(client, monkeypatch):
     """Claude sometimes wraps JSON in ```json ... ``` despite the prompt."""
-    wrapped = '```json\n{"org": "Лукойл", "amount": 3000, "confidence": "medium"}\n```'
+    wrapped = '```json\n{"org_brand": "Лукойл", "amount": 3000, "confidence": "medium"}\n```'
     _install_fake(monkeypatch, lambda kw: _Response(wrapped))
 
     files = {"file": ("r.png", io.BytesIO(_PNG_1x1), "image/png")}
@@ -504,6 +507,100 @@ async def test_ocr_missing_api_key_returns_low_confidence(client, monkeypatch):
     resp = await client.post("/api/receipts/ocr/", files=files)
     assert resp.status_code == 200
     assert resp.json()["confidence"] == "low"
+
+
+# ─── ЧП E: new-standard OCR fields + backward-compat aliases ──────────
+async def test_ocr_aliases_backward_compat(client, monkeypatch):
+    """New rich response from Claude → the old aliases the frontend reads exist."""
+    payload = {
+        "org_legal": 'ООО "Денежные энергии"', "org_brand": "Aster",
+        "org_inn": "7707083893", "address": "СПб, Невский 1",
+        "datetime": "2026-05-21T12:17:00", "amount": 6660.0, "currency": "RUB",
+        "operation_type": "purchase", "payment_form": "card",
+        "payment_detail": "Корпоративная 3950", "card_last4": "3950",
+        "tax_system": "usn_income", "vat_20": 1110.0, "vat_10": None, "vat_0": 5550.0,
+        "cashier": "Дробушков Никита",
+        "items": [{"position": 1, "name": "Шакшука", "quantity": 1.0,
+                   "price": 750.0, "sum": 750.0, "vat_rate": "20"}],
+        "confidence": "high",
+    }
+    import json as _json
+    _install_fake(monkeypatch, lambda kw: _Response(_json.dumps(payload)))
+    files = {"file": ("r.png", io.BytesIO(_PNG_1x1), "image/png")}
+    body = (await client.post("/api/receipts/ocr/", files=files)).json()
+
+    # rich fields preserved
+    assert body["org_brand"] == "Aster"
+    assert body["tax_system"] == "usn_income"
+    assert body["vat_0"] == 5550.0
+    # backward-compat aliases the current frontend (handleOcrFile) reads
+    assert body["org"] == "Aster"               # org_brand or org_legal
+    assert body["amount"] == 6660.0
+    assert body["date"] == "2026-05-21"          # from datetime
+    assert body["time"] == "12:17:00"
+    assert body["payment_type"] == "card"        # from payment_form
+    assert body["inn"] == "7707083893"           # alias of org_inn
+    assert body["category"]                       # auto-categorized from org
+    assert body["nds"] == 1110.0                  # vat_20 + vat_10(None)
+    assert body["items"][0]["total"] == 750.0     # sum aliased to total
+
+
+async def test_ocr_invalid_inn_returns_null(client, monkeypatch):
+    """An OCR-misread INN with a bad checksum is dropped + a warning is added."""
+    payload = {"org_brand": "Лавка", "amount": 100.0, "org_inn": "1234567890",
+               "confidence": "high"}
+    import json as _json
+    _install_fake(monkeypatch, lambda kw: _Response(_json.dumps(payload)))
+    files = {"file": ("r.png", io.BytesIO(_PNG_1x1), "image/png")}
+    body = (await client.post("/api/receipts/ocr/", files=files)).json()
+    assert body["org_inn"] is None
+    assert body["inn"] is None
+    assert any("ИНН" in w for w in body["warnings"])
+
+
+async def test_ocr_datetime_formats(client, monkeypatch):
+    """Assorted human datetime formats normalize to ISO; junk → None."""
+    import json as _json
+    cases = {
+        "2026-05-21T12:17:00": "2026-05-21T12:17:00",
+        "21.05.2026 12:17":    "2026-05-21T12:17:00",
+        "21.05.2026":          "2026-05-21T00:00:00",
+        "2026-05-21":          "2026-05-21T00:00:00",
+        "не дата":             None,
+    }
+    for raw, expected in cases.items():
+        payload = {"org_brand": "X", "amount": 1.0, "datetime": raw, "confidence": "high"}
+        _install_fake(monkeypatch, lambda kw, p=payload: _Response(_json.dumps(p)))
+        files = {"file": ("r.png", io.BytesIO(_PNG_1x1), "image/png")}
+        body = (await client.post("/api/receipts/ocr/", files=files)).json()
+        assert body["datetime"] == expected, f"{raw!r} → {body['datetime']!r}"
+
+
+async def test_ocr_partial_response_fallback(client, monkeypatch):
+    """No org / no amount → aliases are None, so the frontend shows 'partial'."""
+    payload = {"address": "СПб", "confidence": "low"}   # neither org nor amount
+    import json as _json
+    _install_fake(monkeypatch, lambda kw: _Response(_json.dumps(payload)))
+    files = {"file": ("r.png", io.BytesIO(_PNG_1x1), "image/png")}
+    body = (await client.post("/api/receipts/ocr/", files=files)).json()
+    assert body["org"] is None        # frontend: !d.org → "partial"
+    assert body["amount"] is None
+
+
+async def test_ocr_no_fiscal_fields_requested(client, monkeypatch):
+    """The prompt must NOT ask Claude for fiscal identifiers (OCR-unreliable)."""
+    captured = {}
+
+    def capture(kw):
+        captured["prompt"] = kw["messages"][0]["content"][1]["text"]
+        return _Response('{"org_brand": "X", "amount": 1, "confidence": "high"}')
+
+    _install_fake(monkeypatch, capture)
+    files = {"file": ("r.png", io.BytesIO(_PNG_1x1), "image/png")}
+    await client.post("/api/receipts/ocr/", files=files)
+    prompt = captured["prompt"]
+    for key in ("kkt_fn", "kkt_rn", "kkt_serial", "fd_num", "fpd", "fiscalDriveNumber"):
+        assert key not in prompt
 
 
 # ─── POST /api/consent/ ───────────────────────────────────────────────

@@ -11,13 +11,18 @@ proxy in fns.py).
 
 import base64
 import json
+import logging
 import os
+from datetime import datetime
 from typing import Optional
 
 from anthropic import APIError, APITimeoutError, AsyncAnthropic
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.categorization import auto_categorize
+from app.parsers.fns_parser import validate_inn
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/receipts", tags=["receipts", "ocr"])
 
@@ -29,39 +34,64 @@ PDF_MIME = "application/pdf"
 PDF_RENDER_DPI = 200  # first-page render resolution; ~1654×2339 for A4
 OCR_MAX_TOKENS = 2048
 
-OCR_PROMPT = """Это фото кассового чека. Извлеки данные и верни строго в JSON без markdown:
+OCR_PROMPT = """Это фотография БУМАЖНОГО кассового чека. Извлеки данные и верни СТРОГО JSON без markdown, без пояснений.
+
+Все суммы — В РУБЛЯХ, как напечатано на чеке (например 6660.00, а НЕ 666000). Это физический чек: числа на нём в рублях, копейки после точки. В отличие от ФНС-API (где суммы в копейках) — здесь НЕ умножай.
+
+Формат ответа:
 {
-  "org": "название организации",
-  "inn": "ИНН если есть",
-  "address": "адрес если есть",
-  "date": "дата в формате YYYY-MM-DD",
-  "time": "время HH:MM если есть",
-  "amount": число (итоговая сумма),
-  "items": [{"name": "название", "qty": число, "price": число, "total": число}],
-  "nds": число или null,
-  "payment_type": "card" или "cash",
-  "fn": "фискальный номер если есть",
-  "confidence": "high/medium/low"
+  "org_legal": "полное юридическое название из шапки чека (ООО ..., ИП ...)",
+  "org_brand": "торговое название/бренд/вывеска, если отличается от юр.названия",
+  "org_inn": "ИНН поставщика — только цифры, без пробелов (10 или 12 цифр)",
+  "address": "адрес расчётов одной строкой",
+  "datetime": "дата и время чека в ISO: ГГГГ-ММ-ДДTЧЧ:ММ:СС (без таймзоны)",
+  "amount": число — итоговая сумма (ИТОГ) в рублях,
+  "currency": "RUB",
+  "operation_type": "purchase | refund | expense | expense_refund (по тексту ПРИХОД / ВОЗВРАТ ПРИХОДА / РАСХОД / ВОЗВРАТ РАСХОДА)",
+  "payment_form": "cash | card | prepaid | credit (по тексту НАЛИЧНЫМИ / БЕЗНАЛИЧНЫМИ / ПРЕДОПЛАТА(АВАНС) / КРЕДИТ)",
+  "payment_detail": "название карты или способ оплаты, если указано",
+  "card_last4": "последние 4 цифры карты, если видны",
+  "tax_system": "СНО поставщика: osno | usn_income | usn_income_minus_expense | psn | eshn | npd (по строке СНО / система налогообложения)",
+  "vat_20": число — сумма НДС 20% в рублях, или null,
+  "vat_10": число — сумма НДС 10% в рублях, или null,
+  "vat_0": число — сумма «без НДС» в рублях, или null,
+  "cashier": "имя кассира, если видно",
+  "items": [
+    {"position": 1, "name": "название", "quantity": число, "price": число (за единицу, руб), "sum": число (итог по позиции, руб), "vat_rate": "20 | 10 | 0 | null"}
+  ],
+  "confidence": "high | medium | low — оценка качества распознавания"
 }
-Если поле не найдено — null. Только JSON, без пояснений."""
+
+Правила:
+- Если поле не видно или не уверен — поставь null. НЕ угадывай и НЕ выдумывай.
+- ИНН — только цифры, без пробелов и кавычек.
+- Если значение видно частично или нечётко — confidence: medium или low.
+- НЕ извлекай фискальные реквизиты (ФН, ЗН ККТ, РН ККТ, ФД, ФПД), даже если они видны на чеке: это длинные числа, и опечатка в одной цифре делает их бесполезными — пропусти их.
+Только JSON."""
 
 # Shape returned when Claude can't read the receipt (timeout, API error,
-# unparseable response, missing API key, etc.). Mirrors the field set in the
-# prompt so the client doesn't need separate branches for "ok with nulls" vs
-# "everything failed".
+# unparseable response, missing API key, etc.). Mirrors the prompt's field set
+# PLUS the backward-compat aliases the current frontend reads (org/date/time/
+# payment_type/inn/nds), so the client never needs separate branches.
 OCR_FALLBACK: dict = {
-    "org": None,
-    "inn": None,
-    "address": None,
-    "date": None,
-    "time": None,
-    "amount": None,
-    "items": None,
-    "nds": None,
-    "payment_type": None,
-    "fn": None,
-    "confidence": "low",
+    # rich fields (new data standard)
+    "org_legal": None, "org_brand": None, "org_inn": None, "address": None,
+    "datetime": None, "amount": None, "currency": None, "operation_type": None,
+    "payment_form": None, "payment_detail": None, "card_last4": None,
+    "tax_system": None, "vat_20": None, "vat_10": None, "vat_0": None,
+    "cashier": None, "items": None,
+    # backward-compat aliases consumed by the current frontend (handleOcrFile)
+    "org": None, "inn": None, "date": None, "time": None,
+    "payment_type": None, "nds": None,
+    "confidence": "low", "warnings": [],
 }
+
+# Rich fields copied verbatim from Claude's JSON before aliasing.
+_OCR_RICH_FIELDS = (
+    "org_legal", "org_brand", "org_inn", "address", "amount", "currency",
+    "operation_type", "payment_form", "payment_detail", "card_last4",
+    "tax_system", "vat_20", "vat_10", "vat_0", "cashier",
+)
 
 # Module-level singleton — AsyncAnthropic holds an httpx pool, so reusing it
 # across requests avoids per-request connection setup. Initialized lazily so
@@ -79,7 +109,84 @@ def _get_anthropic_client() -> AsyncAnthropic:
 
 def _fallback() -> dict:
     """Fresh copy of OCR_FALLBACK with category filled in for an unknown org."""
-    return {**OCR_FALLBACK, "category": auto_categorize("")}
+    return {**OCR_FALLBACK, "category": auto_categorize(""), "warnings": []}
+
+
+def _normalize_datetime(value) -> Optional[str]:
+    """Coerce a date/datetime string from OCR into ISO 'YYYY-MM-DDTHH:MM:SS'.
+    Accepts ISO, 'DD.MM.YYYY HH:MM', 'DD.MM.YYYY', 'YYYY-MM-DD', etc. None on failure."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    v = value.strip()
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d %H:%M", "%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M",
+                "%d.%m.%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(v, fmt).isoformat()
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(v).isoformat()
+    except ValueError:
+        return None
+
+
+def _finalize_items(items) -> Optional[list]:
+    if not isinstance(items, list):
+        return None
+    out = []
+    for pos, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        s = item.get("sum")
+        out.append({
+            "position": item.get("position", pos),
+            "name": item.get("name"),
+            "quantity": item.get("quantity"),
+            "price": item.get("price"),
+            "sum": s,
+            "total": s,                 # back-compat alias for the old "total" key
+            "vat_rate": item.get("vat_rate"),
+        })
+    return out
+
+
+def _finalize(parsed: dict) -> dict:
+    """Take Claude's rich JSON and produce the response: rich fields + the
+    backward-compat aliases the current frontend reads. Never raises."""
+    out = {**OCR_FALLBACK, "warnings": []}
+    for k in _OCR_RICH_FIELDS:
+        out[k] = parsed.get(k)
+    out["confidence"] = parsed.get("confidence") or "low"
+    out["currency"] = out["currency"] or "RUB"
+
+    # datetime → ISO; derive back-compat date/time
+    iso = _normalize_datetime(parsed.get("datetime"))
+    out["datetime"] = iso
+    if iso and "T" in iso:
+        out["date"], out["time"] = iso.split("T", 1)
+
+    # INN checksum: drop an invalid OCR-read INN and warn (don't store garbage)
+    inn = out["org_inn"]
+    if inn is not None:
+        if validate_inn(inn):
+            out["org_inn"] = str(inn).strip()
+        else:
+            out["org_inn"] = None
+            out["warnings"].append("OCR-извлечённый ИНН невалиден, проверьте вручную")
+
+    out["items"] = _finalize_items(parsed.get("items"))
+
+    # Backward-compat aliases for the current frontend (handleOcrFile).
+    org = out["org_brand"] or out["org_legal"]
+    out["org"] = org
+    out["inn"] = out["org_inn"]
+    out["payment_type"] = out["payment_form"] if out["payment_form"] in ("cash", "card") else None
+    out["category"] = auto_categorize(org or "")
+    # nds = фактический НДС (20% + 10%); vat_0 — это «без НДС», в сумму не входит.
+    vat_parts = [v for v in (out["vat_20"], out["vat_10"]) if isinstance(v, (int, float))]
+    out["nds"] = sum(vat_parts) if vat_parts else None
+    return out
 
 
 def _pdf_first_page_to_jpeg(data: bytes) -> bytes:
@@ -151,11 +258,11 @@ async def ocr_receipt(file: UploadFile = File(...)):
             data = _pdf_first_page_to_jpeg(data)
             media_type = "image/jpeg"
         except Exception as e:  # noqa: BLE001 — bad/empty/encrypted PDF → manual fallback
-            print(f"[OCR] PDF conversion failed: {type(e).__name__}: {e}", flush=True)
+            logger.warning("OCR PDF conversion failed: %s", type(e).__name__)
             return _fallback()
 
     if not os.getenv("ANTHROPIC_API_KEY"):
-        print("[OCR] ANTHROPIC_API_KEY not set — returning low confidence", flush=True)
+        logger.warning("OCR: ANTHROPIC_API_KEY not set — returning low confidence")
         return _fallback()
 
     image_b64 = base64.standard_b64encode(data).decode("utf-8")
@@ -186,27 +293,27 @@ async def ocr_receipt(file: UploadFile = File(...)):
             ],
         )
     except APITimeoutError:
-        print("[OCR] Claude API timeout", flush=True)
+        logger.warning("OCR Claude API timeout")
         return _fallback()
     except APIError as e:
-        print(f"[OCR] Claude API error: {type(e).__name__}: {e}", flush=True)
+        logger.warning("OCR Claude API error: %s", type(e).__name__)
         return _fallback()
     except Exception as e:  # noqa: BLE001  — last-resort guard; never 500 to the client
-        print(f"[OCR] unexpected error: {type(e).__name__}: {e}", flush=True)
+        logger.warning("OCR unexpected error: %s", type(e).__name__)
         return _fallback()
 
     text = next((block.text for block in response.content if block.type == "text"), "")
     parsed = _extract_json(text)
     if parsed is None:
-        print(f"[OCR] non-JSON response from Claude: {text[:200]!r}", flush=True)
+        # 152-ФЗ: НЕ логируем содержимое ответа Claude — там могут быть ИНН/суммы.
+        logger.warning("OCR returned non-JSON, length=%d", len(text))
         return _fallback()
 
-    org = parsed.get("org") or ""
-    parsed["category"] = auto_categorize(org) if isinstance(org, str) else "Не указано"
+    result = _finalize(parsed)
     # Echo the original photo back as base64 so the client can include it in
     # the eventual POST /api/receipts/ body (it lands in raw_data.photo_base64
     # and is served back via GET /api/receipts/{id}/photo). Temporary path
     # before Cloudflare R2 is wired in — once R2 exists this becomes a URL
     # via the receipts.photo_url column.
-    parsed["photo_base64"] = image_b64
-    return parsed
+    result["photo_base64"] = image_b64
+    return result
