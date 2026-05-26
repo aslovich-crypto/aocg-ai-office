@@ -80,18 +80,36 @@ class FakePool:
             # Дедуп по фискальному номеру — per-org (WHERE kkt_fn=$1 AND org_id=$2).
             return next(({"id": r["id"]} for r in self.receipts
                          if r.get("kkt_fn") == args[0] and r.get("org_id") == args[1]), None)
-        if q.startswith("SELECT id FROM receipts WHERE org_id = $1 AND date = $2"):
-            # Composite-key dedup: same org/date/amount/employee/payment/category
-            # created within the last 5 minutes, regardless of fn. Mirrors the
-            # router's IS NOT DISTINCT FROM (NULL == NULL) + 5-min window — no
-            # 'fn IS NULL' filter, so photo_ocr (which keeps its unreliable fn)
-            # still dedupes by composite key.
-            org_id, d, amount, employee, payment, category = args
-            cutoff = datetime.utcnow() - timedelta(minutes=5)
+        if "AND source = $4" in q and "90 seconds" in q:
+            # Ветка 0 — двойной тап: date+amount+org_id+source, fn-less, окно 90 сек.
+            d, amount, org_id, source = args
+            cutoff = datetime.utcnow() - timedelta(seconds=90)
             for r in self.receipts:
-                if (r.get("org_id") == org_id and r["date"] == d and r["amount"] == amount
-                        and r.get("employee") == employee and r.get("payment") == payment
-                        and r.get("category") == category
+                if (r["date"] == d and r["amount"] == amount and r.get("org_id") == org_id
+                        and r.get("source") == source and r.get("kkt_fn") is None
+                        and r.get("created_at") and r["created_at"] > cutoff):
+                    return {"id": r["id"]}
+            return None
+        if "AND org_inn = $3" in q and "7 days" in q:
+            # Ветка 2 — сильный composite: date+amount+org_inn, окно 7 дней.
+            # Динамический fn-фильтр: при has_reliable_fn матчим только fn-less чеки.
+            d, amount, org_inn, org_id, has_reliable_fn = args
+            cutoff = datetime.utcnow() - timedelta(days=7)
+            for r in self.receipts:
+                if (r["date"] == d and r["amount"] == amount and r.get("org_inn") == org_inn
+                        and r.get("org_id") == org_id
+                        and (not has_reliable_fn or r.get("kkt_fn") is None)
+                        and r.get("created_at") and r["created_at"] > cutoff):
+                    return {"id": r["id"]}
+            return None
+        if q.startswith("SELECT id FROM receipts WHERE date = $1 AND amount = $2 AND org_id = $3 AND (NOT $4") and "7 days" in q:
+            # Ветка 3 — слабый composite: date+amount, окно 7 дней. Тот же
+            # динамический fn-фильтр, что и в сильной ветке.
+            d, amount, org_id, has_reliable_fn = args
+            cutoff = datetime.utcnow() - timedelta(days=7)
+            for r in self.receipts:
+                if (r["date"] == d and r["amount"] == amount and r.get("org_id") == org_id
+                        and (not has_reliable_fn or r.get("kkt_fn") is None)
                         and r.get("created_at") and r["created_at"] > cutoff):
                     return {"id": r["id"]}
             return None

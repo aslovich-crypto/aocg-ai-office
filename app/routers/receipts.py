@@ -90,63 +90,16 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     p = await get_pool()
     source = r.source or DEFAULT_SOURCE
     effective_kkt_fn = r.kkt_fn or r.fn   # переходный fallback: фронт пока шлёт fn
-
-    # Для source='photo_ocr' kkt_fn ненадёжен (OCR может ошибиться в одной цифре
-    # или сгаллюцинировать). photo_ocr всегда идёт в composite-ветку и НЕ пишет
-    # kkt_fn (см. INSERT ниже) — OCR-извлечённый номер остаётся только в
-    # raw_data.fn для справки. Надёжный kkt_fn (qr_scan / fns / введённый
-    # осознанно в manual) дедупится по фискальному номеру — бессрочно, per-org.
-    if effective_kkt_fn and source != "photo_ocr":
-        existing = await p.fetchrow("SELECT id FROM receipts WHERE kkt_fn=$1 AND org_id=$2",
-                                    effective_kkt_fn, user["org_id"])
-        if existing:
-            raise HTTPException(status_code=409, detail={"error": "duplicate", "existing_id": existing["id"]})
+    org_id = user["org_id"]
 
     category = r.category
     if not category or category == "Не указано":
         category = auto_categorize(r.org)
 
-    # Composite-ветка: чеки без надёжного номера — fn-less (manual без номера)
-    # ЛИБО photo_ocr (его номер игнорируем). Матчит ВСЕ чеки с теми же
-    # composite-ключами за последние 5 минут, независимо от наличия номера
-    # (поэтому здесь нет 'AND kkt_fn IS NULL'). Ловит и двойной тап «Использовать»
-    # (дубль id 39/41, 0.19s apart, source=photo_ocr), и случай «qr_scan с верным
-    # номером → тот же чек через photo_ocr с OCR-ошибкой в номере».
-    # IS NOT DISTINCT FROM — чтобы NULL employee/payment/category матчили NULL
-    # (у дубля 39/41 employee=NULL, plain '=' его бы не поймал). Сравниваем с
-    # *итоговой* category — той, что реально уйдёт в БД.
-    if not effective_kkt_fn or source == "photo_ocr":
-        recent = await p.fetchrow(
-            """SELECT id FROM receipts
-               WHERE org_id = $1
-                 AND date = $2
-                 AND amount = $3
-                 AND employee IS NOT DISTINCT FROM $4
-                 AND payment  IS NOT DISTINCT FROM $5
-                 AND category IS NOT DISTINCT FROM $6
-                 AND created_at > NOW() - INTERVAL '5 minutes'
-               LIMIT 1""",
-            user["org_id"], r.date, r.amount, r.employee, r.payment, category,
-        )
-        if recent:
-            raise HTTPException(status_code=409, detail={
-                "error": "duplicate",
-                "message": "Похожий чек уже добавлен",
-                "existing_id": recent["id"],
-            })
-
-    # Вариант A: photo_ocr НЕ пишет номер ни в fn, ни в kkt_fn (OCR-номер
-    # ненадёжен и остаётся только в raw_data.fn). Надёжные источники пишут в обе
-    # колонки — fn для backward-compat на переходный период, kkt_fn как основную.
-    if source == "photo_ocr":
-        fn_to_save = kkt_fn_to_save = None
-    else:
-        fn_to_save = kkt_fn_to_save = effective_kkt_fn
-
-    # Раскладываем raw_data в типизированные колонки: ФНС-формат для qr_scan/fns,
-    # OCR-формат для photo_ocr. Оба парсера возвращают ОДИН набор ключей, поэтому
-    # INSERT ниже общий. Сбой парсинга → пустой dict, INSERT всё равно проходит
-    # (best-effort). В лог НЕ пишем raw_data — там ИНН поставщика / имя кассира (152-ФЗ).
+    # ── Парсинг raw_data ДО дедупа: даёт effective_org_inn для composite-веток.
+    # ФНС-формат для qr_scan/fns, OCR-формат для photo_ocr; оба парсера возвращают
+    # ОДИН набор ключей (см. INSERT). Сбой → {}, чек всё равно создастся. В лог НЕ
+    # пишем raw_data — там ИНН поставщика / имя кассира (152-ФЗ).
     parsed: dict = {}
     if r.raw_data:
         try:
@@ -157,6 +110,96 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
         except Exception as e:  # noqa: BLE001 — парсинг не должен блокировать чек
             logger.warning("raw_data parse failed (source=%s): %s", source, type(e).__name__)
             parsed = {}
+    effective_org_inn = parsed.get("org_inn")   # уже провалидирован в parse_*_response
+
+    # Надёжный фискальный номер есть только у не-photo_ocr источников с номером.
+    # photo_ocr пишет kkt_fn=NULL (Вариант A) — его OCR-номер не считается надёжным.
+    has_reliable_fn = bool(effective_kkt_fn) and source != "photo_ocr"
+
+    # Дедуп — 4 ветки в строгом порядке. Жёсткий 409 только в ветках 0 и 1
+    # (точные совпадения); ветки 2/3 — мягкое предупреждение (чек создаётся),
+    # «лучше лишний чек, чем потерянный» (диагностика 26.05, фиксы C1/C2/C3).
+
+    # ── Ветка 0 — двойной тап (90 сек). Только для fn-less чеков: у источников
+    # с надёжным fn повторный тап = тот же fn и ловится веткой 1. Защита от дублей,
+    # пока фронт не показывает warning (задача №9).
+    if not has_reliable_fn:
+        dbl = await p.fetchrow(
+            """SELECT id FROM receipts
+               WHERE date = $1 AND amount = $2 AND org_id = $3 AND source = $4
+                 AND kkt_fn IS NULL
+                 AND created_at > NOW() - INTERVAL '90 seconds'
+               LIMIT 1""",
+            r.date, r.amount, org_id, source,
+        )
+        if dbl:
+            raise HTTPException(status_code=409, detail={
+                "error": "double_tap_detected",
+                "message": "Похожий чек только что добавлен. Подождите 90 секунд или измените данные.",
+                "existing_id": dbl["id"],
+            })
+
+    # ── Ветка 1 — точный дубль по kkt_fn (per-org, бессрочно). ФНС-номер уникален.
+    if has_reliable_fn:
+        existing = await p.fetchrow(
+            "SELECT id FROM receipts WHERE kkt_fn=$1 AND org_id=$2",
+            effective_kkt_fn, org_id,
+        )
+        if existing:
+            raise HTTPException(status_code=409, detail={
+                "error": "duplicate_kkt_fn",
+                "message": "Чек с таким фискальным номером уже зарегистрирован",
+                "existing_id": existing["id"],
+            })
+
+    # ── Ветки 2/3 — мягкое предупреждение по composite, окно 7 дней. Срабатывает
+    # ровно одна (взаимоисключающие): сильная (есть ИНН) ИЛИ слабая (нет ИНН).
+    # fn-фильтр динамический ($N = has_reliable_fn): чек с надёжным fn ищет дубль
+    # ТОЛЬКО среди fn-less чеков (иначе два РАЗНЫХ qr с разными fn ложно совпали бы
+    # по дате+сумме+ИНН); fn-less чек ищет среди всех — так ловятся ОБА направления
+    # реального бага id3↔id4 (photo_ocr↔qr_scan). category/payment в ключ НЕ входят
+    # (C3): пользователь меняет их после создания, ключ бы рассинхронизировался.
+    soft_warning = None
+    if effective_org_inn:
+        similar = await p.fetchrow(
+            """SELECT id FROM receipts
+               WHERE date = $1 AND amount = $2 AND org_inn = $3 AND org_id = $4
+                 AND (NOT $5::boolean OR kkt_fn IS NULL)
+                 AND created_at > NOW() - INTERVAL '7 days'
+               LIMIT 1""",
+            r.date, r.amount, effective_org_inn, org_id, has_reliable_fn,
+        )
+        if similar:
+            soft_warning = {
+                "type": "possible_duplicate",
+                "confidence": "high",
+                "message": "Возможный дубль: дата, сумма и ИНН поставщика совпадают с чеком за последние 7 дней",
+                "similar_receipt_id": similar["id"],
+            }
+    else:
+        similar = await p.fetchrow(
+            """SELECT id FROM receipts
+               WHERE date = $1 AND amount = $2 AND org_id = $3
+                 AND (NOT $4::boolean OR kkt_fn IS NULL)
+                 AND created_at > NOW() - INTERVAL '7 days'
+               LIMIT 1""",
+            r.date, r.amount, org_id, has_reliable_fn,
+        )
+        if similar:
+            soft_warning = {
+                "type": "possible_duplicate",
+                "confidence": "low",
+                "message": "Возможный дубль: дата и сумма совпадают с чеком за последние 7 дней",
+                "similar_receipt_id": similar["id"],
+            }
+
+    # Вариант A: photo_ocr НЕ пишет номер ни в fn, ни в kkt_fn (OCR-номер
+    # ненадёжен и остаётся только в raw_data.fn). Надёжные источники пишут в обе
+    # колонки — fn для backward-compat на переходный период, kkt_fn как основную.
+    if source == "photo_ocr":
+        fn_to_save = kkt_fn_to_save = None
+    else:
+        fn_to_save = kkt_fn_to_save = effective_kkt_fn
 
     # kkt_fn колонка пишется из dedup-значения (kkt_fn_to_save), НЕ из parsed —
     # чтобы хранимое значение совпадало с тем, по которому шёл дедуп (ЧП C).
@@ -211,10 +254,13 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
         # пришёл в РАЗНЫЕ org, SELECT-дедуп промахнётся, а индекс поймает на
         # INSERT — отдаём 409 вместо 500.
         raise HTTPException(status_code=409, detail={
-            "error": "duplicate_kkt_fn",
-            "message": "Чек с таким фискальным номером уже зарегистрирован",
+            "error": "duplicate_kkt_fn_cross_org",
+            "message": "Чек с таким фискальным номером уже зарегистрирован в другой организации",
         })
-    return dict(row)
+    result = dict(row)
+    if soft_warning:
+        result["warning"] = soft_warning   # 200 + warning: фронт может показать (задача №9)
+    return result
 
 @router.post("/dedupe-cleanup/")
 async def dedupe_cleanup(user: dict = Depends(get_current_user)):

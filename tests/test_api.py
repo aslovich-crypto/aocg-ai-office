@@ -36,143 +36,233 @@ async def test_create_receipt(client):
     assert body["category"] == "Продукты"
 
 
-# ─── POST /api/receipts/ duplicate kkt_fn -> 409 (same-org SELECT dedup) ──────
+# ═══ Дедуп — 4 ветки (Фикс №3, 26.05). Жёсткий 409 только в ветках 0/1; ═══
+# ═══ ветки 2/3 — мягкое предупреждение (чек создаётся, 200 + body.warning). ═══
+
+# ─── Ветка 1 — точный дубль по kkt_fn → 409 ──────────────────────────
 async def test_create_receipt_duplicate_kkt_fn_returns_409(client):
-    payload = {"date": "2026-05-14", "org": "Лукойл", "amount": 5000.0, "kkt_fn": "DUP-FN-123"}
+    payload = {"date": "2026-05-14", "org": "Лукойл", "amount": 5000.0,
+               "kkt_fn": "DUP-FN-123", "source": "qr_scan"}
     first = await client.post("/api/receipts/", json=payload)
     assert first.status_code == 200
 
     second = await client.post("/api/receipts/", json=payload)
     assert second.status_code == 409
     detail = second.json()["detail"]
-    assert detail["error"] == "duplicate"
+    assert detail["error"] == "duplicate_kkt_fn"
     assert detail["existing_id"] == first.json()["id"]
 
 
-# ─── Manual-receipt soft-dedup (no fn) -> 409 within 5 minutes ────────
-async def test_manual_receipt_duplicate_within_5min_returns_409(client):
-    payload = {"date": "2025-05-21", "org": "ООО Тепленькая пошла", "amount": 6400.0,
-               "category": "Питание", "payment": "Корпоративная 3950", "source": "manual"}
-    first = await client.post("/api/receipts/", json=payload)
-    assert first.status_code == 200
-
-    # Identical manual receipt seconds later — the impatient double-tap case.
-    second = await client.post("/api/receipts/", json=payload)
-    assert second.status_code == 409
-    detail = second.json()["detail"]
-    assert detail["error"] == "duplicate"
-    assert detail["existing_id"] == first.json()["id"]
-
-
-async def test_manual_receipt_same_data_after_5min_succeeds(client, db):
-    # Same receipt, but the earlier one was created > 5 min ago: not a dup.
-    old = datetime.utcnow() - timedelta(minutes=6)
-    db.receipts.append(dict(id=1, date=date(2025, 5, 21), org="ООО Тепленькая пошла",
-                            category="Питание", payment="Корпоративная 3950",
-                            amount=6400.0, employee=None, fn=None, raw_data=None,
-                            source="manual", photo_url=None, org_id=1, created_at=old))
-    db._rid = 1
-
-    payload = {"date": "2025-05-21", "org": "ООО Тепленькая пошла", "amount": 6400.0,
-               "category": "Питание", "payment": "Корпоративная 3950", "source": "manual"}
-    resp = await client.post("/api/receipts/", json=payload)
-    assert resp.status_code == 200
-    assert resp.json()["id"] != 1  # a brand-new receipt, not the stale one
-
-
-async def test_qr_receipt_dedupe_still_works_by_fn(client):
-    # QR/FNS path is untouched: dedup is by fiscal number, not the 5-min window.
-    payload = {"date": "2025-05-21", "org": "Лукойл", "amount": 3000.0,
+async def test_dedup_two_qr_same_fn_blocks(client):
+    # Тот же фискальный номер дважды → ветка 1 (точный дубль).
+    payload = {"date": "2026-05-21", "org": "Лукойл", "amount": 3000.0,
                "kkt_fn": "QR-FN-555", "source": "qr_scan"}
     first = await client.post("/api/receipts/", json=payload)
     assert first.status_code == 200
-
     second = await client.post("/api/receipts/", json=payload)
     assert second.status_code == 409
+    assert second.json()["detail"]["error"] == "duplicate_kkt_fn"
     assert second.json()["detail"]["existing_id"] == first.json()["id"]
 
 
-# ─── Fn-less soft-dedup now covers every source, not just manual ──────
-async def test_photo_ocr_duplicate_within_5min_returns_409(client):
-    # The real prod dup (id 39/41) was source=photo_ocr, 0.19s apart, no fn.
-    payload = {"date": "2026-05-21", "org": "ООО Теплопроводная пошла", "amount": 6400.0,
-               "category": "Питание", "payment": "Корпоративная 3950", "source": "photo_ocr"}
-    first = await client.post("/api/receipts/", json=payload)
-    assert first.status_code == 200
-
-    second = await client.post("/api/receipts/", json=payload)
-    assert second.status_code == 409
-    detail = second.json()["detail"]
-    assert detail["error"] == "duplicate"
-    assert detail["existing_id"] == first.json()["id"]
-
-
-async def test_manual_and_photo_ocr_cross_dedupe(client):
-    # Different sources, both fn-less, identical fields → dedup by fn IS NULL.
-    base = {"date": "2026-05-21", "org": "Кафе Уют", "amount": 1500.0,
-            "category": "Питание", "payment": "Наличные"}
-    first = await client.post("/api/receipts/", json={**base, "source": "manual"})
-    assert first.status_code == 200
-
-    second = await client.post("/api/receipts/", json={**base, "source": "photo_ocr"})
-    assert second.status_code == 409
-    assert second.json()["detail"]["existing_id"] == first.json()["id"]
-
-
-async def test_qr_with_fn_dedupe_still_by_fn(client):
-    # Receipts WITH a fiscal number keep deduping by fn, never the 5-min window.
-    payload = {"date": "2026-05-21", "org": "Лукойл", "amount": 3000.0,
-               "kkt_fn": "QR-FN-777", "source": "qr_scan"}
-    first = await client.post("/api/receipts/", json=payload)
-    assert first.status_code == 200
-
-    second = await client.post("/api/receipts/", json=payload)
-    assert second.status_code == 409
-    assert second.json()["detail"]["existing_id"] == first.json()["id"]
-
-
-# ─── photo_ocr fn is unreliable → always dedupe by composite key ──────
-async def test_dedup_photo_ocr_with_fn_uses_composite_key(client):
-    # OCR-extracted fn can be off by a digit or hallucinated, so photo_ocr never
-    # dedupes by fn. Two photo_ocr receipts with the SAME composite keys but
-    # DIFFERENT fn are still a duplicate (composite branch catches it).
-    base = {"date": "2026-05-21", "org": "Кафе Уют", "amount": 1500.0,
-            "category": "Питание", "payment": "Наличные", "source": "photo_ocr"}
-    first = await client.post("/api/receipts/", json={**base, "kkt_fn": "AAAA"})
-    assert first.status_code == 200
-
-    second = await client.post("/api/receipts/", json={**base, "kkt_fn": "BBBB"})
-    assert second.status_code == 409
-    detail = second.json()["detail"]
-    assert detail["error"] == "duplicate"
-    assert detail["existing_id"] == first.json()["id"]
-
-
-async def test_dedup_qr_scan_uses_fn(client):
-    # qr_scan fn comes from FNS → trustworthy. Two qr_scan receipts with the same
-    # composite keys but DIFFERENT fn are two distinct receipts, not a dup.
+async def test_dedup_two_qr_with_different_fn_pass(client):
+    # Q2-инвариант: два qr с РАЗНЫМИ fn = разные чеки (ФНС присвоила разные
+    # номера). Динамический fn-фильтр в сильном composite их НЕ склеивает,
+    # хотя дата+сумма+ИНН совпадают.
     base = {"date": "2026-05-21", "org": "Лукойл", "amount": 3000.0,
-            "category": "Топливо", "payment": "Корп.карта", "source": "qr_scan"}
+            "source": "qr_scan", "raw_data": {"user": "Лукойл", "userInn": "7707083893"}}
     first = await client.post("/api/receipts/", json={**base, "kkt_fn": "AAAA"})
     assert first.status_code == 200
-
     second = await client.post("/api/receipts/", json={**base, "kkt_fn": "BBBB"})
-    assert second.status_code == 200  # the create endpoint returns 200, not 201
+    assert second.status_code == 200
     assert second.json()["id"] != first.json()["id"]
+    assert "warning" not in second.json()        # без ложного предупреждения
 
 
-async def test_dedup_mixed_sources(client):
-    # qr_scan stores a trustworthy fn; the same receipt re-added via photo_ocr
-    # (carrying the same OCR'd fn) must still be caught by composite key —
-    # photo_ocr ignores its own fn for dedup.
-    base = {"date": "2026-05-21", "org": "Кафе Уют", "amount": 1500.0,
-            "category": "Питание", "payment": "Наличные", "kkt_fn": "AAAA"}
-    first = await client.post("/api/receipts/", json={**base, "source": "qr_scan"})
+# ─── Ветка 0 — двойной тап (90 сек) для fn-less чеков → 409 ───────────
+async def test_dedup_branch_0_double_tap_blocks(client):
+    payload = {"date": "2026-05-21", "org": "Кафе Уют", "amount": 6400.0,
+               "category": "Питание", "payment": "Наличные", "source": "manual"}
+    first = await client.post("/api/receipts/", json=payload)
     assert first.status_code == 200
-
-    second = await client.post("/api/receipts/", json={**base, "source": "photo_ocr"})
+    second = await client.post("/api/receipts/", json=payload)
     assert second.status_code == 409
-    assert second.json()["detail"]["existing_id"] == first.json()["id"]
+    detail = second.json()["detail"]
+    assert detail["error"] == "double_tap_detected"
+    assert detail["existing_id"] == first.json()["id"]
+
+
+async def test_dedup_branch_0_photo_ocr_double_tap_blocks(client):
+    # Реальный prod-дубль (id 39/41): два photo_ocr подряд, без надёжного fn.
+    payload = {"date": "2026-05-21", "org": "Ресторан Мере", "amount": 1010.0,
+               "category": "Питание", "payment": "Наличные", "source": "photo_ocr"}
+    first = await client.post("/api/receipts/", json=payload)
+    assert first.status_code == 200
+    second = await client.post("/api/receipts/", json=payload)
+    assert second.status_code == 409
+    assert second.json()["detail"]["error"] == "double_tap_detected"
+
+
+async def test_dedup_branch_0_after_90s_allows(client, db):
+    # Тот же чек, но первый создан > 90 сек назад → не двойной тап; в окне
+    # 7 дней без ИНН → слабое предупреждение, чек создаётся.
+    old = datetime.utcnow() - timedelta(seconds=100)
+    db.receipts.append(dict(id=1, date=date(2026, 5, 21), org="Кафе Уют",
+                            category="Питание", payment="Наличные", amount=6400.0,
+                            employee=None, fn=None, kkt_fn=None, raw_data=None,
+                            source="manual", photo_url=None, org_id=1,
+                            org_inn=None, created_at=old))
+    db._rid = 1
+    resp = await client.post("/api/receipts/", json={
+        "date": "2026-05-21", "org": "Кафе Уют", "amount": 6400.0,
+        "category": "Питание", "payment": "Наличные", "source": "manual"})
+    assert resp.status_code == 200
+    assert resp.json()["id"] != 1
+    assert resp.json()["warning"]["confidence"] == "low"
+
+
+# ─── Ветка 2 — сильное предупреждение (date+amount+ИНН), оба направления ──
+async def test_dedup_strong_warning_photo_then_qr(client, db):
+    # ГЛАВНЫЙ acceptance бага id3↔id4: photo_ocr создан первым (fn-less, ИНН в
+    # колонке после Фикса №2), затем qr_scan того же чека → предупреждение, не
+    # блок. Раньше qr_scan не видел photo_ocr-дубль (асимметрия C1).
+    db.receipts.append(dict(id=1, date=date(2026, 5, 26), org='Ресторан "Мере"',
+                            category="Питание", payment="Наличные", amount=1010.0,
+                            employee=None, fn=None, kkt_fn=None, raw_data=None,
+                            source="photo_ocr", photo_url=None, org_id=1,
+                            org_inn="7813679582", created_at=datetime.utcnow()))
+    db._rid = 1
+    resp = await client.post("/api/receipts/", json={
+        "date": "2026-05-26", "org": 'ООО "Мере"', "amount": 1010.0,
+        "source": "qr_scan", "kkt_fn": "7380440902249741",
+        "raw_data": {"user": 'ООО "Мере"', "userInn": "7813679582"}})
+    assert resp.status_code == 200
+    w = resp.json()["warning"]
+    assert w["type"] == "possible_duplicate" and w["confidence"] == "high"
+    assert w["similar_receipt_id"] == 1
+
+
+async def test_dedup_strong_warning_qr_then_photo(client, db):
+    # Обратное направление: qr_scan (с fn) создан первым, затем photo_ocr (fn-less)
+    # того же чека. Динамический fn-фильтр позволяет fn-less чеку найти fn-ный дубль.
+    db.receipts.append(dict(id=1, date=date(2026, 5, 26), org='ООО "Мере"',
+                            category="Питание", payment="Наличные", amount=1010.0,
+                            employee=None, fn="7380440902249741", kkt_fn="7380440902249741",
+                            raw_data=None, source="qr_scan", photo_url=None, org_id=1,
+                            org_inn="7813679582", created_at=datetime.utcnow()))
+    db._rid = 1
+    resp = await client.post("/api/receipts/", json={
+        "date": "2026-05-26", "org": 'Ресторан "Мере"', "amount": 1010.0,
+        "source": "photo_ocr",
+        "raw_data": {"org_inn": "7813679582", "org_brand": 'Ресторан "Мере"', "items": []}})
+    assert resp.status_code == 200
+    w = resp.json()["warning"]
+    assert w["confidence"] == "high"
+    assert w["similar_receipt_id"] == 1
+
+
+async def test_dedup_window_7_days_strong_warning(client, db):
+    # Сильный ключ ловит дубль в окне 7 дней (создан 6 дней назад).
+    db.receipts.append(dict(id=1, date=date(2026, 5, 26), org='ООО "Мере"',
+                            category="Питание", payment="Наличные", amount=1010.0,
+                            employee=None, fn=None, kkt_fn=None, raw_data=None,
+                            source="photo_ocr", photo_url=None, org_id=1,
+                            org_inn="7813679582",
+                            created_at=datetime.utcnow() - timedelta(days=6)))
+    db._rid = 1
+    resp = await client.post("/api/receipts/", json={
+        "date": "2026-05-26", "org": 'ООО "Мере"', "amount": 1010.0,
+        "source": "qr_scan", "kkt_fn": "NEW-FN",
+        "raw_data": {"user": 'ООО "Мере"', "userInn": "7813679582"}})
+    assert resp.status_code == 200
+    assert resp.json()["warning"]["confidence"] == "high"
+
+
+async def test_dedup_outside_7_days_no_warning(client, db):
+    # Старше 7 дней → вне окна, предупреждения нет.
+    db.receipts.append(dict(id=1, date=date(2026, 5, 26), org='ООО "Мере"',
+                            category="Питание", payment="Наличные", amount=1010.0,
+                            employee=None, fn=None, kkt_fn=None, raw_data=None,
+                            source="photo_ocr", photo_url=None, org_id=1,
+                            org_inn="7813679582",
+                            created_at=datetime.utcnow() - timedelta(days=8)))
+    db._rid = 1
+    resp = await client.post("/api/receipts/", json={
+        "date": "2026-05-26", "org": 'ООО "Мере"', "amount": 1010.0,
+        "source": "qr_scan", "kkt_fn": "NEW-FN",
+        "raw_data": {"user": 'ООО "Мере"', "userInn": "7813679582"}})
+    assert resp.status_code == 200
+    assert "warning" not in resp.json()
+
+
+# ─── Ветка 3 — слабое предупреждение (date+amount, без ИНН) ──────────
+async def test_dedup_weak_warning_no_inn(client, db):
+    old = datetime.utcnow() - timedelta(hours=2)   # вне 90 сек, в окне 7 дней
+    db.receipts.append(dict(id=1, date=date(2026, 5, 21), org="Ларёк", category="Прочее",
+                            payment="Наличные", amount=500.0, employee=None, fn=None,
+                            kkt_fn=None, raw_data=None, source="manual", photo_url=None,
+                            org_id=1, org_inn=None, created_at=old))
+    db._rid = 1
+    resp = await client.post("/api/receipts/", json={
+        "date": "2026-05-21", "org": "Ларёк", "amount": 500.0, "source": "manual"})
+    assert resp.status_code == 200
+    w = resp.json()["warning"]
+    assert w["confidence"] == "low"
+    assert w["similar_receipt_id"] == 1
+
+
+async def test_dedup_invalid_inn_falls_to_weak(client, db):
+    # Невалидный ИНН отфильтрован парсером ФНС (org_inn=None) → слабая ветка.
+    db.receipts.append(dict(id=1, date=date(2026, 5, 21), org="Кафе", category="Питание",
+                            payment="Наличные", amount=700.0, employee=None, fn=None,
+                            kkt_fn=None, raw_data=None, source="photo_ocr", photo_url=None,
+                            org_id=1, org_inn=None, created_at=datetime.utcnow() - timedelta(hours=1)))
+    db._rid = 1
+    resp = await client.post("/api/receipts/", json={
+        "date": "2026-05-21", "org": "Кафе", "amount": 700.0, "source": "qr_scan",
+        "kkt_fn": "SOME-FN", "raw_data": {"user": "Кафе", "userInn": "1234567890"}})
+    assert resp.status_code == 200
+    assert resp.json()["org_inn"] is None              # парсер отбросил невалидный ИНН
+    assert resp.json()["warning"]["confidence"] == "low"
+
+
+# ─── C3: меняемые поля (category/payment) НЕ ломают дедуп ─────────────
+async def test_dedup_category_and_payment_not_in_key(client, db):
+    # У сохранённого чека category/payment отличаются от нового — предупреждение
+    # всё равно срабатывает (в ключ входят только date+amount+ИНН).
+    db.receipts.append(dict(id=1, date=date(2026, 5, 26), org='ООО "Мере"',
+                            category="Прочее", payment="Корп.карта", amount=1010.0,
+                            employee=None, fn="FN-1", kkt_fn="FN-1", raw_data=None,
+                            source="qr_scan", photo_url=None, org_id=1,
+                            org_inn="7813679582", created_at=datetime.utcnow()))
+    db._rid = 1
+    resp = await client.post("/api/receipts/", json={
+        "date": "2026-05-26", "org": 'Ресторан "Мере"', "amount": 1010.0,
+        "category": "Питание", "payment": "Наличные", "source": "photo_ocr",
+        "raw_data": {"org_inn": "7813679582", "items": []}})
+    assert resp.status_code == 200
+    assert resp.json()["warning"]["confidence"] == "high"
+
+
+async def test_dedup_patch_change_doesnt_break_dedup(client, db):
+    # Вариант 3 из диагностики: пользователь меняет category через PATCH ПОСЛЕ
+    # создания. Раньше это рассинхронизировало composite-ключ; теперь category
+    # не в ключе, поэтому последующий дубль по date+amount+ИНН ловится.
+    db.receipts.append(dict(id=1, date=date(2026, 5, 26), org='ООО "Мере"',
+                            category="Не указано", payment="Наличные", amount=1010.0,
+                            employee=None, fn=None, kkt_fn=None, raw_data=None,
+                            source="photo_ocr", photo_url=None, org_id=1,
+                            org_inn="7813679582", created_at=datetime.utcnow()))
+    db._rid = 1
+    patched = await client.patch("/api/receipts/1", json={"category": "Питание"})
+    assert patched.status_code == 200 and patched.json()["category"] == "Питание"
+
+    resp = await client.post("/api/receipts/", json={
+        "date": "2026-05-26", "org": 'ООО "Мере"', "amount": 1010.0,
+        "source": "qr_scan", "kkt_fn": "NEW-FN",
+        "raw_data": {"user": 'ООО "Мере"', "userInn": "7813679582"}})
+    assert resp.status_code == 200
+    assert resp.json()["warning"]["similar_receipt_id"] == 1
 
 
 # ─── kkt_fn UniqueViolation guard: cross-org collision -> 409 ─────────
@@ -191,7 +281,7 @@ async def test_unique_violation_kkt_fn_cross_org_returns_409(client, db):
         "date": "2026-05-22", "org": "Лукойл", "amount": 777.0,
         "kkt_fn": "GLOBAL-X", "source": "qr_scan"})
     assert resp.status_code == 409
-    assert resp.json()["detail"]["error"] == "duplicate_kkt_fn"
+    assert resp.json()["detail"]["error"] == "duplicate_kkt_fn_cross_org"
 
 
 async def test_photo_ocr_with_fn_not_written_to_columns(client):
