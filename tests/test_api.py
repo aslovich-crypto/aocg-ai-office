@@ -210,6 +210,44 @@ async def test_photo_ocr_with_fn_not_written_to_columns(client):
     assert row["raw_data"]["fn"] == "OCR_HALLUCINATED_FN"   # preserved for reference
 
 
+# ─── qr_scan: FNS raw_data parsed into typed columns + receipt_items ──
+async def test_qr_scan_parses_raw_data_into_columns_and_items(client, db):
+    raw = {
+        "user": 'ООО "Астер"', "userInn": "7707083893",
+        "retailPlace": "Аптека №1", "retailPlaceAddress": "Москва, ул. Ленина, 1",
+        "dateTime": "2026-05-20T13:42:00", "operationType": 1,
+        "totalSum": 295500, "ecashTotalSum": 295500, "cashTotalSum": 0,
+        "nds20": 49250, "appliedTaxationType": 2,
+        "fiscalDriveNumber": "7380440700123456", "fiscalDocumentNumber": 1234,
+        "fiscalSign": 987654321, "kktRegId": "0001234567012345", "operator": "Иванова И.И.",
+        "items": [
+            {"name": "Аспирин", "quantity": 2, "price": 100000, "sum": 200000, "nds": 1},
+            {"name": "Бинт", "quantity": 1, "price": 95500, "sum": 95500, "nds": 1},
+        ],
+    }
+    resp = await client.post("/api/receipts/", json={
+        "date": "2026-05-20", "org": 'ООО "Астер"', "amount": 2955.0,
+        "source": "qr_scan", "kkt_fn": "7380440700123456", "raw_data": raw})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["org_inn"] == "7707083893"          # valid INN preserved
+    assert body["operation_type"] == "purchase"
+    assert body["tax_system"] == "usn_income"
+    assert body["org_brand"] == "Аптека №1"
+    assert body["address"] == "Москва, ул. Ленина, 1"
+    assert body["vat_20"] == 492.50
+    assert body["kkt_rn"] == "0001234567012345"
+    assert body["cashier"] == "Иванова И.И."
+    assert body["payment_form"] == "card"
+    assert body["kkt_fn"] == "7380440700123456"      # from dedup value, not parser
+
+    items = [i for i in db.receipt_items if i["receipt_id"] == body["id"]]
+    assert len(items) == 2
+    assert items[0]["name"] == "Аспирин"
+    assert items[0]["sum"] == 2000.0
+    assert items[0]["vat_rate"] == "20"
+
+
 # ─── PATCH /api/receipts/{id} ─────────────────────────────────────────
 async def test_patch_receipt_single_field(client, seeded):
     resp = await client.patch("/api/receipts/1", json={"payment": "Личная карта"})

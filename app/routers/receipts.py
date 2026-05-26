@@ -1,5 +1,6 @@
 import base64
 import binascii
+import logging
 from datetime import date
 from typing import Optional
 
@@ -11,6 +12,10 @@ from pydantic import BaseModel
 from app.auth import get_current_user
 from app.categorization import auto_categorize
 from app.database import get_pool
+from app.parsers.fns_parser import parse_fns_response
+from app.parsers.items_parser import parse_fns_items
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/receipts", tags=["receipts"])
 
@@ -137,13 +142,61 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     else:
         fn_to_save = kkt_fn_to_save = effective_kkt_fn
 
+    # Парсим FNS raw_data в типизированные колонки (только надёжные источники).
+    # Сбой парсинга → пустой dict, INSERT всё равно проходит (best-effort).
+    # В лог НЕ пишем raw_data — там fn / ИНН поставщика / имя кассира (152-ФЗ).
+    parsed: dict = {}
+    if source in ("qr_scan", "fns") and r.raw_data:
+        try:
+            parsed = parse_fns_response(r.raw_data)
+        except Exception as e:  # noqa: BLE001 — парсинг не должен блокировать чек
+            logger.warning("FNS parse failed: %s", type(e).__name__)
+            parsed = {}
+
+    # kkt_fn колонка пишется из dedup-значения (kkt_fn_to_save), НЕ из parsed —
+    # чтобы хранимое значение совпадало с тем, по которому шёл дедуп (ЧП C).
     try:
-        row = await p.fetchrow(
-            "INSERT INTO receipts (date,org,category,payment,amount,employee,fn,kkt_fn,raw_data,source,photo_url,org_id) "
-            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *",
-            r.date, r.org, category, r.payment, r.amount, r.employee, fn_to_save, kkt_fn_to_save,
-            r.raw_data, source, r.photo_url, user["org_id"],
-        )
+        async with p.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """INSERT INTO receipts (
+                        org_id, date, org, category, payment, amount, employee,
+                        fn, kkt_fn, raw_data, source, photo_url,
+                        datetime, currency, operation_type, org_legal, org_brand,
+                        org_inn, payment_form, payment_detail, card_last4,
+                        tax_system, address, vat_20, vat_10, vat_0,
+                        kkt_serial, kkt_rn, fd_num, fpd, cashier
+                    ) VALUES (
+                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+                        $13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
+                        $27,$28,$29,$30,$31
+                    ) RETURNING *""",
+                    user["org_id"], r.date, r.org, category, r.payment, r.amount, r.employee,
+                    fn_to_save, kkt_fn_to_save, r.raw_data, source, r.photo_url,
+                    parsed.get("datetime"), parsed.get("currency"), parsed.get("operation_type"),
+                    parsed.get("org_legal"), parsed.get("org_brand"), parsed.get("org_inn"),
+                    parsed.get("payment_form"), parsed.get("payment_detail"), parsed.get("card_last4"),
+                    parsed.get("tax_system"), parsed.get("address"),
+                    parsed.get("vat_20"), parsed.get("vat_10"), parsed.get("vat_0"),
+                    parsed.get("kkt_serial"), parsed.get("kkt_rn"), parsed.get("fd_num"),
+                    parsed.get("fpd"), parsed.get("cashier"),
+                )
+                # Позиции — best-effort: вложенная транзакция (SAVEPOINT), чтобы
+                # сбой вставки/парсинга позиций откатывал ТОЛЬКО их, а чек оставался.
+                if source in ("qr_scan", "fns") and r.raw_data:
+                    try:
+                        async with conn.transaction():
+                            for item in parse_fns_items(r.raw_data):
+                                await conn.execute(
+                                    """INSERT INTO receipt_items
+                                       (receipt_id, position, name, quantity, price, sum, vat_rate)
+                                       VALUES ($1,$2,$3,$4,$5,$6,$7)""",
+                                    row["id"], item["position"], item["name"],
+                                    item["quantity"], item["price"], item["sum"], item["vat_rate"],
+                                )
+                    except Exception as e:  # noqa: BLE001 — позиции не валят чек
+                        logger.warning("FNS items insert failed for receipt %s: %s",
+                                       row["id"], type(e).__name__)
     except asyncpg.exceptions.UniqueViolationError:
         # Дедуп выше — per-org (WHERE kkt_fn=$1 AND org_id=$2), а partial-unique
         # индекс receipts_kkt_fn_unique — глобальный. Если один и тот же kkt_fn

@@ -34,6 +34,7 @@ class FakePool:
 
     def reset(self):
         self.receipts = []
+        self.receipt_items = []
         self.reports = []
         self.report_items = []
         self.cards = []
@@ -95,20 +96,28 @@ class FakePool:
                     return {"id": r["id"]}
             return None
         if q.startswith("INSERT INTO receipts"):
-            # 12-arg insert (date..photo_url, org_id) incl. kkt_fn. Pad shorter
-            # legacy calls with defaults so older tests don't churn.
-            args = list(args) + [None] * (12 - len(args))
-            kkt_fn_val = args[7]
+            # 31-arg insert (ЧП D order: org_id, date, org, … , cashier). Mirrors
+            # the column order in receipts.py. card_id is not inserted → stays None.
+            args = list(args) + [None] * (31 - len(args))
+            kkt_fn_val = args[8]
             # Mirror the GLOBAL partial-unique index receipts_kkt_fn_unique:
             # a non-NULL kkt_fn already present (in ANY org) → UniqueViolationError.
             if kkt_fn_val is not None and any(r.get("kkt_fn") == kkt_fn_val for r in self.receipts):
                 raise asyncpg.exceptions.UniqueViolationError(
                     'duplicate key value violates unique constraint "receipts_kkt_fn_unique"')
             self._rid += 1
-            row = dict(id=self._rid, date=args[0], org=args[1], category=args[2],
-                       payment=args[3], amount=args[4], employee=args[5],
-                       fn=args[6], kkt_fn=args[7], raw_data=args[8],
-                       source=args[9] or "manual", photo_url=args[10], org_id=args[11],
+            row = dict(id=self._rid,
+                       org_id=args[0], date=args[1], org=args[2], category=args[3],
+                       payment=args[4], amount=args[5], employee=args[6],
+                       fn=args[7], kkt_fn=args[8], raw_data=args[9],
+                       source=args[10] or "manual", photo_url=args[11],
+                       datetime=args[12], currency=args[13], operation_type=args[14],
+                       org_legal=args[15], org_brand=args[16], org_inn=args[17],
+                       payment_form=args[18], payment_detail=args[19], card_last4=args[20],
+                       tax_system=args[21], address=args[22],
+                       vat_20=args[23], vat_10=args[24], vat_0=args[25],
+                       kkt_serial=args[26], kkt_rn=args[27], fd_num=args[28],
+                       fpd=args[29], cashier=args[30], card_id=None,
                        created_at=datetime.utcnow())
             self.receipts.append(row)
             return dict(row)
@@ -186,6 +195,12 @@ class FakePool:
             return "DELETE"
         if q.startswith("INSERT INTO report_items"):
             self.report_items.append({"report_id": args[0], "receipt_id": args[1]})
+            return "INSERT"
+        if q.startswith("INSERT INTO receipt_items"):
+            self.receipt_items.append({
+                "receipt_id": args[0], "position": args[1], "name": args[2],
+                "quantity": args[3], "price": args[4], "sum": args[5], "vat_rate": args[6],
+            })
             return "INSERT"
         if q.startswith("DELETE FROM cards WHERE id=$1"):
             self.cards = [c for c in self.cards if c["id"] != args[0]]
