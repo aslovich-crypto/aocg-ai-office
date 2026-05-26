@@ -13,7 +13,8 @@ from app.auth import get_current_user
 from app.categorization import auto_categorize
 from app.database import get_pool
 from app.parsers.fns_parser import parse_fns_response
-from app.parsers.items_parser import parse_fns_items
+from app.parsers.items_parser import parse_fns_items, parse_ocr_items
+from app.parsers.ocr_parser import parse_ocr_response
 
 logger = logging.getLogger(__name__)
 
@@ -142,15 +143,19 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     else:
         fn_to_save = kkt_fn_to_save = effective_kkt_fn
 
-    # Парсим FNS raw_data в типизированные колонки (только надёжные источники).
-    # Сбой парсинга → пустой dict, INSERT всё равно проходит (best-effort).
-    # В лог НЕ пишем raw_data — там fn / ИНН поставщика / имя кассира (152-ФЗ).
+    # Раскладываем raw_data в типизированные колонки: ФНС-формат для qr_scan/fns,
+    # OCR-формат для photo_ocr. Оба парсера возвращают ОДИН набор ключей, поэтому
+    # INSERT ниже общий. Сбой парсинга → пустой dict, INSERT всё равно проходит
+    # (best-effort). В лог НЕ пишем raw_data — там ИНН поставщика / имя кассира (152-ФЗ).
     parsed: dict = {}
-    if source in ("qr_scan", "fns") and r.raw_data:
+    if r.raw_data:
         try:
-            parsed = parse_fns_response(r.raw_data)
+            if source in ("qr_scan", "fns"):
+                parsed = parse_fns_response(r.raw_data)
+            elif source == "photo_ocr":
+                parsed = parse_ocr_response(r.raw_data)
         except Exception as e:  # noqa: BLE001 — парсинг не должен блокировать чек
-            logger.warning("FNS parse failed: %s", type(e).__name__)
+            logger.warning("raw_data parse failed (source=%s): %s", source, type(e).__name__)
             parsed = {}
 
     # kkt_fn колонка пишется из dedup-значения (kkt_fn_to_save), НЕ из parsed —
@@ -183,10 +188,13 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                 )
                 # Позиции — best-effort: вложенная транзакция (SAVEPOINT), чтобы
                 # сбой вставки/парсинга позиций откатывал ТОЛЬКО их, а чек оставался.
-                if source in ("qr_scan", "fns") and r.raw_data:
+                # Выбор парсера по источнику (ФНС-коды vs OCR-строки, копейки vs рубли).
+                if r.raw_data and source in ("qr_scan", "fns", "photo_ocr"):
+                    parse_items = (parse_fns_items if source in ("qr_scan", "fns")
+                                   else parse_ocr_items)
                     try:
                         async with conn.transaction():
-                            for item in parse_fns_items(r.raw_data):
+                            for item in parse_items(r.raw_data):
                                 await conn.execute(
                                     """INSERT INTO receipt_items
                                        (receipt_id, position, name, quantity, price, sum, vat_rate)
@@ -195,8 +203,8 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                                     item["quantity"], item["price"], item["sum"], item["vat_rate"],
                                 )
                     except Exception as e:  # noqa: BLE001 — позиции не валят чек
-                        logger.warning("FNS items insert failed for receipt %s: %s",
-                                       row["id"], type(e).__name__)
+                        logger.warning("items insert failed for receipt %s (source=%s): %s",
+                                       row["id"], source, type(e).__name__)
     except asyncpg.exceptions.UniqueViolationError:
         # Дедуп выше — per-org (WHERE kkt_fn=$1 AND org_id=$2), а partial-unique
         # индекс receipts_kkt_fn_unique — глобальный. Если один и тот же kkt_fn

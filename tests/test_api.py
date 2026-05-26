@@ -248,6 +248,45 @@ async def test_qr_scan_parses_raw_data_into_columns_and_items(client, db):
     assert items[0]["vat_rate"] == "20"
 
 
+# ─── photo_ocr: OCR raw_data parsed into typed columns + receipt_items ─
+async def test_photo_ocr_parses_raw_data_into_columns_and_items(client, db):
+    # Real prod OCR shape (id=3 family). Amounts in RUBLES, vat_rate a string,
+    # datetime an ISO string, and an OCR-read fn that must be ignored (Вариант A).
+    raw = {
+        "org_legal": 'ООО "МЕРЕ"', "org_brand": 'Ресторан "Мере"',
+        "org_inn": "7813679582", "address": "СПб, Ломейновольская, 7",
+        "datetime": "2026-05-26T12:41:00", "currency": "RUB",
+        "operation_type": "purchase", "payment_form": "card",
+        "tax_system": "osno", "cashier": "Ботина Анастасия", "vat_20": 1110.00,
+        "items": [
+            {"position": 1, "name": "Эспрессо 40мл", "quantity": 1, "price": 250, "sum": 250, "vat_rate": "20"},
+            {"position": 2, "name": "Зеленая греча", "quantity": 1, "price": 760, "sum": 760, "vat_rate": "10"},
+        ],
+        "fn": "OCR_HALLUCINATED_FN", "kkt_fn": "OCR_HALLUCINATED_FN",
+    }
+    resp = await client.post("/api/receipts/", json={
+        "date": "2026-05-26", "org": 'Ресторан "Мере"', "amount": 1010.0,
+        "source": "photo_ocr", "raw_data": raw})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["org_inn"] == "7813679582"           # OCR INN now lands in the column
+    assert body["org_legal"] == 'ООО "МЕРЕ"'
+    assert body["org_brand"] == 'Ресторан "Мере"'
+    assert body["operation_type"] == "purchase"
+    assert body["payment_form"] == "card"
+    assert body["tax_system"] == "osno"
+    assert body["cashier"] == "Ботина Анастасия"
+    assert body["vat_20"] == 1110.00                  # rubles — not /100
+    assert str(body["datetime"]).startswith("2026-05-26T12:41")
+    assert body["kkt_fn"] is None                      # Вариант A — OCR fn never stored
+
+    items = [i for i in db.receipt_items if i["receipt_id"] == body["id"]]
+    assert len(items) == 2
+    assert items[0]["name"] == "Эспрессо 40мл"
+    assert items[0]["sum"] == 250.0                    # rubles
+    assert items[0]["vat_rate"] == "20"                # string, not decoded
+
+
 # ─── PATCH /api/receipts/{id} ─────────────────────────────────────────
 async def test_patch_receipt_single_field(client, seeded):
     resp = await client.patch("/api/receipts/1", json={"payment": "Личная карта"})
