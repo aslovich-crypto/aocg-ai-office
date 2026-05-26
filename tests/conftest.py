@@ -3,6 +3,7 @@ import re
 import sys
 from datetime import date, datetime, timedelta
 
+import asyncpg
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
@@ -74,8 +75,10 @@ class FakePool:
         if q.startswith("SELECT photo_url, raw_data FROM receipts WHERE id=$1"):
             r = next((x for x in self.receipts if x["id"] == args[0]), None)
             return dict(photo_url=r.get("photo_url"), raw_data=r.get("raw_data")) if r else None
-        if q.startswith("SELECT id FROM receipts WHERE fn=$1"):
-            return next(({"id": r["id"]} for r in self.receipts if r.get("fn") == args[0]), None)
+        if q.startswith("SELECT id FROM receipts WHERE kkt_fn=$1"):
+            # Дедуп по фискальному номеру — per-org (WHERE kkt_fn=$1 AND org_id=$2).
+            return next(({"id": r["id"]} for r in self.receipts
+                         if r.get("kkt_fn") == args[0] and r.get("org_id") == args[1]), None)
         if q.startswith("SELECT id FROM receipts WHERE org_id = $1 AND date = $2"):
             # Composite-key dedup: same org/date/amount/employee/payment/category
             # created within the last 5 minutes, regardless of fn. Mirrors the
@@ -92,14 +95,20 @@ class FakePool:
                     return {"id": r["id"]}
             return None
         if q.startswith("INSERT INTO receipts"):
+            # 12-arg insert (date..photo_url, org_id) incl. kkt_fn. Pad shorter
+            # legacy calls with defaults so older tests don't churn.
+            args = list(args) + [None] * (12 - len(args))
+            kkt_fn_val = args[7]
+            # Mirror the GLOBAL partial-unique index receipts_kkt_fn_unique:
+            # a non-NULL kkt_fn already present (in ANY org) → UniqueViolationError.
+            if kkt_fn_val is not None and any(r.get("kkt_fn") == kkt_fn_val for r in self.receipts):
+                raise asyncpg.exceptions.UniqueViolationError(
+                    'duplicate key value violates unique constraint "receipts_kkt_fn_unique"')
             self._rid += 1
-            # 11-arg insert (date..photo_url, org_id). Pad shorter legacy calls
-            # with defaults so older tests don't churn.
-            args = list(args) + [None] * (11 - len(args))
             row = dict(id=self._rid, date=args[0], org=args[1], category=args[2],
                        payment=args[3], amount=args[4], employee=args[5],
-                       fn=args[6], raw_data=args[7],
-                       source=args[8] or "manual", photo_url=args[9], org_id=args[10],
+                       fn=args[6], kkt_fn=args[7], raw_data=args[8],
+                       source=args[9] or "manual", photo_url=args[10], org_id=args[11],
                        created_at=datetime.utcnow())
             self.receipts.append(row)
             return dict(row)
@@ -239,7 +248,7 @@ def seeded(db):
     now = datetime.utcnow()
     db.receipts.append(dict(id=1, date=date(2026, 5, 10), org="Лукойл", category="Топливо",
                             payment="Корп.карта", amount=5000.0, employee=None,
-                            fn="FN-EXISTING-1", raw_data=None,
+                            fn="FN-EXISTING-1", kkt_fn="FN-EXISTING-1", raw_data=None,
                             source="manual", photo_url=None, org_id=1, created_at=now))
     db._rid = 1
     db.cards.append(dict(id=1, name="Корп.карта", org_id=1, created_at=now))

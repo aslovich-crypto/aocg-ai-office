@@ -186,5 +186,13 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_receipts_card_id         ON receipts(card_id);
             CREATE INDEX IF NOT EXISTS idx_receipts_org_id          ON receipts(org_id);
             CREATE INDEX IF NOT EXISTS idx_receipt_items_receipt_id ON receipt_items(receipt_id);
+
+            -- ── Чекпойнт C задачи №7: переименование fn → kkt_fn (переходный период) ──
+            -- Старая колонка fn и индекс receipts_fn_unique НЕ удаляются — откат-страховка
+            -- на эту сессию (уберём fn в отдельной сессии, когда kkt_fn устаканится).
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS kkt_fn VARCHAR(20);
+            UPDATE receipts SET kkt_fn = fn WHERE kkt_fn IS NULL AND fn IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS receipts_kkt_fn_unique
+                ON receipts(kkt_fn) WHERE kkt_fn IS NOT NULL;
         """)
 

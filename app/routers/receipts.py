@@ -3,6 +3,7 @@ import binascii
 from datetime import date
 from typing import Optional
 
+import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse, Response
 from pydantic import BaseModel
@@ -28,7 +29,8 @@ class ReceiptIn(BaseModel):
     payment: Optional[str] = None
     amount: float
     employee: Optional[str] = None
-    fn: Optional[str] = None
+    fn: Optional[str] = None            # deprecated — фронт пока шлёт сюда; переходный alias
+    kkt_fn: Optional[str] = None        # фискальный номер ККТ (заменяет fn)
     raw_data: Optional[dict] = None
     source: Optional[str] = None       # 'manual' | 'qr_scan' | 'photo_ocr' | 'fns'
     photo_url: Optional[str] = None    # external URL (Cloudflare R2 etc.) when set
@@ -81,14 +83,16 @@ async def get_receipt(id: int, user: dict = Depends(get_current_user)):
 async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     p = await get_pool()
     source = r.source or DEFAULT_SOURCE
+    effective_kkt_fn = r.kkt_fn or r.fn   # переходный fallback: фронт пока шлёт fn
 
-    # Для source='photo_ocr' fn ненадёжен (OCR может ошибиться в одной цифре
-    # или сгаллюцинировать). photo_ocr всегда идёт в composite-ветку, даже
-    # если OCR извлёк fn. OCR-извлечённый fn сохраняется в БД для справки,
-    # но не используется для дедупа. Надёжный fn (qr_scan / fns / введённый
-    # осознанно в manual) дедупится по fiscal number — бессрочно.
-    if r.fn and source != "photo_ocr":
-        existing = await p.fetchrow("SELECT id FROM receipts WHERE fn=$1 AND org_id=$2", r.fn, user["org_id"])
+    # Для source='photo_ocr' kkt_fn ненадёжен (OCR может ошибиться в одной цифре
+    # или сгаллюцинировать). photo_ocr всегда идёт в composite-ветку и НЕ пишет
+    # kkt_fn (см. INSERT ниже) — OCR-извлечённый номер остаётся только в
+    # raw_data.fn для справки. Надёжный kkt_fn (qr_scan / fns / введённый
+    # осознанно в manual) дедупится по фискальному номеру — бессрочно, per-org.
+    if effective_kkt_fn and source != "photo_ocr":
+        existing = await p.fetchrow("SELECT id FROM receipts WHERE kkt_fn=$1 AND org_id=$2",
+                                    effective_kkt_fn, user["org_id"])
         if existing:
             raise HTTPException(status_code=409, detail={"error": "duplicate", "existing_id": existing["id"]})
 
@@ -96,17 +100,16 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     if not category or category == "Не указано":
         category = auto_categorize(r.org)
 
-    # Composite-ветка: чеки без надёжного fn — fn-less (manual без fn) ЛИБО
-    # photo_ocr (его fn игнорируем). Матчит ВСЕ чеки с теми же composite-ключами
-    # за последние 5 минут, независимо от наличия fn (поэтому здесь больше нет
-    # 'AND fn IS NULL'). Ловит и двойной тап «Использовать» (дубль id 39/41, 0.19s
-    # apart, source=photo_ocr), и случай «qr_scan создан с верным fn → тот же чек
-    # приходит через photo_ocr с OCR-ошибкой в fn».
+    # Composite-ветка: чеки без надёжного номера — fn-less (manual без номера)
+    # ЛИБО photo_ocr (его номер игнорируем). Матчит ВСЕ чеки с теми же
+    # composite-ключами за последние 5 минут, независимо от наличия номера
+    # (поэтому здесь нет 'AND kkt_fn IS NULL'). Ловит и двойной тап «Использовать»
+    # (дубль id 39/41, 0.19s apart, source=photo_ocr), и случай «qr_scan с верным
+    # номером → тот же чек через photo_ocr с OCR-ошибкой в номере».
     # IS NOT DISTINCT FROM — чтобы NULL employee/payment/category матчили NULL
     # (у дубля 39/41 employee=NULL, plain '=' его бы не поймал). Сравниваем с
-    # *итоговой* category — той, что реально уйдёт в БД. Риск ложных срабатываний
-    # мал: composite-ключ включает employee/payment/category.
-    if not r.fn or source == "photo_ocr":
+    # *итоговой* category — той, что реально уйдёт в БД.
+    if not effective_kkt_fn or source == "photo_ocr":
         recent = await p.fetchrow(
             """SELECT id FROM receipts
                WHERE org_id = $1
@@ -126,12 +129,30 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                 "existing_id": recent["id"],
             })
 
-    row = await p.fetchrow(
-        "INSERT INTO receipts (date,org,category,payment,amount,employee,fn,raw_data,source,photo_url,org_id) "
-        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *",
-        r.date, r.org, category, r.payment, r.amount, r.employee, r.fn, r.raw_data,
-        source, r.photo_url, user["org_id"],
-    )
+    # Вариант A: photo_ocr НЕ пишет номер ни в fn, ни в kkt_fn (OCR-номер
+    # ненадёжен и остаётся только в raw_data.fn). Надёжные источники пишут в обе
+    # колонки — fn для backward-compat на переходный период, kkt_fn как основную.
+    if source == "photo_ocr":
+        fn_to_save = kkt_fn_to_save = None
+    else:
+        fn_to_save = kkt_fn_to_save = effective_kkt_fn
+
+    try:
+        row = await p.fetchrow(
+            "INSERT INTO receipts (date,org,category,payment,amount,employee,fn,kkt_fn,raw_data,source,photo_url,org_id) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *",
+            r.date, r.org, category, r.payment, r.amount, r.employee, fn_to_save, kkt_fn_to_save,
+            r.raw_data, source, r.photo_url, user["org_id"],
+        )
+    except asyncpg.exceptions.UniqueViolationError:
+        # Дедуп выше — per-org (WHERE kkt_fn=$1 AND org_id=$2), а partial-unique
+        # индекс receipts_kkt_fn_unique — глобальный. Если один и тот же kkt_fn
+        # пришёл в РАЗНЫЕ org, SELECT-дедуп промахнётся, а индекс поймает на
+        # INSERT — отдаём 409 вместо 500.
+        raise HTTPException(status_code=409, detail={
+            "error": "duplicate_kkt_fn",
+            "message": "Чек с таким фискальным номером уже зарегистрирован",
+        })
     return dict(row)
 
 @router.post("/dedupe-cleanup/")

@@ -36,9 +36,9 @@ async def test_create_receipt(client):
     assert body["category"] == "Продукты"
 
 
-# ─── POST /api/receipts/ with duplicate fn -> 409 ─────────────────────
-async def test_create_receipt_duplicate_fn_returns_409(client):
-    payload = {"date": "2026-05-14", "org": "Лукойл", "amount": 5000.0, "fn": "DUP-FN-123"}
+# ─── POST /api/receipts/ duplicate kkt_fn -> 409 (same-org SELECT dedup) ──────
+async def test_create_receipt_duplicate_kkt_fn_returns_409(client):
+    payload = {"date": "2026-05-14", "org": "Лукойл", "amount": 5000.0, "kkt_fn": "DUP-FN-123"}
     first = await client.post("/api/receipts/", json=payload)
     assert first.status_code == 200
 
@@ -83,7 +83,7 @@ async def test_manual_receipt_same_data_after_5min_succeeds(client, db):
 async def test_qr_receipt_dedupe_still_works_by_fn(client):
     # QR/FNS path is untouched: dedup is by fiscal number, not the 5-min window.
     payload = {"date": "2025-05-21", "org": "Лукойл", "amount": 3000.0,
-               "fn": "QR-FN-555", "source": "qr_scan"}
+               "kkt_fn": "QR-FN-555", "source": "qr_scan"}
     first = await client.post("/api/receipts/", json=payload)
     assert first.status_code == 200
 
@@ -122,7 +122,7 @@ async def test_manual_and_photo_ocr_cross_dedupe(client):
 async def test_qr_with_fn_dedupe_still_by_fn(client):
     # Receipts WITH a fiscal number keep deduping by fn, never the 5-min window.
     payload = {"date": "2026-05-21", "org": "Лукойл", "amount": 3000.0,
-               "fn": "QR-FN-777", "source": "qr_scan"}
+               "kkt_fn": "QR-FN-777", "source": "qr_scan"}
     first = await client.post("/api/receipts/", json=payload)
     assert first.status_code == 200
 
@@ -138,10 +138,10 @@ async def test_dedup_photo_ocr_with_fn_uses_composite_key(client):
     # DIFFERENT fn are still a duplicate (composite branch catches it).
     base = {"date": "2026-05-21", "org": "Кафе Уют", "amount": 1500.0,
             "category": "Питание", "payment": "Наличные", "source": "photo_ocr"}
-    first = await client.post("/api/receipts/", json={**base, "fn": "AAAA"})
+    first = await client.post("/api/receipts/", json={**base, "kkt_fn": "AAAA"})
     assert first.status_code == 200
 
-    second = await client.post("/api/receipts/", json={**base, "fn": "BBBB"})
+    second = await client.post("/api/receipts/", json={**base, "kkt_fn": "BBBB"})
     assert second.status_code == 409
     detail = second.json()["detail"]
     assert detail["error"] == "duplicate"
@@ -153,10 +153,10 @@ async def test_dedup_qr_scan_uses_fn(client):
     # composite keys but DIFFERENT fn are two distinct receipts, not a dup.
     base = {"date": "2026-05-21", "org": "Лукойл", "amount": 3000.0,
             "category": "Топливо", "payment": "Корп.карта", "source": "qr_scan"}
-    first = await client.post("/api/receipts/", json={**base, "fn": "AAAA"})
+    first = await client.post("/api/receipts/", json={**base, "kkt_fn": "AAAA"})
     assert first.status_code == 200
 
-    second = await client.post("/api/receipts/", json={**base, "fn": "BBBB"})
+    second = await client.post("/api/receipts/", json={**base, "kkt_fn": "BBBB"})
     assert second.status_code == 200  # the create endpoint returns 200, not 201
     assert second.json()["id"] != first.json()["id"]
 
@@ -166,13 +166,48 @@ async def test_dedup_mixed_sources(client):
     # (carrying the same OCR'd fn) must still be caught by composite key —
     # photo_ocr ignores its own fn for dedup.
     base = {"date": "2026-05-21", "org": "Кафе Уют", "amount": 1500.0,
-            "category": "Питание", "payment": "Наличные", "fn": "AAAA"}
+            "category": "Питание", "payment": "Наличные", "kkt_fn": "AAAA"}
     first = await client.post("/api/receipts/", json={**base, "source": "qr_scan"})
     assert first.status_code == 200
 
     second = await client.post("/api/receipts/", json={**base, "source": "photo_ocr"})
     assert second.status_code == 409
     assert second.json()["detail"]["existing_id"] == first.json()["id"]
+
+
+# ─── kkt_fn UniqueViolation guard: cross-org collision -> 409 ─────────
+async def test_unique_violation_kkt_fn_cross_org_returns_409(client, db):
+    # The kkt_fn SELECT-dedup is per-org (WHERE kkt_fn=$1 AND org_id=$2), but the
+    # receipts_kkt_fn_unique index is GLOBAL. A receipt with kkt_fn='X' already
+    # exists in another org (org_id=2). Posting kkt_fn='X' as org 1 misses the
+    # per-org dedup, reaches INSERT, trips the global unique index → guard → 409.
+    db.receipts.append(dict(id=99, date=date(2026, 5, 1), org="Чужая Орг",
+                            category="Прочее", payment=None, amount=10.0, employee=None,
+                            fn="GLOBAL-X", kkt_fn="GLOBAL-X", raw_data=None,
+                            source="qr_scan", photo_url=None, org_id=2,
+                            created_at=datetime.utcnow()))
+
+    resp = await client.post("/api/receipts/", json={
+        "date": "2026-05-22", "org": "Лукойл", "amount": 777.0,
+        "kkt_fn": "GLOBAL-X", "source": "qr_scan"})
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "duplicate_kkt_fn"
+
+
+async def test_photo_ocr_with_fn_not_written_to_columns(client):
+    # Variant A: a photo_ocr receipt never writes its (unreliable) OCR number to
+    # the fn / kkt_fn columns — it stays only in raw_data.fn for reference.
+    resp = await client.post("/api/receipts/", json={
+        "date": "2026-05-22", "org": "Кофейня", "amount": 250.0,
+        "source": "photo_ocr", "fn": "OCR_HALLUCINATED_FN",
+        "raw_data": {"fn": "OCR_HALLUCINATED_FN", "items": []}})
+    assert resp.status_code == 200
+    rid = resp.json()["id"]
+
+    row = (await client.get(f"/api/receipts/{rid}")).json()
+    assert row["fn"] is None
+    assert row["kkt_fn"] is None
+    assert row["raw_data"]["fn"] == "OCR_HALLUCINATED_FN"   # preserved for reference
 
 
 # ─── PATCH /api/receipts/{id} ─────────────────────────────────────────
