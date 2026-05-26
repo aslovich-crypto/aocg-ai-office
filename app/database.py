@@ -135,5 +135,56 @@ async def init_db():
             UPDATE cards    SET org_id=(SELECT id FROM organizations ORDER BY id LIMIT 1) WHERE org_id IS NULL;
             -- Founding user (id=1) is the organization administrator.
             UPDATE users SET role='admin' WHERE id=1;
+
+            -- ============================================================
+            -- Расширение схемы (Чекпойнт A задачи №7 / AOCG-DIR-AI-002 v10)
+            -- Добавляет 20 колонок + receipt_items + 5 индексов.
+            -- Старые колонки (fn, org, payment, date, amount, employee)
+            -- НЕ удаляются — продолжают использоваться. Переименование
+            -- fn → kkt_fn — отдельный Чекпойнт C.
+            -- ============================================================
+            -- Обязательные (10 — fn уже есть; amount оставляем старую NUMERIC(12,2)):
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS datetime       TIMESTAMP WITH TIME ZONE;
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS currency       VARCHAR(3)  DEFAULT 'RUB';
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS operation_type VARCHAR(20) DEFAULT 'purchase';
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS org_legal      VARCHAR(500);
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS org_brand      VARCHAR(200);
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS org_inn        VARCHAR(12);
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS payment_form   VARCHAR(20);
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS payment_detail VARCHAR(100);
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS card_last4     VARCHAR(4);
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS card_id        INTEGER REFERENCES cards(id);
+            -- Желательные (5):
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS tax_system     VARCHAR(30);
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS address        TEXT;
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS vat_20         NUMERIC(15,2);
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS vat_10         NUMERIC(15,2);
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS vat_0          NUMERIC(15,2);
+            -- Фискальные (5 — fn уже есть, переименуем в Чекпойнте C):
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS kkt_serial     VARCHAR(20);
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS kkt_rn         VARCHAR(20);
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS fd_num         VARCHAR(20);
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS fpd            VARCHAR(20);
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS cashier        VARCHAR(200);
+
+            -- Позиции чека (1 чек → N позиций). Каскадно удаляются с чеком.
+            CREATE TABLE IF NOT EXISTS receipt_items (
+                id         SERIAL PRIMARY KEY,
+                receipt_id INTEGER REFERENCES receipts(id) ON DELETE CASCADE,
+                position   INTEGER NOT NULL,
+                name       VARCHAR(500) NOT NULL,
+                quantity   NUMERIC(10,3),
+                price      NUMERIC(15,2),
+                sum        NUMERIC(15,2),
+                vat_rate   VARCHAR(10),
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+
+            -- 5 индексов (idx_receipts_org_id был пропущен в прежней схеме):
+            CREATE INDEX IF NOT EXISTS idx_receipts_datetime        ON receipts(datetime);
+            CREATE INDEX IF NOT EXISTS idx_receipts_org_inn         ON receipts(org_inn);
+            CREATE INDEX IF NOT EXISTS idx_receipts_card_id         ON receipts(card_id);
+            CREATE INDEX IF NOT EXISTS idx_receipts_org_id          ON receipts(org_id);
+            CREATE INDEX IF NOT EXISTS idx_receipt_items_receipt_id ON receipt_items(receipt_id);
         """)
 
