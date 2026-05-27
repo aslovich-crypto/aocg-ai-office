@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse, Response
 from pydantic import BaseModel
 
 from app.auth import get_current_user
-from app.categorization import auto_categorize
+from app.categorization import DEFAULT_FALLBACK, auto_categorize_v2
 from app.database import get_pool
 from app.parsers.fns_parser import parse_fns_response
 from app.parsers.items_parser import parse_fns_items, parse_ocr_items
@@ -97,6 +97,19 @@ def _similar_receipt_brief(row) -> dict:
     }
 
 
+async def resolve_category_id(db, org_id: int, category_name: str):
+    """Имя статьи → category_id для конкретной орг (справочник per-org, Фикс №1).
+    Если имени нет — фолбэк на «Прочие хозрасходы» той же орг. None, если и фолбэка
+    нет (орг ещё не засеяна — напр. legacy/тестовые данные). db = pool или conn."""
+    row = await db.fetchrow(
+        "SELECT id FROM categories WHERE org_id=$1 AND name=$2 LIMIT 1", org_id, category_name)
+    if row:
+        return row["id"]
+    row = await db.fetchrow(
+        "SELECT id FROM categories WHERE org_id=$1 AND name=$2 LIMIT 1", org_id, DEFAULT_FALLBACK)
+    return row["id"] if row else None
+
+
 def _dup_item(row, *, is_new, in_report) -> dict:
     """Элемент warning.duplicates (задача №9 фаза C). deletable = нет надёжного
     фискального номера (kkt_fn IS NULL → photo_ocr/manual): фронт по нему ставит
@@ -121,9 +134,13 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     effective_kkt_fn = r.kkt_fn or r.fn   # переходный fallback: фронт пока шлёт fn
     org_id = user["org_id"]
 
+    # Категория: если пользователь не задал (или «Не указано») — авто по названию
+    # орг (v2: 48 статей, фолбэк «Прочие хозрасходы»). Строку category пишем как
+    # раньше (backward compat), плюс резолвим её в category_id per-org (Фикс №1 фаза B).
     category = r.category
     if not category or category == "Не указано":
-        category = auto_categorize(r.org)
+        category = auto_categorize_v2(r.org or "")
+    category_id = await resolve_category_id(p, org_id, category)
 
     # ── Парсинг raw_data ДО дедупа: даёт effective_org_inn для composite-веток.
     # ФНС-формат для qr_scan/fns, OCR-формат для photo_ocr; оба парсера возвращают
@@ -245,11 +262,11 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                         datetime, currency, operation_type, org_legal, org_brand,
                         org_inn, payment_form, payment_detail, card_last4,
                         tax_system, address, vat_20, vat_10, vat_0,
-                        kkt_serial, kkt_rn, fd_num, fpd, cashier
+                        kkt_serial, kkt_rn, fd_num, fpd, cashier, category_id
                     ) VALUES (
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
                         $13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
-                        $27,$28,$29,$30,$31
+                        $27,$28,$29,$30,$31,$32
                     ) RETURNING *""",
                     user["org_id"], r.date, r.org, category, r.payment, r.amount, r.employee,
                     fn_to_save, kkt_fn_to_save, r.raw_data, source, r.photo_url,
@@ -259,7 +276,7 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                     parsed.get("tax_system"), parsed.get("address"),
                     parsed.get("vat_20"), parsed.get("vat_10"), parsed.get("vat_0"),
                     parsed.get("kkt_serial"), parsed.get("kkt_rn"), parsed.get("fd_num"),
-                    parsed.get("fpd"), parsed.get("cashier"),
+                    parsed.get("fpd"), parsed.get("cashier"), category_id,
                 )
                 # Позиции — best-effort: вложенная транзакция (SAVEPOINT), чтобы
                 # сбой вставки/парсинга позиций откатывал ТОЛЬКО их, а чек оставался.

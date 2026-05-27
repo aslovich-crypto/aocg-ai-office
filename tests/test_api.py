@@ -32,8 +32,8 @@ async def test_create_receipt(client):
     assert body["id"] > 0
     assert body["org"] == "Магнит"
     assert body["amount"] == 1234.56
-    # auto-categorization: "Магнит" -> "Продукты"
-    assert body["category"] == "Продукты"
+    # auto-categorization v2: "Магнит" -> "Продукты для офиса" (фаза B, 48 статей)
+    assert body["category"] == "Продукты для офиса"
 
 
 # ═══ Дедуп — 4 ветки (Фикс №3, 26.05). Жёсткий 409 только в ветках 0/1; ═══
@@ -783,8 +783,8 @@ async def test_ocr_happy_path(client, monkeypatch):
     assert body["org_brand"] == "Магнит"
     assert body["org"] == "Магнит"            # alias: org_brand or org_legal
     assert body["amount"] == 1234.56
-    # auto-categorization picks up "Магнит" → "Продукты"
-    assert body["category"] == "Продукты"
+    # auto-categorization v2 picks up "Магнит" → "Продукты для офиса"
+    assert body["category"] == "Продукты для офиса"
 
 
 async def test_ocr_strips_markdown_fences(client, monkeypatch):

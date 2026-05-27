@@ -137,6 +137,10 @@ class FakePool:
             # Дедуп по фискальному номеру — per-org (WHERE kkt_fn=$1 AND org_id=$2).
             return next(({"id": r["id"]} for r in self.receipts
                          if r.get("kkt_fn") == args[0] and r.get("org_id") == args[1]), None)
+        if q.startswith("SELECT id FROM categories WHERE org_id=$1 AND name=$2"):
+            # Фикс №1 фаза B: resolve_category_id — имя статьи → id per-org.
+            return next(({"id": c["id"]} for c in self.categories
+                         if c.get("org_id") == args[0] and c.get("name") == args[1]), None)
         if "AND source = $4" in q and "90 seconds" in q:
             # Ветка 0 — двойной тап: date+amount+org_id+source, fn-less, окно 90 сек.
             d, amount, org_id, source = args
@@ -150,9 +154,9 @@ class FakePool:
         # NB: дедуп-ветки 2/3 (composite, окно 7 дней) с фазы C идут через fetch
         # (массив duplicates), а не fetchrow — их матчеры в методе fetch ниже.
         if q.startswith("INSERT INTO receipts"):
-            # 31-arg insert (ЧП D order: org_id, date, org, … , cashier). Mirrors
-            # the column order in receipts.py. card_id is not inserted → stays None.
-            args = list(args) + [None] * (31 - len(args))
+            # 32-arg insert (ЧП D order: org_id, date, … , cashier, category_id).
+            # Зеркалит порядок колонок в receipts.py. card_id не вставляется → None.
+            args = list(args) + [None] * (32 - len(args))
             kkt_fn_val = args[8]
             # Mirror the GLOBAL partial-unique index receipts_kkt_fn_unique:
             # a non-NULL kkt_fn already present (in ANY org) → UniqueViolationError.
@@ -171,7 +175,7 @@ class FakePool:
                        tax_system=args[21], address=args[22],
                        vat_20=args[23], vat_10=args[24], vat_0=args[25],
                        kkt_serial=args[26], kkt_rn=args[27], fd_num=args[28],
-                       fpd=args[29], cashier=args[30], card_id=None,
+                       fpd=args[29], cashier=args[30], category_id=args[31], card_id=None,
                        created_at=datetime.utcnow())
             self.receipts.append(row)
             return dict(row)
