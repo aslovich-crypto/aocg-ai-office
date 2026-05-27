@@ -29,6 +29,7 @@ from app.auth import (
     verify_password,
     verify_token,
 )
+from app.categories_seed import seed_default_categories
 from app.database import get_pool
 from app.email_service import email_enabled, send_verification_email
 
@@ -155,6 +156,9 @@ async def register(body: RegisterIn):
                 body.first_name, body.last_name, email, body.phone,
                 hash_password(body.password), org["id"], auto_verify, verify_tok)
             await conn.execute("UPDATE organizations SET owner_id=$1 WHERE id=$2", user["id"], org["id"])
+            # Фикс №1 фаза A: новая орг сразу получает дефолтный справочник
+            # (11 групп + 48 статей) — в той же транзакции, что и создание орг.
+            await seed_default_categories(conn, org["id"])
 
     if auto_verify:
         return await _auth_payload(p, user)

@@ -2,6 +2,8 @@ import asyncpg
 import json
 import os
 
+from app.categories_seed import backfill_category_ids, seed_default_categories
+
 pool = None
 
 async def _init_conn(conn):
@@ -194,5 +196,50 @@ async def init_db():
             UPDATE receipts SET kkt_fn = fn WHERE kkt_fn IS NULL AND fn IS NOT NULL;
             CREATE UNIQUE INDEX IF NOT EXISTS receipts_kkt_fn_unique
                 ON receipts(kkt_fn) WHERE kkt_fn IS NOT NULL;
+
+            -- ── Фикс №1 фаза A: справочник категорий расходов (11 групп / 48 статей) ──
+            -- per-org копии (каждая орг владеет своими); старая receipts.category
+            -- (строка) НЕ трогается — страховка переходного периода.
+            CREATE TABLE IF NOT EXISTS category_groups (
+                id          SERIAL PRIMARY KEY,
+                org_id      INTEGER NOT NULL REFERENCES organizations(id),
+                name        TEXT NOT NULL,
+                position    INTEGER NOT NULL,
+                created_at  TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE (org_id, name)
+            );
+            CREATE TABLE IF NOT EXISTS categories (
+                id          SERIAL PRIMARY KEY,
+                org_id      INTEGER NOT NULL REFERENCES organizations(id),
+                group_id    INTEGER NOT NULL REFERENCES category_groups(id),
+                name        TEXT NOT NULL,
+                tax_kind    TEXT NOT NULL,
+                position    INTEGER NOT NULL,
+                is_default  BOOLEAN DEFAULT TRUE,
+                is_visible  BOOLEAN DEFAULT TRUE,
+                created_at  TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE (org_id, name),
+                CHECK (tax_kind IN (
+                    'Материальные расходы','Прочие расходы','Командировочные расходы',
+                    'Представительские расходы','Расходы на рекламу (нормируемые)',
+                    'Транспортные расходы','Оплата труда','Налоги и сборы',
+                    'Не учитываемые в целях налогообложения'
+                ))
+            );
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS category_id INTEGER REFERENCES categories(id);
+            CREATE INDEX IF NOT EXISTS idx_receipts_category_id   ON receipts(category_id);
+            CREATE INDEX IF NOT EXISTS idx_categories_org_id      ON categories(org_id);
+            CREATE INDEX IF NOT EXISTS idx_category_groups_org_id ON category_groups(org_id);
         """)
+
+        # ── Фикс №1 фаза A: seed дефолтных категорий + бэкфилл category_id ──
+        # DDL выше идемпотентен; seed/бэкфилл — на Python (нужны id созданных групп).
+        # Каждой орг без категорий засеваем 11+48; затем старые строковые category
+        # мапим в category_id (per-org, по имени дефолтной статьи). Всё в одной
+        # транзакции; seed_default_categories сам no-op для уже засеянных орг.
+        async with conn.transaction():
+            org_ids = [r["id"] for r in await conn.fetch("SELECT id FROM organizations")]
+            for org_id in org_ids:
+                await seed_default_categories(conn, org_id)
+            await backfill_category_ids(conn)
 

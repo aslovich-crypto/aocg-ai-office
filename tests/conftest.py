@@ -49,7 +49,23 @@ class FakePool:
         self.report_items = []
         self.cards = []
         self.consents = []
+        self.category_groups = []   # Фикс №1 фаза A: справочник категорий (per-org)
+        self.categories = []
         self._rid = self._repid = self._cid = self._consid = 0
+        self._gid = self._catid = 0
+
+    async def fetchval(self, query, *args):
+        # Фикс №1 фаза A: seed_default_categories использует fetchval для idempotency-
+        # проверки и для INSERT ... RETURNING id групп.
+        q = _norm(query)
+        if q.startswith("SELECT EXISTS(SELECT 1 FROM categories WHERE org_id=$1"):
+            return any(c.get("org_id") == args[0] for c in self.categories)
+        if q.startswith("INSERT INTO category_groups"):
+            self._gid += 1
+            self.category_groups.append(
+                {"id": self._gid, "org_id": args[0], "name": args[1], "position": args[2]})
+            return self._gid
+        raise NotImplementedError(f"fetchval: {q}")
 
     async def fetch(self, query, *args):
         q = _norm(query)
@@ -255,6 +271,24 @@ class FakePool:
             self.receipts = [r for r in self.receipts
                              if not (r["id"] in ids and r.get("org_id") == org_id)]
             return "DELETE"
+        if q.startswith("INSERT INTO categories"):
+            # Фикс №1 фаза A: статья справочника (group_id из fetchval выше).
+            self._catid += 1
+            self.categories.append({
+                "id": self._catid, "org_id": args[0], "group_id": args[1], "name": args[2],
+                "tax_kind": args[3], "position": args[4], "is_default": True, "is_visible": True})
+            return "INSERT"
+        if q.startswith("UPDATE receipts r SET category_id = c.id"):
+            # Фикс №1 фаза A backfill: старая строка category → category_id статьи
+            # с тем же org_id и именем new_name. Только где category_id ещё NULL.
+            old_name, new_name = args
+            for r in self.receipts:
+                if r.get("category_id") is None and r.get("category") == old_name:
+                    match = next((c for c in self.categories
+                                  if c.get("org_id") == r.get("org_id") and c.get("name") == new_name), None)
+                    if match:
+                        r["category_id"] = match["id"]
+            return "UPDATE"
         raise NotImplementedError(f"execute: {q}")
 
     def acquire(self):
@@ -284,6 +318,9 @@ class _Conn:
 
     async def fetchrow(self, q, *a):
         return await self.pool.fetchrow(q, *a)
+
+    async def fetchval(self, q, *a):
+        return await self.pool.fetchval(q, *a)
 
     def transaction(self):
         return _Txn()
