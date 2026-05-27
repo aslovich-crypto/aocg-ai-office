@@ -321,6 +321,64 @@ async def test_warning_backward_compat_id_field(client, db):
     assert w["similar_receipt"]["id"] == w["similar_receipt_id"]   # согласованы
 
 
+# ─── Задача №9 фаза C — warning.duplicates (массив всех дублей + новый) ──
+def _seed_photo_dup(db, *, in_report=False):
+    """Существующий photo_ocr-чек (fn-less, ИНН в колонке) за 5 мин до нового."""
+    db.receipts.append(dict(id=1, date=date(2026, 5, 26), org='ООО "Мере"',
+                            category="Питание", payment="Наличные", amount=1010.0,
+                            employee=None, fn=None, kkt_fn=None, raw_data=None,
+                            source="photo_ocr", photo_url=None, org_id=1,
+                            org_inn="7813679582",
+                            created_at=datetime.utcnow() - timedelta(minutes=5)))
+    db._rid = 1
+    if in_report:
+        db.report_items.append({"report_id": 1, "receipt_id": 1})
+
+
+async def _post_qr_dup(client):
+    return await client.post("/api/receipts/", json={
+        "date": "2026-05-26", "org": 'ООО "Мере"', "amount": 1010.0,
+        "source": "qr_scan", "kkt_fn": "FN-NEW",
+        "raw_data": {"user": 'ООО "Мере"', "userInn": "7813679582"}})
+
+
+async def test_warning_duplicates_includes_array(client, db):
+    _seed_photo_dup(db)
+    resp = await _post_qr_dup(client)
+    assert resp.status_code == 200
+    dups = resp.json()["warning"]["duplicates"]
+    assert isinstance(dups, list) and len(dups) == 2
+    assert dups[0]["id"] == 1                      # created_at ASC: существующий первым
+    assert set(dups[0]) == {"id", "org", "amount", "date", "source", "deletable", "in_report", "is_new"}
+
+
+async def test_warning_duplicates_includes_new_receipt(client, db):
+    _seed_photo_dup(db)
+    resp = await _post_qr_dup(client)
+    dups = resp.json()["warning"]["duplicates"]
+    new = [d for d in dups if d["is_new"]]
+    assert len(new) == 1 and new[0]["id"] == resp.json()["id"]
+    assert new[0]["source"] == "qr_scan"
+    assert sum(1 for d in dups if not d["is_new"]) == 1
+
+
+async def test_warning_duplicates_marks_deletable(client, db):
+    # photo_ocr (kkt_fn NULL) → deletable True; qr_scan (kkt_fn) → deletable False.
+    _seed_photo_dup(db)
+    resp = await _post_qr_dup(client)
+    dups = {d["id"]: d for d in resp.json()["warning"]["duplicates"]}
+    assert dups[1]["deletable"] is True
+    assert dups[resp.json()["id"]]["deletable"] is False
+
+
+async def test_warning_duplicates_marks_in_report(client, db):
+    _seed_photo_dup(db, in_report=True)            # id=1 уже в отчёте
+    resp = await _post_qr_dup(client)
+    dups = {d["id"]: d for d in resp.json()["warning"]["duplicates"]}
+    assert dups[1]["in_report"] is True
+    assert dups[resp.json()["id"]]["in_report"] is False   # только что создан
+
+
 # ─── kkt_fn UniqueViolation guard: cross-org collision -> 409 ─────────
 async def test_unique_violation_kkt_fn_cross_org_returns_409(client, db):
     # The kkt_fn SELECT-dedup is per-org (WHERE kkt_fn=$1 AND org_id=$2), but the
@@ -473,6 +531,89 @@ async def test_delete_receipt(client):
 
     remaining = (await client.get("/api/receipts/")).json()
     assert all(r["id"] != rid for r in remaining)
+
+
+# ─── POST /api/receipts/bulk-delete (задача №9 фаза C) ────────────────
+def _mk(db, rid, *, source="manual", kkt_fn=None, org_id=1, amount=100.0):
+    db.receipts.append(dict(id=rid, date=date(2026, 5, 20), org=f"Org{rid}",
+                            category="Прочее", payment=None, amount=amount, employee=None,
+                            fn=kkt_fn, kkt_fn=kkt_fn, raw_data=None, source=source,
+                            photo_url=None, org_id=org_id, created_at=datetime.utcnow()))
+    db._rid = max(db._rid, rid)
+
+
+async def test_bulk_delete_basic(client, db):
+    _mk(db, 1, source="manual")
+    _mk(db, 2, source="photo_ocr")
+    resp = await client.post("/api/receipts/bulk-delete", json={"ids": [1, 2]})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert sorted(body["deleted"]) == [1, 2]
+    assert body["blocked_fns"] == [] and body["blocked_in_report"] == []
+    assert db.receipts == []
+
+
+async def test_bulk_delete_cross_org_ignored(client, db):
+    _mk(db, 1, source="manual", org_id=1)
+    _mk(db, 99, source="manual", org_id=2)        # чужая орг
+    resp = await client.post("/api/receipts/bulk-delete", json={"ids": [1, 99]})
+    body = resp.json()
+    assert body["deleted"] == [1]
+    assert 99 not in body["deleted"] + body["blocked_fns"] + body["blocked_in_report"]
+    assert any(r["id"] == 99 for r in db.receipts)   # чужой чек жив
+
+
+async def test_bulk_delete_blocks_in_report(client, db):
+    # Чек в отчёте блокируется ВСЕГДА, даже с force=true.
+    _mk(db, 1, source="qr_scan", kkt_fn="FN-1")
+    db.report_items.append({"report_id": 1, "receipt_id": 1})
+    resp = await client.post("/api/receipts/bulk-delete", json={"ids": [1], "force": True})
+    body = resp.json()
+    assert body["blocked_in_report"] == [1]
+    assert body["deleted"] == [] and body["blocked_fns"] == []
+    assert any(r["id"] == 1 for r in db.receipts)
+
+
+async def test_bulk_delete_blocks_fns_without_force(client, db):
+    _mk(db, 1, source="qr_scan", kkt_fn="FN-1")
+    resp = await client.post("/api/receipts/bulk-delete", json={"ids": [1]})
+    body = resp.json()
+    assert body["blocked_fns"] == [1]
+    assert body["deleted"] == []
+    assert any(r["id"] == 1 for r in db.receipts)
+
+
+async def test_bulk_delete_force_fns_succeeds(client, db):
+    _mk(db, 1, source="qr_scan", kkt_fn="FN-1")
+    resp = await client.post("/api/receipts/bulk-delete", json={"ids": [1], "force": True})
+    body = resp.json()
+    assert body["deleted"] == [1] and body["blocked_fns"] == []
+    assert db.receipts == []
+
+
+async def test_bulk_delete_mixed_response(client, db):
+    # 1 manual → удалить; 2 qr_scan без force → blocked_fns; 3 в отчёте → blocked_in_report.
+    _mk(db, 1, source="manual")
+    _mk(db, 2, source="qr_scan", kkt_fn="F2")
+    _mk(db, 3, source="photo_ocr")
+    db.report_items.append({"report_id": 1, "receipt_id": 3})
+    resp = await client.post("/api/receipts/bulk-delete", json={"ids": [1, 2, 3]})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["deleted"] == [1]
+    assert body["blocked_fns"] == [2]
+    assert body["blocked_in_report"] == [3]
+    assert {r["id"] for r in db.receipts} == {2, 3}
+
+
+async def test_bulk_delete_org_safe_report_items(client, db):
+    # Связь report_items чужого чека (org_id=2) НЕ трогается, даже если id передан.
+    _mk(db, 1, source="manual", org_id=1)
+    _mk(db, 99, source="manual", org_id=2)
+    db.report_items.append({"report_id": 5, "receipt_id": 99})   # связь чужого чека
+    resp = await client.post("/api/receipts/bulk-delete", json={"ids": [1, 99]})
+    assert resp.json()["deleted"] == [1]
+    assert any(ri["receipt_id"] == 99 for ri in db.report_items)   # уцелела
 
 
 # ─── GET /api/reports/ ────────────────────────────────────────────────

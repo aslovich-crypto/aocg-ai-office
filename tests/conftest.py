@@ -19,6 +19,16 @@ def _norm(q):
     return re.sub(r"\s+", " ", q).strip()
 
 
+def _dup_fakerow(r, pool):
+    """Строка для дедуп-веток 2/3 (фаза C): то, что отдаёт расширенный SELECT —
+    id/org/amount/date/source/kkt_fn + in_report (EXISTS report_items)."""
+    return {
+        "id": r["id"], "org": r["org"], "amount": r["amount"], "date": r["date"],
+        "source": r.get("source"), "kkt_fn": r.get("kkt_fn"),
+        "in_report": any(ri["receipt_id"] == r["id"] for ri in pool.report_items),
+    }
+
+
 class FakePool:
     """In-memory stand-in for the asyncpg pool.
 
@@ -61,6 +71,37 @@ class FakePool:
                 dict(keep_id=min(x["id"] for x in rows), date=d, amount=a, org=o, cnt=len(rows))
                 for (d, a, o), rows in groups.items() if len(rows) > 1
             ]
+        if "id = ANY($1" in q and "EXISTS" in q:
+            # Bulk-delete кандидаты (фаза C): чеки своей орг из списка id + in_report.
+            # Чужие id не попадают в выборку (изоляция по org_id).
+            ids, org_id = args
+            return [
+                {"id": r["id"], "kkt_fn": r.get("kkt_fn"),
+                 "in_report": any(ri["receipt_id"] == r["id"] for ri in self.report_items)}
+                for r in self.receipts if r["id"] in ids and r.get("org_id") == org_id
+            ]
+        if "org_inn = $3" in q and "7 days" in q:
+            # Ветка 2 — сильный composite (фаза C): ВСЕ совпадения, created_at ASC.
+            # Динамический fn-фильтр: при has_reliable_fn матчим только fn-less чеки.
+            d, amount, org_inn, org_id, has_reliable_fn = args
+            cutoff = datetime.utcnow() - timedelta(days=7)
+            hits = [r for r in self.receipts
+                    if (r["date"] == d and r["amount"] == amount and r.get("org_inn") == org_inn
+                        and r.get("org_id") == org_id
+                        and (not has_reliable_fn or r.get("kkt_fn") is None)
+                        and r.get("created_at") and r["created_at"] > cutoff)]
+            hits.sort(key=lambda r: r["created_at"])
+            return [_dup_fakerow(r, self) for r in hits]
+        if "amount = $2 AND org_id = $3 AND (NOT $4" in q and "7 days" in q:
+            # Ветка 3 — слабый composite (фаза C): ВСЕ совпадения, created_at ASC.
+            d, amount, org_id, has_reliable_fn = args
+            cutoff = datetime.utcnow() - timedelta(days=7)
+            hits = [r for r in self.receipts
+                    if (r["date"] == d and r["amount"] == amount and r.get("org_id") == org_id
+                        and (not has_reliable_fn or r.get("kkt_fn") is None)
+                        and r.get("created_at") and r["created_at"] > cutoff)]
+            hits.sort(key=lambda r: r["created_at"])
+            return [_dup_fakerow(r, self) for r in hits]
         raise NotImplementedError(f"fetch: {q}")
 
     async def fetchrow(self, query, *args):
@@ -90,33 +131,8 @@ class FakePool:
                         and r.get("created_at") and r["created_at"] > cutoff):
                     return {"id": r["id"]}
             return None
-        if "AND org_inn = $3" in q and "7 days" in q:
-            # Ветка 2 — сильный composite: date+amount+org_inn, окно 7 дней.
-            # Динамический fn-фильтр: при has_reliable_fn матчим только fn-less чеки.
-            # Возвращаем id+org+amount+date (задача №9 фаза A): роутер кладёт их
-            # в body.warning.similar_receipt, поэтому одного id уже мало.
-            d, amount, org_inn, org_id, has_reliable_fn = args
-            cutoff = datetime.utcnow() - timedelta(days=7)
-            for r in self.receipts:
-                if (r["date"] == d and r["amount"] == amount and r.get("org_inn") == org_inn
-                        and r.get("org_id") == org_id
-                        and (not has_reliable_fn or r.get("kkt_fn") is None)
-                        and r.get("created_at") and r["created_at"] > cutoff):
-                    return {"id": r["id"], "org": r["org"], "amount": r["amount"], "date": r["date"]}
-            return None
-        if "AND amount = $2 AND org_id = $3 AND (NOT $4" in q and "7 days" in q:
-            # Ветка 3 — слабый composite: date+amount, окно 7 дней. Тот же
-            # динамический fn-фильтр, что и в сильной ветке. Матч по подстроке
-            # (не startswith): после задачи №9 SELECT берёт id+org+amount+date,
-            # префикс "SELECT id FROM" больше не подходит.
-            d, amount, org_id, has_reliable_fn = args
-            cutoff = datetime.utcnow() - timedelta(days=7)
-            for r in self.receipts:
-                if (r["date"] == d and r["amount"] == amount and r.get("org_id") == org_id
-                        and (not has_reliable_fn or r.get("kkt_fn") is None)
-                        and r.get("created_at") and r["created_at"] > cutoff):
-                    return {"id": r["id"], "org": r["org"], "amount": r["amount"], "date": r["date"]}
-            return None
+        # NB: дедуп-ветки 2/3 (composite, окно 7 дней) с фазы C идут через fetch
+        # (массив duplicates), а не fetchrow — их матчеры в методе fetch ниже.
         if q.startswith("INSERT INTO receipts"):
             # 31-arg insert (ЧП D order: org_id, date, org, … , cashier). Mirrors
             # the column order in receipts.py. card_id is not inserted → stays None.
@@ -226,6 +242,18 @@ class FakePool:
             return "INSERT"
         if q.startswith("DELETE FROM cards WHERE id=$1"):
             self.cards = [c for c in self.cards if c["id"] != args[0]]
+            return "DELETE"
+        if q.startswith("DELETE FROM report_items WHERE receipt_id = ANY($1"):
+            # Bulk (фаза C): org-безопасно — только связи чеков СВОЕЙ орг.
+            ids, org_id = args
+            own = {r["id"] for r in self.receipts if r.get("org_id") == org_id}
+            self.report_items = [ri for ri in self.report_items
+                                 if not (ri["receipt_id"] in ids and ri["receipt_id"] in own)]
+            return "DELETE"
+        if q.startswith("DELETE FROM receipts WHERE id = ANY($1"):
+            ids, org_id = args
+            self.receipts = [r for r in self.receipts
+                             if not (r["id"] in ids and r.get("org_id") == org_id)]
             return "DELETE"
         raise NotImplementedError(f"execute: {q}")
 

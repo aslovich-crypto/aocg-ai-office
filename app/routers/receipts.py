@@ -2,7 +2,7 @@ import base64
 import binascii
 import logging
 from datetime import date
-from typing import Optional
+from typing import List, Optional
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
@@ -97,6 +97,23 @@ def _similar_receipt_brief(row) -> dict:
     }
 
 
+def _dup_item(row, *, is_new, in_report) -> dict:
+    """Элемент warning.duplicates (задача №9 фаза C). deletable = нет надёжного
+    фискального номера (kkt_fn IS NULL → photo_ocr/manual): фронт по нему ставит
+    галочку «удалить» по умолчанию, у ФНС/qr_scan — снимает (юр. сила). amount:
+    Decimal→float, date: date→ISO. in_report/is_new передаёт вызывающий."""
+    return {
+        "id": row["id"],
+        "org": row["org"],
+        "amount": float(row["amount"]) if row["amount"] is not None else None,
+        "date": row["date"].isoformat() if row["date"] else None,
+        "source": row["source"],
+        "deletable": row["kkt_fn"] is None,
+        "in_report": in_report,
+        "is_new": is_new,
+    }
+
+
 @router.post("/")
 async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     p = await get_pool()
@@ -171,44 +188,42 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     # по дате+сумме+ИНН); fn-less чек ищет среди всех — так ловятся ОБА направления
     # реального бага id3↔id4 (photo_ocr↔qr_scan). category/payment в ключ НЕ входят
     # (C3): пользователь меняет их после создания, ключ бы рассинхронизировался.
-    # SELECT берёт сразу org/amount/date похожего чека (задача №9 фаза A): фронт
-    # покажет inline-баннер без второго GET-запроса. amount в БД — NUMERIC →
-    # asyncpg отдаёт Decimal, для JSON приводим к float; date — datetime.date → ISO.
-    soft_warning = None
+    # Собираем ВСЕ совпадения в окне 7 дней (fetch, не fetchrow): фронт покажет
+    # их группой с чекбоксами для удаления лишних (задача №9 фаза C). Запрос ДО
+    # INSERT — только что созданный чек добавим в массив явно после вставки (под
+    # динамическим fn-фильтром он бы не попал). SELECT тянет source/kkt_fn (для
+    # deletable) + EXISTS(report_items) AS in_report. created_at ASC — хронология.
+    # Срабатывает ровно одна ветка: сильная (есть ИНН) ИЛИ слабая (нет ИНН).
+    dup_confidence = dup_message = None
+    similar_rows = []
     if effective_org_inn:
-        similar = await p.fetchrow(
-            """SELECT id, org, amount, date FROM receipts
+        similar_rows = await p.fetch(
+            """SELECT id, org, amount, date, source, kkt_fn,
+                      EXISTS(SELECT 1 FROM report_items ri WHERE ri.receipt_id = receipts.id) AS in_report
+               FROM receipts
                WHERE date = $1 AND amount = $2 AND org_inn = $3 AND org_id = $4
                  AND (NOT $5::boolean OR kkt_fn IS NULL)
                  AND created_at > NOW() - INTERVAL '7 days'
-               LIMIT 1""",
+               ORDER BY created_at ASC""",
             r.date, r.amount, effective_org_inn, org_id, has_reliable_fn,
         )
-        if similar:
-            soft_warning = {
-                "type": "possible_duplicate",
-                "confidence": "high",
-                "message": "Возможный дубль: дата, сумма и ИНН поставщика совпадают с чеком за последние 7 дней",
-                "similar_receipt_id": similar["id"],   # deprecated — backward compat
-                "similar_receipt": _similar_receipt_brief(similar),
-            }
+        if similar_rows:
+            dup_confidence = "high"
+            dup_message = "Возможный дубль: дата, сумма и ИНН поставщика совпадают с чеком за последние 7 дней"
     else:
-        similar = await p.fetchrow(
-            """SELECT id, org, amount, date FROM receipts
+        similar_rows = await p.fetch(
+            """SELECT id, org, amount, date, source, kkt_fn,
+                      EXISTS(SELECT 1 FROM report_items ri WHERE ri.receipt_id = receipts.id) AS in_report
+               FROM receipts
                WHERE date = $1 AND amount = $2 AND org_id = $3
                  AND (NOT $4::boolean OR kkt_fn IS NULL)
                  AND created_at > NOW() - INTERVAL '7 days'
-               LIMIT 1""",
+               ORDER BY created_at ASC""",
             r.date, r.amount, org_id, has_reliable_fn,
         )
-        if similar:
-            soft_warning = {
-                "type": "possible_duplicate",
-                "confidence": "low",
-                "message": "Возможный дубль: дата и сумма совпадают с чеком за последние 7 дней",
-                "similar_receipt_id": similar["id"],   # deprecated — backward compat
-                "similar_receipt": _similar_receipt_brief(similar),
-            }
+        if similar_rows:
+            dup_confidence = "low"
+            dup_message = "Возможный дубль: дата и сумма совпадают с чеком за последние 7 дней"
 
     # Вариант A: photo_ocr НЕ пишет номер ни в fn, ни в kkt_fn (OCR-номер
     # ненадёжен и остаётся только в raw_data.fn). Надёжные источники пишут в обе
@@ -275,8 +290,21 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
             "message": "Чек с таким фискальным номером уже зарегистрирован в другой организации",
         })
     result = dict(row)
-    if soft_warning:
-        result["warning"] = soft_warning   # 200 + warning: фронт может показать (задача №9)
+    if dup_confidence:
+        # duplicates = существующие совпадения (created_at ASC) + только что
+        # созданный чек (is_new=true, in_report=false: он ещё ни в одном отчёте).
+        # similar_receipt[_id] — deprecated-поля для старого фронта (фаза A),
+        # указывают на первый существующий дубль; фронт переходит на duplicates.
+        duplicates = [_dup_item(s, is_new=False, in_report=bool(s["in_report"])) for s in similar_rows]
+        duplicates.append(_dup_item(row, is_new=True, in_report=False))
+        result["warning"] = {
+            "type": "possible_duplicate",
+            "confidence": dup_confidence,
+            "message": dup_message,
+            "similar_receipt_id": similar_rows[0]["id"],                 # deprecated
+            "similar_receipt": _similar_receipt_brief(similar_rows[0]),  # deprecated
+            "duplicates": duplicates,
+        }
     return result
 
 @router.post("/dedupe-cleanup/")
@@ -299,6 +327,55 @@ async def dedupe_cleanup(user: dict = Depends(get_current_user)):
         kept_total += 1
 
     return {"deleted": deleted_total, "kept": kept_total}
+
+
+class BulkDeleteIn(BaseModel):
+    ids: List[int]
+    force: bool = False        # пробивает ТОЛЬКО ФНС-защиту, НЕ in_report (Q2)
+
+
+@router.post("/bulk-delete")
+async def bulk_delete_receipts(body: BulkDeleteIn, user: dict = Depends(get_current_user)):
+    """Массовое удаление дублей из баннера (задача №9 фаза C). Защиты:
+    • in_report — блок ВСЕГДА (нельзя молча выкинуть чек из отчёта), force не пробивает;
+    • надёжный фискальный номер (kkt_fn) — блок без force (у ФНС/qr_scan юр. сила);
+    • чужие id молча отсеиваются (изоляция по org_id).
+    Ответ всегда 200 с детализацией {deleted, blocked_fns, blocked_in_report}."""
+    org_id = user["org_id"]
+    deleted, blocked_fns, blocked_in_report = [], [], []
+    if not body.ids:
+        return {"deleted": deleted, "blocked_fns": blocked_fns, "blocked_in_report": blocked_in_report}
+    p = await get_pool()
+    # Кандидаты — только чеки текущей орг; чужие id в выборку не попадают (изоляция).
+    rows = await p.fetch(
+        """SELECT id, kkt_fn,
+                  EXISTS(SELECT 1 FROM report_items ri WHERE ri.receipt_id = receipts.id) AS in_report
+           FROM receipts WHERE id = ANY($1::int[]) AND org_id = $2""",
+        body.ids, org_id,
+    )
+    for row in rows:
+        if row["in_report"]:
+            blocked_in_report.append(row["id"])              # блок ВСЕГДА
+        elif row["kkt_fn"] is not None and not body.force:
+            blocked_fns.append(row["id"])                    # ФНС-защита, пробивается force
+        else:
+            deleted.append(row["id"])
+    if deleted:
+        async with p.acquire() as conn:
+            async with conn.transaction():
+                # org-безопасная чистка связей (закрывает дыру изоляции 1.2):
+                # report_items трогаем ТОЛЬКО для чеков своей орг.
+                await conn.execute(
+                    """DELETE FROM report_items WHERE receipt_id = ANY($1::int[])
+                       AND receipt_id IN (SELECT id FROM receipts WHERE org_id = $2)""",
+                    deleted, org_id,
+                )
+                await conn.execute(
+                    "DELETE FROM receipts WHERE id = ANY($1::int[]) AND org_id = $2",
+                    deleted, org_id,
+                )
+    return {"deleted": deleted, "blocked_fns": blocked_fns, "blocked_in_report": blocked_in_report}
+
 
 class ReceiptPatch(BaseModel):
     category: Optional[str] = None
