@@ -93,6 +93,8 @@ class FakePool:
         if "AND org_inn = $3" in q and "7 days" in q:
             # Ветка 2 — сильный composite: date+amount+org_inn, окно 7 дней.
             # Динамический fn-фильтр: при has_reliable_fn матчим только fn-less чеки.
+            # Возвращаем id+org+amount+date (задача №9 фаза A): роутер кладёт их
+            # в body.warning.similar_receipt, поэтому одного id уже мало.
             d, amount, org_inn, org_id, has_reliable_fn = args
             cutoff = datetime.utcnow() - timedelta(days=7)
             for r in self.receipts:
@@ -100,18 +102,20 @@ class FakePool:
                         and r.get("org_id") == org_id
                         and (not has_reliable_fn or r.get("kkt_fn") is None)
                         and r.get("created_at") and r["created_at"] > cutoff):
-                    return {"id": r["id"]}
+                    return {"id": r["id"], "org": r["org"], "amount": r["amount"], "date": r["date"]}
             return None
-        if q.startswith("SELECT id FROM receipts WHERE date = $1 AND amount = $2 AND org_id = $3 AND (NOT $4") and "7 days" in q:
+        if "AND amount = $2 AND org_id = $3 AND (NOT $4" in q and "7 days" in q:
             # Ветка 3 — слабый composite: date+amount, окно 7 дней. Тот же
-            # динамический fn-фильтр, что и в сильной ветке.
+            # динамический fn-фильтр, что и в сильной ветке. Матч по подстроке
+            # (не startswith): после задачи №9 SELECT берёт id+org+amount+date,
+            # префикс "SELECT id FROM" больше не подходит.
             d, amount, org_id, has_reliable_fn = args
             cutoff = datetime.utcnow() - timedelta(days=7)
             for r in self.receipts:
                 if (r["date"] == d and r["amount"] == amount and r.get("org_id") == org_id
                         and (not has_reliable_fn or r.get("kkt_fn") is None)
                         and r.get("created_at") and r["created_at"] > cutoff):
-                    return {"id": r["id"]}
+                    return {"id": r["id"], "org": r["org"], "amount": r["amount"], "date": r["date"]}
             return None
         if q.startswith("INSERT INTO receipts"):
             # 31-arg insert (ЧП D order: org_id, date, org, … , cashier). Mirrors

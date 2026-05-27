@@ -140,6 +140,13 @@ async def test_dedup_strong_warning_photo_then_qr(client, db):
     w = resp.json()["warning"]
     assert w["type"] == "possible_duplicate" and w["confidence"] == "high"
     assert w["similar_receipt_id"] == 1
+    # Фаза A: similar_receipt отражает НАЙДЕННЫЙ чек id=1 (photo_ocr 'Ресторан "Мере"'),
+    # не новый постящийся ('ООО "Мере"'). Фронт покажет эти поля в баннере.
+    sr = w["similar_receipt"]
+    assert sr["id"] == 1
+    assert sr["org"] == 'Ресторан "Мере"'
+    assert sr["amount"] == 1010.0 and isinstance(sr["amount"], float)
+    assert sr["date"] == "2026-05-26"
 
 
 async def test_dedup_strong_warning_qr_then_photo(client, db):
@@ -159,6 +166,9 @@ async def test_dedup_strong_warning_qr_then_photo(client, db):
     w = resp.json()["warning"]
     assert w["confidence"] == "high"
     assert w["similar_receipt_id"] == 1
+    sr = w["similar_receipt"]   # найденный чек id=1 — qr_scan 'ООО "Мере"'
+    assert sr["id"] == 1 and sr["org"] == 'ООО "Мере"'
+    assert sr["amount"] == 1010.0 and sr["date"] == "2026-05-26"
 
 
 async def test_dedup_window_7_days_strong_warning(client, db):
@@ -209,6 +219,9 @@ async def test_dedup_weak_warning_no_inn(client, db):
     w = resp.json()["warning"]
     assert w["confidence"] == "low"
     assert w["similar_receipt_id"] == 1
+    sr = w["similar_receipt"]   # найденный чек id=1 — manual "Ларёк"
+    assert sr["id"] == 1 and sr["org"] == "Ларёк"
+    assert sr["amount"] == 500.0 and sr["date"] == "2026-05-21"
 
 
 async def test_dedup_invalid_inn_falls_to_weak(client, db):
@@ -262,7 +275,50 @@ async def test_dedup_patch_change_doesnt_break_dedup(client, db):
         "source": "qr_scan", "kkt_fn": "NEW-FN",
         "raw_data": {"user": 'ООО "Мере"', "userInn": "7813679582"}})
     assert resp.status_code == 200
-    assert resp.json()["warning"]["similar_receipt_id"] == 1
+    w = resp.json()["warning"]
+    assert w["similar_receipt_id"] == 1
+    # category изменён через PATCH, но org похожего чека в баннере неизменен.
+    assert w["similar_receipt"]["id"] == 1 and w["similar_receipt"]["org"] == 'ООО "Мере"'
+
+
+# ─── Задача №9 фаза A — body.warning.similar_receipt (карточка для фронта) ──
+async def test_warning_similar_receipt_includes_all_fields(client, db):
+    # similar_receipt должен содержать {id, amount, org, date} в правильных
+    # JSON-типах: id=int, org=str, amount=float, date=str ISO ("YYYY-MM-DD").
+    db.receipts.append(dict(id=1, date=date(2026, 5, 26), org='ООО "Мере"',
+                            category="Питание", payment="Наличные", amount=1010.0,
+                            employee=None, fn=None, kkt_fn=None, raw_data=None,
+                            source="photo_ocr", photo_url=None, org_id=1,
+                            org_inn="7813679582", created_at=datetime.utcnow()))
+    db._rid = 1
+    resp = await client.post("/api/receipts/", json={
+        "date": "2026-05-26", "org": 'ООО "Мере"', "amount": 1010.0,
+        "source": "qr_scan", "kkt_fn": "FN-NEW",
+        "raw_data": {"user": 'ООО "Мере"', "userInn": "7813679582"}})
+    assert resp.status_code == 200
+    sr = resp.json()["warning"]["similar_receipt"]
+    assert set(sr) == {"id", "org", "amount", "date"}
+    assert isinstance(sr["id"], int) and sr["id"] == 1
+    assert isinstance(sr["org"], str) and sr["org"] == 'ООО "Мере"'
+    assert isinstance(sr["amount"], float) and sr["amount"] == 1010.0
+    assert isinstance(sr["date"], str) and sr["date"] == "2026-05-26"
+
+
+async def test_warning_backward_compat_id_field(client, db):
+    # similar_receipt_id (deprecated) сохраняется параллельно similar_receipt —
+    # старый фронт, читающий только id, не ломается.
+    db.receipts.append(dict(id=1, date=date(2026, 5, 21), org="Ларёк", category="Прочее",
+                            payment="Наличные", amount=500.0, employee=None, fn=None,
+                            kkt_fn=None, raw_data=None, source="manual", photo_url=None,
+                            org_id=1, org_inn=None,
+                            created_at=datetime.utcnow() - timedelta(hours=2)))
+    db._rid = 1
+    resp = await client.post("/api/receipts/", json={
+        "date": "2026-05-21", "org": "Ларёк", "amount": 500.0, "source": "manual"})
+    assert resp.status_code == 200
+    w = resp.json()["warning"]
+    assert w["similar_receipt_id"] == 1                      # deprecated, но есть
+    assert w["similar_receipt"]["id"] == w["similar_receipt_id"]   # согласованы
 
 
 # ─── kkt_fn UniqueViolation guard: cross-org collision -> 409 ─────────

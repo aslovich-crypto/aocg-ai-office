@@ -85,6 +85,18 @@ async def get_receipt(id: int, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Not found")
     return dict(row)
 
+def _similar_receipt_brief(row) -> dict:
+    """Краткая карточка похожего чека для body.warning (задача №9 фаза A): фронт
+    рисует inline-баннер без второго GET. amount: Decimal → float (иначе JSON
+    падает); date: datetime.date → ISO-строка. org может быть legacy-строкой."""
+    return {
+        "id": row["id"],
+        "org": row["org"],
+        "amount": float(row["amount"]) if row["amount"] is not None else None,
+        "date": row["date"].isoformat() if row["date"] else None,
+    }
+
+
 @router.post("/")
 async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     p = await get_pool()
@@ -159,10 +171,13 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     # по дате+сумме+ИНН); fn-less чек ищет среди всех — так ловятся ОБА направления
     # реального бага id3↔id4 (photo_ocr↔qr_scan). category/payment в ключ НЕ входят
     # (C3): пользователь меняет их после создания, ключ бы рассинхронизировался.
+    # SELECT берёт сразу org/amount/date похожего чека (задача №9 фаза A): фронт
+    # покажет inline-баннер без второго GET-запроса. amount в БД — NUMERIC →
+    # asyncpg отдаёт Decimal, для JSON приводим к float; date — datetime.date → ISO.
     soft_warning = None
     if effective_org_inn:
         similar = await p.fetchrow(
-            """SELECT id FROM receipts
+            """SELECT id, org, amount, date FROM receipts
                WHERE date = $1 AND amount = $2 AND org_inn = $3 AND org_id = $4
                  AND (NOT $5::boolean OR kkt_fn IS NULL)
                  AND created_at > NOW() - INTERVAL '7 days'
@@ -174,11 +189,12 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                 "type": "possible_duplicate",
                 "confidence": "high",
                 "message": "Возможный дубль: дата, сумма и ИНН поставщика совпадают с чеком за последние 7 дней",
-                "similar_receipt_id": similar["id"],
+                "similar_receipt_id": similar["id"],   # deprecated — backward compat
+                "similar_receipt": _similar_receipt_brief(similar),
             }
     else:
         similar = await p.fetchrow(
-            """SELECT id FROM receipts
+            """SELECT id, org, amount, date FROM receipts
                WHERE date = $1 AND amount = $2 AND org_id = $3
                  AND (NOT $4::boolean OR kkt_fn IS NULL)
                  AND created_at > NOW() - INTERVAL '7 days'
@@ -190,7 +206,8 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                 "type": "possible_duplicate",
                 "confidence": "low",
                 "message": "Возможный дубль: дата и сумма совпадают с чеком за последние 7 дней",
-                "similar_receipt_id": similar["id"],
+                "similar_receipt_id": similar["id"],   # deprecated — backward compat
+                "similar_receipt": _similar_receipt_brief(similar),
             }
 
     # Вариант A: photo_ocr НЕ пишет номер ни в fn, ни в kkt_fn (OCR-номер
