@@ -19,7 +19,7 @@ from typing import Optional
 from anthropic import APIError, APITimeoutError, AsyncAnthropic
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
-from app.categorization import auto_categorize_v2
+from app.categorization import auto_categorize_v2, categorize
 from app.parsers.fns_parser import validate_inn
 
 logger = logging.getLogger(__name__)
@@ -182,7 +182,7 @@ def _finalize(parsed: dict) -> dict:
     out["org"] = org
     out["inn"] = out["org_inn"]
     out["payment_type"] = out["payment_form"] if out["payment_form"] in ("cash", "card") else None
-    out["category"] = auto_categorize_v2(org or "")
+    out["category"] = categorize(org or "", out["items"] or [])
     # nds = фактический НДС (20% + 10%); vat_0 — это «без НДС», в сумму не входит.
     vat_parts = [v for v in (out["vat_20"], out["vat_10"]) if isinstance(v, (int, float))]
     out["nds"] = sum(vat_parts) if vat_parts else None

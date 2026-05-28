@@ -2,7 +2,14 @@
 запись category_id в POST /api/receipts/. resolve/POST гоняются на FakePool со
 справочником, засеянным seed_default_categories."""
 from app.categories_seed import DEFAULT_CATEGORIES, seed_default_categories
-from app.categorization import DEFAULT_FALLBACK, TRIGGERS, auto_categorize_v2
+from app.categorization import (
+    DEFAULT_FALLBACK,
+    ITEM_TRIGGERS,
+    TRIGGERS,
+    auto_categorize_v2,
+    categorize,
+    categorize_items,
+)
 from app.routers.receipts import resolve_category_id
 
 
@@ -108,3 +115,85 @@ async def test_post_unknown_org_fallback_category_id(client, db):
     assert body["category"] == "Прочие хозрасходы"
     assert body["category_id"] == next(
         c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Прочие хозрасходы")
+
+
+# ─── Фикс №4: categorize_items / categorize (по позициям) ───
+def _it(name, s):
+    return {"name": name, "sum": s}
+
+
+def test_items_products_win_by_sum():
+    # продукты (298+1026) перебивают хозтовары (200) по сумме
+    items = [_it("Огурцы Бакинские 350 г", 298), _it("Бедро индейки охл", 1026),
+             _it("Туалетная бумага 4 рулона", 200)]
+    assert categorize_items(items) == "Продукты для офиса"
+
+
+def test_items_office_coffee():
+    assert categorize_items([_it("Кофе зерновой Lavazza 1кг", 1200)]) == "Кофе и напитки в офис"
+    assert categorize_items([_it("Вода питьевая 5 л", 150)]) == "Кофе и напитки в офис"
+
+
+def test_items_cappuccino_not_matched():
+    # Q-B: порционный общепит НЕ ловим — останется фолбэк на магазин
+    assert categorize_items([_it("Капучино Гранде 300мл", 420)]) is None
+    assert categorize_items([_it("Эспрессо 40мл", 250)]) is None
+
+
+def test_items_fuel_and_stationery():
+    assert categorize_items([_it("АИ-95 32.5 л", 2500)]) == "Топливо"
+    assert categorize_items([_it("Бумага А4 SvetoCopy 500л", 350),
+                             _it("Степлер Erich Krause", 200)]) == "Канцелярские товары"
+
+
+def test_items_zero_sums_fall_back_to_count():
+    # все суммы нулевые → победитель по числу узнанных (2 продукта vs 1 канцелярия)
+    items = [_it("Молоко 1л", 0), _it("Хлеб", 0), _it("Карандаш", 0)]
+    assert categorize_items(items) == "Продукты для офиса"
+
+
+def test_items_unknown_returns_none():
+    assert categorize_items([_it("Футболка", 4950), _it("Брюки", 9720)]) is None
+
+
+def test_items_empty_returns_none():
+    assert categorize_items([]) is None
+    assert categorize_items(None) is None
+
+
+def test_item_triggers_keys_are_real_categories():
+    # ГАРД (методология №15): каждый ключ ITEM_TRIGGERS — реальное имя статьи
+    valid = {name for _, items in DEFAULT_CATEGORIES for (name, _) in items}
+    assert set(ITEM_TRIGGERS) <= valid
+
+
+def test_categorize_items_priority_over_org():
+    # «Лукойл» по орг → Топливо, но позиции-продукты перебивают (позиции в приоритете)
+    items = [_it("Огурцы 350г", 298), _it("Молоко 1л", 90)]
+    assert categorize("Лукойл", items) == "Продукты для офиса"
+
+
+def test_categorize_falls_back_to_org_when_items_unknown():
+    assert categorize("Лукойл", [_it("Футболка", 1000)]) == "Топливо"
+    assert categorize("Лукойл", []) == "Топливо"
+
+
+def test_categorize_falls_back_to_prochie():
+    assert categorize("Неизвестный Контрагент", []) == DEFAULT_FALLBACK
+
+
+async def test_post_categorizes_by_items_azbuka(client, db):
+    # Реальный кейс id=3: org=юрлицо (без триггера), но позиции — продукты → Продукты.
+    await seed_default_categories(db, 1)
+    resp = await client.post("/api/receipts/", json={
+        "date": "2026-05-28", "org": 'ООО "Городской супермаркет"', "amount": 1500.0,
+        "source": "qr_scan",
+        "raw_data": {"user": 'ООО "Городской супермаркет"', "userInn": "7705466989",
+                     "items": [{"name": "Огурцы Бакинские 350 г", "sum": 29800},
+                               {"name": "Бедро индейки охл Россия", "sum": 102600},
+                               {"name": "Пакет майка", "sum": 1290}]}})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["category"] == "Продукты для офиса"
+    assert body["category_id"] == next(
+        c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Продукты для офиса")

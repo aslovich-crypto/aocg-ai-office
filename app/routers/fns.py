@@ -5,7 +5,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from app.categorization import auto_categorize_v2
+from app.categorization import categorize
 
 router = APIRouter(prefix="/api/fns", tags=["fns"])
 
@@ -94,7 +94,7 @@ async def check_receipt(req: CheckRequest):
     return {
         "status":   "ok",
         "org":      org,
-        "category": auto_categorize_v2(org),
+        "category": categorize(org, j.get("items") or []),
         "inn":      j.get("userInn", ""),
         "address":  j.get("retailPlaceAddress", ""),
         "total":    j.get("totalSum", 0) / 100,

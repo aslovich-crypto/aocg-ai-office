@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse, Response
 from pydantic import BaseModel
 
 from app.auth import get_current_user
-from app.categorization import DEFAULT_FALLBACK, auto_categorize_v2
+from app.categorization import DEFAULT_FALLBACK, categorize
 from app.database import get_pool
 from app.parsers.fns_parser import parse_fns_response
 from app.parsers.items_parser import parse_fns_items, parse_ocr_items
@@ -139,7 +139,15 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     # раньше (backward compat), плюс резолвим её в category_id per-org (Фикс №1 фаза B).
     category = r.category
     if not category or category == "Не указано":
-        category = auto_categorize_v2(r.org or "")
+        # Фикс №4: категоризация по позициям (приоритет) → имя орг → «Прочие хозрасходы».
+        # Позиции берём из raw_data по источнику (тот же парсер, что и при вставке ниже).
+        items = []
+        if r.raw_data:
+            if source in ("qr_scan", "fns"):
+                items = parse_fns_items(r.raw_data)
+            elif source == "photo_ocr":
+                items = parse_ocr_items(r.raw_data)
+        category = categorize(r.org or "", items)
     category_id = await resolve_category_id(p, org_id, category)
 
     # ── Парсинг raw_data ДО дедупа: даёт effective_org_inn для composite-веток.
