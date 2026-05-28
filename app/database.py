@@ -227,6 +227,9 @@ async def init_db():
                 ))
             );
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS category_id INTEGER REFERENCES categories(id);
+            -- Смена категории чека: TRUE после ручного выбора пользователем — будущий
+            -- батч-пересчёт (Фикс №4) такие чеки не трогает (WHERE category_manual=FALSE).
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS category_manual BOOLEAN DEFAULT FALSE;
             CREATE INDEX IF NOT EXISTS idx_receipts_category_id   ON receipts(category_id);
             CREATE INDEX IF NOT EXISTS idx_categories_org_id      ON categories(org_id);
             CREATE INDEX IF NOT EXISTS idx_category_groups_org_id ON category_groups(org_id);

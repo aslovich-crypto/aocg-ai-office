@@ -6,6 +6,8 @@ touched. Each test gets a fresh store via the `db` / `seeded` fixtures.
 
 from datetime import date, datetime, timedelta
 
+from app.categories_seed import seed_default_categories
+
 
 # ─── GET /api/receipts/ ───────────────────────────────────────────────
 async def test_get_receipts_returns_list(client):
@@ -517,6 +519,52 @@ async def test_patch_receipt_no_fields_returns_existing(client, seeded):
 async def test_patch_receipt_not_found(client):
     resp = await client.patch("/api/receipts/999", json={"category": "X"})
     assert resp.status_code == 404
+
+
+# ─── Смена категории чека: category_id резолвится + category_manual=TRUE ───
+def _append_receipt(db, **over):
+    base = dict(id=1, date=date(2026, 5, 20), org="Some Org", category="Не указано",
+                payment="Наличные", amount=500.0, employee=None, fn=None, kkt_fn=None,
+                raw_data=None, source="manual", photo_url=None, org_id=1,
+                category_id=None, category_manual=False, created_at=datetime.utcnow())
+    base.update(over)
+    db.receipts.append(base)
+    db._rid = base["id"]
+
+
+async def test_patch_category_resolves_id_and_sets_manual(client, db):
+    await seed_default_categories(db, 1)
+    _append_receipt(db)
+    resp = await client.patch("/api/receipts/1", json={"category": "Продукты для офиса"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["category"] == "Продукты для офиса"
+    assert body["category_id"] == next(
+        c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Продукты для офиса")
+    assert body["category_manual"] is True
+
+
+async def test_patch_category_unknown_name_falls_back_id(client, db):
+    await seed_default_categories(db, 1)
+    _append_receipt(db)
+    resp = await client.patch("/api/receipts/1", json={"category": "Несуществующая"})
+    body = resp.json()
+    assert body["category"] == "Несуществующая"
+    # category_id резолвится в фолбэк «Прочие хозрасходы» (per-org), флаг всё равно TRUE
+    assert body["category_id"] == next(
+        c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Прочие хозрасходы")
+    assert body["category_manual"] is True
+
+
+async def test_patch_payment_keeps_category_manual_and_id(client, db):
+    await seed_default_categories(db, 1)
+    cid = next(c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Топливо")
+    _append_receipt(db, category="Топливо", category_id=cid, category_manual=False)
+    resp = await client.patch("/api/receipts/1", json={"payment": "Личная карта"})
+    body = resp.json()
+    assert body["payment"] == "Личная карта"
+    assert body["category_manual"] is False   # не трогаем при смене payment
+    assert body["category_id"] == cid          # category_id не изменился
 
 
 # ─── DELETE /api/receipts/{id} ────────────────────────────────────────

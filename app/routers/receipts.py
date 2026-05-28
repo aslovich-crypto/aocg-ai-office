@@ -402,11 +402,20 @@ class ReceiptPatch(BaseModel):
 @router.patch("/{id}")
 async def patch_receipt(id: int, r: ReceiptPatch, user: dict = Depends(get_current_user)):
     p = await get_pool()
+    org_id = user["org_id"]
     fields, values = [], []
     for k, v in [("category", r.category), ("payment", r.payment), ("org", r.org)]:
         if v is not None:
             values.append(v)
             fields.append(f"{k}=${len(values)}")
+    # Ручная смена категории: category_id резолвим server-side (per-org, НЕ из тела —
+    # IDOR-защита) и ставим category_manual=TRUE — будущий батч-пересчёт (Фикс №4)
+    # такой чек не тронет. Триггер — любой непустой category в патче (явный выбор).
+    if r.category:
+        values.append(await resolve_category_id(p, org_id, r.category))
+        fields.append(f"category_id=${len(values)}")
+        values.append(True)
+        fields.append(f"category_manual=${len(values)}")
     if not fields:
         row = await p.fetchrow("SELECT * FROM receipts WHERE id=$1 AND org_id=$2", id, user["org_id"])
         if not row:
