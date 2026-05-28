@@ -65,6 +65,17 @@ class FakePool:
             self.category_groups.append(
                 {"id": self._gid, "org_id": args[0], "name": args[1], "position": args[2]})
             return self._gid
+        if "COALESCE(MAX(position),0)+1 FROM categories" in q:
+            # Фаза C POST: следующая position статьи внутри группы (per-org).
+            group_id, org_id = args
+            positions = [c["position"] for c in self.categories
+                         if c.get("group_id") == group_id and c.get("org_id") == org_id]
+            return (max(positions) if positions else 0) + 1
+        if q.startswith("SELECT COUNT(*) FROM receipts WHERE category_id=$1"):
+            # Фаза C DELETE-гард: сколько чеков привязано к категории (per-org).
+            cat_id, org_id = args
+            return sum(1 for r in self.receipts
+                       if r.get("category_id") == cat_id and r.get("org_id") == org_id)
         raise NotImplementedError(f"fetchval: {q}")
 
     async def fetch(self, query, *args):
@@ -79,6 +90,14 @@ class FakePool:
             return list(self.report_items)
         if q.startswith("SELECT * FROM cards WHERE org_id=$1 ORDER BY id"):
             return sorted([c for c in self.cards if c.get("org_id") == args[0]], key=lambda c: c["id"])
+        if q.startswith("SELECT id, name, position FROM category_groups WHERE org_id=$1"):
+            # Фаза C GET: группы орг по position.
+            return sorted([g for g in self.category_groups if g.get("org_id") == args[0]],
+                          key=lambda g: (g["position"], g["id"]))
+        if q.startswith("SELECT id, group_id, name, tax_kind, position, is_default, is_visible"):
+            # Фаза C GET: все статьи орг по position (фильтр visible_only — на стороне роутера).
+            return sorted([dict(c) for c in self.categories if c.get("org_id") == args[0]],
+                          key=lambda c: (c["position"], c["id"]))
         if q.startswith("SELECT MIN(id)"):
             groups = {}
             for r in self.receipts:
@@ -141,6 +160,49 @@ class FakePool:
             # Фикс №1 фаза B: resolve_category_id — имя статьи → id per-org.
             return next(({"id": c["id"]} for c in self.categories
                          if c.get("org_id") == args[0] and c.get("name") == args[1]), None)
+        if q.startswith("SELECT id FROM category_groups WHERE id=$1 AND org_id=$2"):
+            # Фаза C POST: группа принадлежит орг? (защита от чужого group_id).
+            return next(({"id": g["id"]} for g in self.category_groups
+                         if g["id"] == args[0] and g.get("org_id") == args[1]), None)
+        if q.startswith("SELECT id, is_default FROM categories WHERE id=$1 AND org_id=$2"):
+            # Фаза C PATCH/DELETE: существует + системная ли (per-org).
+            return next(({"id": c["id"], "is_default": c.get("is_default", True)}
+                         for c in self.categories
+                         if c["id"] == args[0] and c.get("org_id") == args[1]), None)
+        if q.startswith("INSERT INTO categories") and "RETURNING" in q:
+            # Фаза C POST: пользовательская статья (is_default=FALSE). UNIQUE(org_id,name).
+            org_id, group_id, name, tax_kind, position = args[:5]
+            if any(c.get("org_id") == org_id and c.get("name") == name for c in self.categories):
+                raise asyncpg.exceptions.UniqueViolationError(
+                    'duplicate key value violates unique constraint "categories_org_id_name_key"')
+            self._catid += 1
+            row = {"id": self._catid, "org_id": org_id, "group_id": group_id, "name": name,
+                   "tax_kind": tax_kind, "position": position,
+                   "is_default": False, "is_visible": True}
+            self.categories.append(row)
+            return dict(row)
+        if q.startswith("UPDATE categories SET"):
+            # Фаза C PATCH (name/tax_kind) и visibility — общий динамический матчер.
+            set_part, where_part = q.split("SET", 1)[1].split("WHERE", 1)
+            assignments = []
+            for pair in set_part.split(","):
+                m = re.match(r"\s*(\w+)\s*=\s*\$(\d+)", pair)
+                assignments.append((m.group(1), int(m.group(2)) - 1))
+            idxs = [int(x) - 1 for x in re.findall(r"\$(\d+)", where_part)]
+            cat_id, org_id = args[idxs[0]], args[idxs[1]]
+            target = next((c for c in self.categories
+                           if c["id"] == cat_id and c.get("org_id") == org_id), None)
+            if not target:
+                return None
+            for field, idx in assignments:
+                if field == "name" and any(
+                        c["id"] != cat_id and c.get("org_id") == org_id
+                        and c.get("name") == args[idx] for c in self.categories):
+                    raise asyncpg.exceptions.UniqueViolationError(
+                        'duplicate key value violates unique constraint "categories_org_id_name_key"')
+            for field, idx in assignments:
+                target[field] = args[idx]
+            return dict(target)
         if "AND source = $4" in q and "90 seconds" in q:
             # Ветка 0 — двойной тап: date+amount+org_id+source, fn-less, окно 90 сек.
             d, amount, org_id, source = args
@@ -263,6 +325,12 @@ class FakePool:
         if q.startswith("DELETE FROM cards WHERE id=$1"):
             self.cards = [c for c in self.cards if c["id"] != args[0]]
             return "DELETE"
+        if q.startswith("DELETE FROM categories WHERE id=$1 AND org_id=$2"):
+            # Фаза C DELETE: только своя орг (роутер уже проверил is_default и чеки).
+            cat_id, org_id = args
+            self.categories = [c for c in self.categories
+                               if not (c["id"] == cat_id and c.get("org_id") == org_id)]
+            return "DELETE"
         if q.startswith("DELETE FROM report_items WHERE receipt_id = ANY($1"):
             # Bulk (фаза C): org-безопасно — только связи чеков СВОЕЙ орг.
             ids, org_id = args
@@ -365,15 +433,40 @@ def seeded(db):
     return db
 
 
+def _override_user(role, user_id=1):
+    """Подменяет get_current_user фиксированным юзером org_id=1 с заданной ролью."""
+    app.dependency_overrides[get_current_user] = lambda: {
+        "id": user_id, "org_id": 1, "email": "test@aocg.ru",
+        "first_name": "Test", "last_name": "User", "role": role,
+        "is_email_verified": True, "password_hash": None,
+    }
+
+
 @pytest_asyncio.fixture
 async def client(db):
     # Routers now depend on get_current_user (auth + org scoping). Tests don't
     # carry a JWT, so override the dependency with a fixed org_id=1 user.
-    app.dependency_overrides[get_current_user] = lambda: {
-        "id": 1, "org_id": 1, "email": "test@aocg.ru",
-        "first_name": "Test", "last_name": "User", "role": "admin",
-        "is_email_verified": True, "password_hash": None,
-    }
+    _override_user("admin")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def client_accountant(db):
+    """Фаза C: бухгалтер — может мутировать категории (вариант 1)."""
+    _override_user("accountant")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def client_employee(db):
+    """Фаза C: сотрудник — GET работает, мутации → 403."""
+    _override_user("employee", user_id=2)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
