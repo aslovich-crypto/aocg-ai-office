@@ -197,3 +197,51 @@ async def test_post_categorizes_by_items_azbuka(client, db):
     assert body["category"] == "Продукты для офиса"
     assert body["category_id"] == next(
         c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Продукты для офиса")
+
+
+# ─── Фикс A2: приоритет бренда (org_brand) над юрлицом ───
+def test_v2_brand_priority_over_legal():
+    # юрлицо без триггера, но бренд узнаётся → категория по бренду
+    assert auto_categorize_v2('ООО "Городской супермаркет"', brand="Азбука Вкуса") == "Продукты для офиса"
+
+
+def test_v2_brand_unknown_falls_back_to_legal():
+    # бренд не узнан → пробуем юрлицо (тот самый OCR-баг: раньше юрлицо не пробовалось)
+    assert auto_categorize_v2("Лукойл АЗС №1", brand="Неизвестный Бренд XYZ") == "Топливо"
+
+
+def test_v2_brand_none_backward_compat():
+    # brand=None → поведение как до A2
+    assert auto_categorize_v2("Лукойл") == "Топливо"
+    assert auto_categorize_v2("Неведомый Контрагент") == DEFAULT_FALLBACK
+
+
+def test_v2_brand_and_legal_unknown_fallback():
+    assert auto_categorize_v2("ООО Ромашка", brand="ИП Иванов") == DEFAULT_FALLBACK
+
+
+def test_categorize_items_beat_brand():
+    # приоритет: позиции > бренд. Канцелярия по позициям перебивает бренд «Лукойл» (топливо)
+    items = [{"name": "Бумага А4 SvetoCopy 500л", "sum": 350}]
+    assert categorize("Лукойл АЗС", items, brand="Лукойл") == "Канцелярские товары"
+
+
+def test_categorize_brand_without_items():
+    # позиций нет → бренд решает (юрлицо без триггера)
+    assert categorize('ООО "Городской супермаркет"', [], brand="Азбука Вкуса") == "Продукты для офиса"
+
+
+async def test_post_categorizes_by_brand_when_items_unknown(client, db):
+    # Фикс A2 end-to-end: юрлицо без триггера + позиции не узнаны, но retailPlace=бренд Азбука
+    await seed_default_categories(db, 1)
+    resp = await client.post("/api/receipts/", json={
+        "date": "2026-05-28", "org": 'ООО "Городской супермаркет"', "amount": 12.90,
+        "source": "qr_scan",
+        "raw_data": {"user": 'ООО "Городской супермаркет"', "userInn": "7705466989",
+                     "retailPlace": 'Супермаркет "Азбука Вкуса"',
+                     "items": [{"name": "Пакет майка ТМ", "sum": 1290}]}})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["category"] == "Продукты для офиса"
+    assert body["category_id"] == next(
+        c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Продукты для офиса")

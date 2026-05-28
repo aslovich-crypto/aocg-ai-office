@@ -134,26 +134,10 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     effective_kkt_fn = r.kkt_fn or r.fn   # переходный fallback: фронт пока шлёт fn
     org_id = user["org_id"]
 
-    # Категория: если пользователь не задал (или «Не указано») — авто по названию
-    # орг (v2: 48 статей, фолбэк «Прочие хозрасходы»). Строку category пишем как
-    # раньше (backward compat), плюс резолвим её в category_id per-org (Фикс №1 фаза B).
-    category = r.category
-    if not category or category == "Не указано":
-        # Фикс №4: категоризация по позициям (приоритет) → имя орг → «Прочие хозрасходы».
-        # Позиции берём из raw_data по источнику (тот же парсер, что и при вставке ниже).
-        items = []
-        if r.raw_data:
-            if source in ("qr_scan", "fns"):
-                items = parse_fns_items(r.raw_data)
-            elif source == "photo_ocr":
-                items = parse_ocr_items(r.raw_data)
-        category = categorize(r.org or "", items)
-    category_id = await resolve_category_id(p, org_id, category)
-
-    # ── Парсинг raw_data ДО дедупа: даёт effective_org_inn для composite-веток.
-    # ФНС-формат для qr_scan/fns, OCR-формат для photo_ocr; оба парсера возвращают
-    # ОДИН набор ключей (см. INSERT). Сбой → {}, чек всё равно создастся. В лог НЕ
-    # пишем raw_data — там ИНН поставщика / имя кассира (152-ФЗ).
+    # ── Парсинг raw_data ДО категоризации и дедупа: даёт org_brand (приоритет бренда,
+    # Фикс A2) и effective_org_inn (composite-ветки). ФНС-формат для qr_scan/fns,
+    # OCR-формат для photo_ocr; оба парсера возвращают ОДИН набор ключей (см. INSERT).
+    # Сбой → {}, чек всё равно создастся. В лог НЕ пишем raw_data (ИНН/кассир, 152-ФЗ).
     parsed: dict = {}
     if r.raw_data:
         try:
@@ -165,6 +149,20 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
             logger.warning("raw_data parse failed (source=%s): %s", source, type(e).__name__)
             parsed = {}
     effective_org_inn = parsed.get("org_inn")   # уже провалидирован в parse_*_response
+
+    # Категория: если пользователь не задал (или «Не указано») — авто. Приоритет
+    # (Фикс №4 + A2): позиции → бренд (org_brand) → юрлицо (org) → «Прочие хозрасходы».
+    # Строку category пишем как раньше (backward compat) + резолвим в category_id per-org.
+    category = r.category
+    if not category or category == "Не указано":
+        items = []
+        if r.raw_data:
+            if source in ("qr_scan", "fns"):
+                items = parse_fns_items(r.raw_data)
+            elif source == "photo_ocr":
+                items = parse_ocr_items(r.raw_data)
+        category = categorize(r.org or "", items, brand=parsed.get("org_brand"))
+    category_id = await resolve_category_id(p, org_id, category)
 
     # Надёжный фискальный номер есть только у не-photo_ocr источников с номером.
     # photo_ocr пишет kkt_fn=NULL (Вариант A) — его OCR-номер не считается надёжным.

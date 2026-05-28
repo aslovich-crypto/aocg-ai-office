@@ -379,16 +379,24 @@ TRIGGERS = {
 }
 
 
-def auto_categorize_v2(org_text: str) -> str:
-    """Имя орг → каноническое имя статьи из 48 (или DEFAULT_FALLBACK). Без БД.
-    Регистронезависимо, по подстроке, первое совпадение в порядке TRIGGERS."""
-    if not org_text:
-        return DEFAULT_FALLBACK
-    lower = org_text.lower()
+def _match(text: Optional[str]) -> Optional[str]:
+    """Имя статьи по подстроке-триггеру (первое совпадение в порядке TRIGGERS) или None.
+    БЕЗ фолбэка — чтобы вызывающий мог попробовать сначала бренд, затем юрлицо."""
+    if not text:
+        return None
+    lower = text.lower()
     for category_name, keywords in TRIGGERS.items():
         if any(kw in lower for kw in keywords):
             return category_name
-    return DEFAULT_FALLBACK
+    return None
+
+
+def auto_categorize_v2(org_text: str, brand: Optional[str] = None) -> str:
+    """Имя орг → каноническое имя статьи из 48 (или DEFAULT_FALLBACK). Без БД. Фикс A2:
+    бренд (org_brand) в ПРИОРИТЕТЕ над юрлицом — у юрлица («ООО Городской супермаркет»)
+    редко есть узнаваемое слово, а у бренда («Азбука Вкуса») есть. brand=None → как раньше
+    (обратная совместимость). Регистронезависимо, по подстроке."""
+    return _match(brand) or _match(org_text) or DEFAULT_FALLBACK
 
 
 # ─── Фикс №4: категоризация по ПОЗИЦИЯМ чека ───
@@ -463,8 +471,8 @@ def categorize_items(items) -> Optional[str]:
     return max(counts, key=lambda a: counts[a])
 
 
-def categorize(org_text: str, items=None) -> str:
-    """Единая точка категоризации (Фикс №4): позиции → магазин → «Прочие хозрасходы».
-    Анализ позиций в приоритете; если ничего не узнано — фолбэк на имя орг
+def categorize(org_text: str, items=None, brand: Optional[str] = None) -> str:
+    """Единая точка категоризации (Фикс №4 + A2): позиции → бренд → юрлицо → «Прочие
+    хозрасходы». Анализ позиций в приоритете; иначе фолбэк на имя орг с приоритетом бренда
     (auto_categorize_v2, который сам падает в DEFAULT_FALLBACK)."""
-    return categorize_items(items) or auto_categorize_v2(org_text)
+    return categorize_items(items) or auto_categorize_v2(org_text, brand)

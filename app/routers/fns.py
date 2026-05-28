@@ -94,7 +94,7 @@ async def check_receipt(req: CheckRequest):
     return {
         "status":   "ok",
         "org":      org,
-        "category": categorize(org, j.get("items") or []),
+        "category": categorize(org, j.get("items") or [], brand=j.get("retailPlace")),
         "inn":      j.get("userInn", ""),
         "address":  j.get("retailPlaceAddress", ""),
         "total":    j.get("totalSum", 0) / 100,

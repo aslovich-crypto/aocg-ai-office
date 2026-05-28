@@ -182,7 +182,7 @@ def _finalize(parsed: dict) -> dict:
     out["org"] = org
     out["inn"] = out["org_inn"]
     out["payment_type"] = out["payment_form"] if out["payment_form"] in ("cash", "card") else None
-    out["category"] = categorize(org or "", out["items"] or [])
+    out["category"] = categorize(out["org_legal"] or "", out["items"] or [], brand=out["org_brand"])
     # nds = фактический НДС (20% + 10%); vat_0 — это «без НДС», в сумму не входит.
     vat_parts = [v for v in (out["vat_20"], out["vat_10"]) if isinstance(v, (int, float))]
     out["nds"] = sum(vat_parts) if vat_parts else None
