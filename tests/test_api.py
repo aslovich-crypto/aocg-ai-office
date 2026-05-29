@@ -581,6 +581,26 @@ async def test_delete_receipt(client):
     assert all(r["id"] != rid for r in remaining)
 
 
+async def test_delete_receipt_cross_org_ignored(client, db):
+    """Юзер org A (client=org_id=1) не может удалить чек org B: ответ 200 {"ok": True}
+    (anti-enumeration), но чужой чек остаётся нетронутым (закрытие IDOR P1)."""
+    _mk(db, 99, source="manual", org_id=2)        # чужая орг
+    resp = await client.delete("/api/receipts/99")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert any(r["id"] == 99 for r in db.receipts)   # чужой чек жив
+
+
+async def test_delete_receipt_org_safe_report_items(client, db):
+    """При одиночном cross-org DELETE связь report_items чужой орг НЕ трогается
+    (аналог test_bulk_delete_org_safe_report_items)."""
+    _mk(db, 99, source="manual", org_id=2)
+    db.report_items.append({"report_id": 5, "receipt_id": 99})   # связь чужого чека
+    resp = await client.delete("/api/receipts/99")
+    assert resp.status_code == 200
+    assert any(ri["receipt_id"] == 99 for ri in db.report_items)   # уцелела
+
+
 # ─── POST /api/receipts/bulk-delete (задача №9 фаза C) ────────────────
 def _mk(db, rid, *, source="manual", kkt_fn=None, org_id=1, amount=100.0):
     db.receipts.append(dict(id=rid, date=date(2026, 5, 20), org=f"Org{rid}",

@@ -441,8 +441,18 @@ async def patch_receipt(id: int, r: ReceiptPatch, user: dict = Depends(get_curre
 @router.delete("/{id}")
 async def delete_receipt(id: int, user: dict = Depends(get_current_user)):
     p = await get_pool()
+    org_id = user["org_id"]
     async with p.acquire() as conn:
         async with conn.transaction():
-            await conn.execute("DELETE FROM report_items WHERE receipt_id=$1", id)
-            await conn.execute("DELETE FROM receipts WHERE id=$1 AND org_id=$2", id, user["org_id"])
+            # org-безопасная чистка связей (защита от IDOR P1, аналог bulk-delete):
+            # report_items трогаем ТОЛЬКО для чеков своей орг.
+            await conn.execute(
+                """DELETE FROM report_items
+                   WHERE receipt_id=$1
+                   AND receipt_id IN (SELECT id FROM receipts WHERE org_id=$2)""",
+                id, org_id,
+            )
+            await conn.execute(
+                "DELETE FROM receipts WHERE id=$1 AND org_id=$2", id, org_id)
+    # Всегда 200 {"ok": True} — не палим существование чужих чеков (anti-enumeration).
     return {"ok": True}

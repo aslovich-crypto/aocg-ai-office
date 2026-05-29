@@ -307,11 +307,18 @@ class FakePool:
                              if not (r["date"] == d and r["amount"] == a
                                      and r["org"] == o and r["id"] != keep)]
             return "DELETE"
-        if q.startswith("DELETE FROM receipts WHERE id=$1"):
-            self.receipts = [r for r in self.receipts if r["id"] != args[0]]
+        if q.startswith("DELETE FROM receipts WHERE id=$1 AND org_id=$2"):
+            # Одиночный DELETE: только чек своей орг (фикс P1 — был фильтр лишь по id).
+            rid, org_id = args
+            self.receipts = [r for r in self.receipts
+                             if not (r["id"] == rid and r.get("org_id") == org_id)]
             return "DELETE"
-        if q.startswith("DELETE FROM report_items WHERE receipt_id=$1"):
-            self.report_items = [i for i in self.report_items if i["receipt_id"] != args[0]]
+        if q.startswith("DELETE FROM report_items WHERE receipt_id=$1 AND receipt_id IN"):
+            # Одиночный DELETE (фикс P1): org-безопасно — только связь чека СВОЕЙ орг.
+            rid, org_id = args
+            own = {r["id"] for r in self.receipts if r.get("org_id") == org_id}
+            self.report_items = [ri for ri in self.report_items
+                                 if not (ri["receipt_id"] == rid and ri["receipt_id"] in own)]
             return "DELETE"
         if q.startswith("INSERT INTO report_items"):
             self.report_items.append({"report_id": args[0], "receipt_id": args[1]})
