@@ -167,7 +167,10 @@ async def test_category_delete_with_receipts_409(client, db):
     db.receipts.append({"id": 1, "org_id": 1, "category_id": cid})
     resp = await client.delete(f"/api/categories/{cid}")
     assert resp.status_code == 409
-    assert "1" in resp.json()["detail"]
+    body = resp.json()
+    assert body["detail"]["code"] == "category_has_receipts"
+    assert body["detail"]["count"] == 1
+    assert "привязан" in body["detail"]["message"]
 
 
 # ─── PATCH /api/categories/{id}/visibility ───

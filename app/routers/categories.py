@@ -155,7 +155,12 @@ async def delete_category(id: int, user: dict = Depends(get_current_user)):
         "SELECT COUNT(*) FROM receipts WHERE category_id=$1 AND org_id=$2", id, user["org_id"])
     if cnt > 0:
         raise HTTPException(
-            status_code=409, detail=f"Нельзя удалить категорию: к ней привязано {cnt} чеков")
+            status_code=409,
+            detail={
+                "code": "category_has_receipts",
+                "message": "Нельзя удалить категорию: к ней привязаны чеки",
+                "count": cnt,
+            })
     await p.execute("DELETE FROM categories WHERE id=$1 AND org_id=$2", id, user["org_id"])
     return {"ok": True}
 
