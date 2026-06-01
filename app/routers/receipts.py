@@ -248,13 +248,13 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
             dup_confidence = "low"
             dup_message = "Возможный дубль: дата и сумма совпадают с чеком за последние 7 дней"
 
-    # Вариант A: photo_ocr НЕ пишет номер ни в fn, ни в kkt_fn (OCR-номер
-    # ненадёжен и остаётся только в raw_data.fn). Надёжные источники пишут в обе
-    # колонки — fn для backward-compat на переходный период, kkt_fn как основную.
+    # Вариант A: photo_ocr НЕ пишет номер в kkt_fn (OCR-номер ненадёжен, остаётся
+    # только в raw_data.fn). Надёжные источники пишут kkt_fn — каноническую колонку
+    # (старая fn убрана; приём r.fn ещё роутится в effective_kkt_fn выше для совместимости).
     if source == "photo_ocr":
-        fn_to_save = kkt_fn_to_save = None
+        kkt_fn_to_save = None
     else:
-        fn_to_save = kkt_fn_to_save = effective_kkt_fn
+        kkt_fn_to_save = effective_kkt_fn
 
     # kkt_fn колонка пишется из dedup-значения (kkt_fn_to_save), НЕ из parsed —
     # чтобы хранимое значение совпадало с тем, по которому шёл дедуп (ЧП C).
@@ -264,18 +264,18 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                 row = await conn.fetchrow(
                     """INSERT INTO receipts (
                         org_id, date, org, category, payment, amount, employee,
-                        fn, kkt_fn, raw_data, source, photo_url,
+                        kkt_fn, raw_data, source, photo_url,
                         datetime, currency, operation_type, org_legal, org_brand,
                         org_inn, payment_form, payment_detail, card_last4,
                         tax_system, address, vat_20, vat_10, vat_0,
                         kkt_serial, kkt_rn, fd_num, fpd, cashier, category_id
                     ) VALUES (
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-                        $13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
-                        $27,$28,$29,$30,$31,$32
+                        $13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,
+                        $25,$26,$27,$28,$29,$30,$31
                     ) RETURNING *""",
                     user["org_id"], r.date, r.org, category, r.payment, r.amount, r.employee,
-                    fn_to_save, kkt_fn_to_save, r.raw_data, source, r.photo_url,
+                    kkt_fn_to_save, r.raw_data, source, r.photo_url,
                     parsed.get("datetime"), parsed.get("currency"), parsed.get("operation_type"),
                     parsed.get("org_legal"), parsed.get("org_brand"), parsed.get("org_inn"),
                     parsed.get("payment_form"), parsed.get("payment_detail"), parsed.get("card_last4"),

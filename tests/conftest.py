@@ -216,10 +216,10 @@ class FakePool:
         # NB: дедуп-ветки 2/3 (composite, окно 7 дней) с фазы C идут через fetch
         # (массив duplicates), а не fetchrow — их матчеры в методе fetch ниже.
         if q.startswith("INSERT INTO receipts"):
-            # 32-arg insert (ЧП D order: org_id, date, … , cashier, category_id).
+            # 31-arg insert (legacy fn убрана: org_id, date, … , cashier, category_id).
             # Зеркалит порядок колонок в receipts.py. card_id не вставляется → None.
-            args = list(args) + [None] * (32 - len(args))
-            kkt_fn_val = args[8]
+            args = list(args) + [None] * (31 - len(args))
+            kkt_fn_val = args[7]
             # Mirror the GLOBAL partial-unique index receipts_kkt_fn_unique:
             # a non-NULL kkt_fn already present (in ANY org) → UniqueViolationError.
             if kkt_fn_val is not None and any(r.get("kkt_fn") == kkt_fn_val for r in self.receipts):
@@ -229,15 +229,15 @@ class FakePool:
             row = dict(id=self._rid,
                        org_id=args[0], date=args[1], org=args[2], category=args[3],
                        payment=args[4], amount=args[5], employee=args[6],
-                       fn=args[7], kkt_fn=args[8], raw_data=args[9],
-                       source=args[10] or "manual", photo_url=args[11],
-                       datetime=args[12], currency=args[13], operation_type=args[14],
-                       org_legal=args[15], org_brand=args[16], org_inn=args[17],
-                       payment_form=args[18], payment_detail=args[19], card_last4=args[20],
-                       tax_system=args[21], address=args[22],
-                       vat_20=args[23], vat_10=args[24], vat_0=args[25],
-                       kkt_serial=args[26], kkt_rn=args[27], fd_num=args[28],
-                       fpd=args[29], cashier=args[30], category_id=args[31], card_id=None,
+                       kkt_fn=args[7], raw_data=args[8],
+                       source=args[9] or "manual", photo_url=args[10],
+                       datetime=args[11], currency=args[12], operation_type=args[13],
+                       org_legal=args[14], org_brand=args[15], org_inn=args[16],
+                       payment_form=args[17], payment_detail=args[18], card_last4=args[19],
+                       tax_system=args[20], address=args[21],
+                       vat_20=args[22], vat_10=args[23], vat_0=args[24],
+                       kkt_serial=args[25], kkt_rn=args[26], fd_num=args[27],
+                       fpd=args[28], cashier=args[29], category_id=args[30], card_id=None,
                        created_at=datetime.utcnow())
             self.receipts.append(row)
             return dict(row)
@@ -429,7 +429,7 @@ def seeded(db):
     now = datetime.utcnow()
     db.receipts.append(dict(id=1, date=date(2026, 5, 10), org="Лукойл", category="Топливо",
                             payment="Корп.карта", amount=5000.0, employee=None,
-                            fn="FN-EXISTING-1", kkt_fn="FN-EXISTING-1", raw_data=None,
+                            kkt_fn="FN-EXISTING-1", raw_data=None,
                             source="manual", photo_url=None, org_id=1, created_at=now))
     db._rid = 1
     db.cards.append(dict(id=1, name="Корп.карта", org_id=1, created_at=now))

@@ -41,9 +41,6 @@ async def init_db():
                 report_id INTEGER REFERENCES reports(id) ON DELETE CASCADE,
                 receipt_id INTEGER REFERENCES receipts(id)
             );
-            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS fn TEXT;
-            CREATE UNIQUE INDEX IF NOT EXISTS receipts_fn_unique
-                ON receipts(fn) WHERE fn IS NOT NULL;
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS raw_data JSONB;
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual';
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS photo_url TEXT;
@@ -82,9 +79,6 @@ async def init_db():
             INSERT INTO users (first_name, last_name, patronymic, email, role)
             SELECT 'Алексей', 'Шукалович', 'Иванович', 'a.slovich@gmail.com', 'admin'
             WHERE NOT EXISTS (SELECT 1 FROM users);
-            -- Backfill: receipts with a fiscal number came via QR/FNS, not manual.
-            UPDATE receipts SET source='qr_scan'
-            WHERE (fn IS NOT NULL AND fn <> '') AND (source IS NULL OR source='manual');
 
             -- ─── AUTH & ORGANIZATIONS (feat/auth-system) ───
             CREATE TABLE IF NOT EXISTS organizations (
@@ -141,9 +135,9 @@ async def init_db():
             -- ============================================================
             -- Расширение схемы (Чекпойнт A задачи №7 / AOCG-DIR-AI-002 v10)
             -- Добавляет 20 колонок + receipt_items + 5 индексов.
-            -- Старые колонки (fn, org, payment, date, amount, employee)
-            -- НЕ удаляются — продолжают использоваться. Переименование
-            -- fn → kkt_fn — отдельный Чекпойнт C.
+            -- Старые колонки (org, payment, date, amount, employee) НЕ удаляются.
+            -- Колонка fn выведена из обращения (канон — kkt_fn); сам DROP COLUMN fn —
+            -- отдельным ЧП, здесь init_db её больше не трогает.
             -- ============================================================
             -- Обязательные (10 — fn уже есть; amount оставляем старую NUMERIC(12,2)):
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS datetime       TIMESTAMP WITH TIME ZONE;
@@ -189,11 +183,11 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_receipts_org_id          ON receipts(org_id);
             CREATE INDEX IF NOT EXISTS idx_receipt_items_receipt_id ON receipt_items(receipt_id);
 
-            -- ── Чекпойнт C задачи №7: переименование fn → kkt_fn (переходный период) ──
-            -- Старая колонка fn и индекс receipts_fn_unique НЕ удаляются — откат-страховка
-            -- на эту сессию (уберём fn в отдельной сессии, когда kkt_fn устаканится).
+            -- ── Чекпойнт C задачи №7: kkt_fn — канонический фискальный номер ──
+            -- Колонка fn и backfill kkt_fn=fn убраны (kkt_fn устаканился, пишется в
+            -- INSERT напрямую; DROP COLUMN fn — отдельным ЧП). receipts_kkt_fn_unique
+            -- — активный глобальный partial-unique.
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS kkt_fn VARCHAR(20);
-            UPDATE receipts SET kkt_fn = fn WHERE kkt_fn IS NULL AND fn IS NOT NULL;
             CREATE UNIQUE INDEX IF NOT EXISTS receipts_kkt_fn_unique
                 ON receipts(kkt_fn) WHERE kkt_fn IS NOT NULL;
 

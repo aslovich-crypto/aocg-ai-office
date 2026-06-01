@@ -211,7 +211,7 @@ async def test_dedup_outside_7_days_no_warning(client, db):
 async def test_dedup_weak_warning_no_inn(client, db):
     old = datetime.utcnow() - timedelta(hours=2)   # вне 90 сек, в окне 7 дней
     db.receipts.append(dict(id=1, date=date(2026, 5, 21), org="Ларёк", category="Прочее",
-                            payment="Наличные", amount=500.0, employee=None, fn=None,
+                            payment="Наличные", amount=500.0, employee=None,
                             kkt_fn=None, raw_data=None, source="manual", photo_url=None,
                             org_id=1, org_inn=None, created_at=old))
     db._rid = 1
@@ -229,7 +229,7 @@ async def test_dedup_weak_warning_no_inn(client, db):
 async def test_dedup_invalid_inn_falls_to_weak(client, db):
     # Невалидный ИНН отфильтрован парсером ФНС (org_inn=None) → слабая ветка.
     db.receipts.append(dict(id=1, date=date(2026, 5, 21), org="Кафе", category="Питание",
-                            payment="Наличные", amount=700.0, employee=None, fn=None,
+                            payment="Наличные", amount=700.0, employee=None,
                             kkt_fn=None, raw_data=None, source="photo_ocr", photo_url=None,
                             org_id=1, org_inn=None, created_at=datetime.utcnow() - timedelta(hours=1)))
     db._rid = 1
@@ -310,7 +310,7 @@ async def test_warning_backward_compat_id_field(client, db):
     # similar_receipt_id (deprecated) сохраняется параллельно similar_receipt —
     # старый фронт, читающий только id, не ломается.
     db.receipts.append(dict(id=1, date=date(2026, 5, 21), org="Ларёк", category="Прочее",
-                            payment="Наличные", amount=500.0, employee=None, fn=None,
+                            payment="Наличные", amount=500.0, employee=None,
                             kkt_fn=None, raw_data=None, source="manual", photo_url=None,
                             org_id=1, org_inn=None,
                             created_at=datetime.utcnow() - timedelta(hours=2)))
@@ -402,16 +402,15 @@ async def test_unique_violation_kkt_fn_cross_org_returns_409(client, db):
 
 async def test_photo_ocr_with_fn_not_written_to_columns(client):
     # Variant A: a photo_ocr receipt never writes its (unreliable) OCR number to
-    # the fn / kkt_fn columns — it stays only in raw_data.fn for reference.
+    # the kkt_fn column — it stays only in raw_data.fn for reference.
     resp = await client.post("/api/receipts/", json={
         "date": "2026-05-22", "org": "Кофейня", "amount": 250.0,
-        "source": "photo_ocr", "fn": "OCR_HALLUCINATED_FN",
+        "source": "photo_ocr", "kkt_fn": "OCR_HALLUCINATED_FN",
         "raw_data": {"fn": "OCR_HALLUCINATED_FN", "items": []}})
     assert resp.status_code == 200
     rid = resp.json()["id"]
 
     row = (await client.get(f"/api/receipts/{rid}")).json()
-    assert row["fn"] is None
     assert row["kkt_fn"] is None
     assert row["raw_data"]["fn"] == "OCR_HALLUCINATED_FN"   # preserved for reference
 
@@ -605,7 +604,7 @@ async def test_delete_receipt_org_safe_report_items(client, db):
 def _mk(db, rid, *, source="manual", kkt_fn=None, org_id=1, amount=100.0):
     db.receipts.append(dict(id=rid, date=date(2026, 5, 20), org=f"Org{rid}",
                             category="Прочее", payment=None, amount=amount, employee=None,
-                            fn=kkt_fn, kkt_fn=kkt_fn, raw_data=None, source=source,
+                            kkt_fn=kkt_fn, raw_data=None, source=source,
                             photo_url=None, org_id=org_id, created_at=datetime.utcnow()))
     db._rid = max(db._rid, rid)
 
