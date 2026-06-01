@@ -192,8 +192,8 @@ async def init_db():
                 ON receipts(kkt_fn) WHERE kkt_fn IS NOT NULL;
 
             -- ── Фикс №1 фаза A: справочник категорий расходов (11 групп / 48 статей) ──
-            -- per-org копии (каждая орг владеет своими); старая receipts.category
-            -- (строка) НЕ трогается — страховка переходного периода.
+            -- per-org копии (каждая орг владеет своими); receipts.category_id ссылается
+            -- на categories.id (канон; старая строковая колонка category удалена).
             CREATE TABLE IF NOT EXISTS category_groups (
                 id          SERIAL PRIMARY KEY,
                 org_id      INTEGER NOT NULL REFERENCES organizations(id),

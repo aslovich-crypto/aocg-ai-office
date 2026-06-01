@@ -6,8 +6,8 @@ DEFAULT_CATEGORIES — 11 групп × 48 статей, каждая стать
 per-org через seed_default_categories — так каждая орг может дальше скрывать
 дефолтные и добавлять свои (is_default=FALSE).
 
-Старая колонка receipts.category (строка) НЕ трогается — страховка на
-переходный период; новое поле receipts.category_id ссылается на categories.id.
+Категория чека хранится в receipts.category_id → categories.id (канон;
+старая строковая колонка receipts.category удалена, вариант B).
 """
 
 # 9 допустимых значений tax_kind (зеркало CHECK-констрейнта в categories).
