@@ -1,15 +1,12 @@
-"""Фикс №1 фаза A: справочник категорий — структура данных + seed/backfill.
+"""Фикс №1 фаза A: справочник категорий — структура данных + seed.
 
-Seed/backfill гоняются на FakePool (conftest): нет реального Postgres локально,
-но FakePool реализует ровно те запросы, что шлёт seed_default_categories/
-backfill_category_ids (INSERT category_groups RETURNING id, INSERT categories,
-EXISTS-проверка, UPDATE receipts ... FROM categories)."""
-from datetime import date
-
+Seed гоняется на FakePool (conftest): нет реального Postgres локально, но
+FakePool реализует ровно те запросы, что шлёт seed_default_categories
+(INSERT category_groups RETURNING id, INSERT categories, EXISTS-проверка).
+Бэкфилл строковых категорий удалён вместе с переходом на вариант B."""
 from app.categories_seed import (
     DEFAULT_CATEGORIES,
     TAX_KINDS,
-    backfill_category_ids,
     seed_default_categories,
 )
 
@@ -56,21 +53,3 @@ async def test_seed_bootstrap_multiple_orgs(db):
     assert len(db.categories) == 144       # 48 × 3
     for org_id in (1, 2, 3):
         assert sum(1 for c in db.categories if c["org_id"] == org_id) == 48
-
-
-# ─── 5. Backfill старых строковых категорий 3 чеков ───
-async def test_backfill_maps_existing_receipts(db):
-    await seed_default_categories(db, 1)
-    db.receipts.append(dict(id=1, org_id=1, category="Питание", category_id=None,
-                            date=date(2026, 5, 26), org="X", amount=10.0))
-    db.receipts.append(dict(id=2, org_id=1, category="Не указано", category_id=None,
-                            date=date(2026, 5, 26), org="Y", amount=20.0))
-    db.receipts.append(dict(id=3, org_id=1, category=None, category_id=None,
-                            date=date(2026, 5, 26), org="Z", amount=30.0))
-    await backfill_category_ids(db)
-    by_id = {r["id"]: r for r in db.receipts}
-    obed = next(c for c in db.categories if c["name"] == "Обеды сотрудников" and c["org_id"] == 1)
-    proch = next(c for c in db.categories if c["name"] == "Прочие хозрасходы" and c["org_id"] == 1)
-    assert by_id[1]["category_id"] == obed["id"]      # Питание → Обеды сотрудников
-    assert by_id[2]["category_id"] == proch["id"]     # Не указано → Прочие хозрасходы
-    assert by_id[3]["category_id"] is None            # NULL остаётся NULL

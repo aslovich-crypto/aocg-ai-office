@@ -152,7 +152,8 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
 
     # Категория: если пользователь не задал (или «Не указано») — авто. Приоритет
     # (Фикс №4 + A2): позиции → бренд (org_brand) → юрлицо (org) → «Прочие хозрасходы».
-    # Строку category пишем как раньше (backward compat) + резолвим в category_id per-org.
+    # Имя категории — промежуточное: резолвим в category_id per-org (канон), саму
+    # строку category в колонку больше НЕ пишем (вариант B; DROP COLUMN — отдельный ЧП).
     category = r.category
     if not category or category == "Не указано":
         items = []
@@ -263,18 +264,18 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
             async with conn.transaction():
                 row = await conn.fetchrow(
                     """INSERT INTO receipts (
-                        org_id, date, org, category, payment, amount, employee,
+                        org_id, date, org, payment, amount, employee,
                         kkt_fn, raw_data, source, photo_url,
                         datetime, currency, operation_type, org_legal, org_brand,
                         org_inn, payment_form, payment_detail, card_last4,
                         tax_system, address, vat_20, vat_10, vat_0,
                         kkt_serial, kkt_rn, fd_num, fpd, cashier, category_id
                     ) VALUES (
-                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-                        $13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,
-                        $25,$26,$27,$28,$29,$30,$31
+                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+                        $12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,
+                        $24,$25,$26,$27,$28,$29,$30
                     ) RETURNING *""",
-                    user["org_id"], r.date, r.org, category, r.payment, r.amount, r.employee,
+                    user["org_id"], r.date, r.org, r.payment, r.amount, r.employee,
                     kkt_fn_to_save, r.raw_data, source, r.photo_url,
                     parsed.get("datetime"), parsed.get("currency"), parsed.get("operation_type"),
                     parsed.get("org_legal"), parsed.get("org_brand"), parsed.get("org_inn"),
@@ -410,13 +411,14 @@ async def patch_receipt(id: int, r: ReceiptPatch, user: dict = Depends(get_curre
     p = await get_pool()
     org_id = user["org_id"]
     fields, values = [], []
-    for k, v in [("category", r.category), ("payment", r.payment), ("org", r.org)]:
+    for k, v in [("payment", r.payment), ("org", r.org)]:
         if v is not None:
             values.append(v)
             fields.append(f"{k}=${len(values)}")
-    # Ручная смена категории: category_id резолвим server-side (per-org, НЕ из тела —
-    # IDOR-защита) и ставим category_manual=TRUE — будущий батч-пересчёт (Фикс №4)
-    # такой чек не тронет. Триггер — любой непустой category в патче (явный выбор).
+    # Ручная смена категории: строку category в колонку НЕ пишем (вариант B), только
+    # резолвим category_id server-side (per-org, НЕ из тела — IDOR-защита) и ставим
+    # category_manual=TRUE — будущий батч-пересчёт (Фикс №4) такой чек не тронет.
+    # Триггер — любой непустой r.category в патче (явный выбор имени фронтом).
     if r.category:
         values.append(await resolve_category_id(p, org_id, r.category))
         fields.append(f"category_id=${len(values)}")

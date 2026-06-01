@@ -97,14 +97,6 @@ DEFAULT_CATEGORIES = [
     ]),
 ]
 
-# Бэкфилл старых строковых категорий → имя дефолтной статьи (та же per-org).
-# NULL/прочие строки остаются без category_id (страховка — старая колонка цела).
-BACKFILL_MAP = {
-    "Питание": "Обеды сотрудников",
-    "Не указано": "Прочие хозрасходы",
-}
-
-
 async def seed_default_categories(conn, org_id) -> int:
     """Идемпотентно засеять 11 групп + 48 статей для org_id.
 
@@ -128,17 +120,3 @@ async def seed_default_categories(conn, org_id) -> int:
                 org_id, gid, cname, tax_kind, cpos)
             created += 1
     return created
-
-
-async def backfill_category_ids(conn) -> None:
-    """Проставить receipts.category_id по старой строковой category (per-org, по
-    имени дефолтной статьи из BACKFILL_MAP). Только где category_id IS NULL; NULL
-    и неизвестные строки остаются без category_id — старая колонка цела (страховка).
-    Должна вызываться ПОСЛЕ seed (статьи уже существуют)."""
-    for old_name, new_name in BACKFILL_MAP.items():
-        await conn.execute(
-            """UPDATE receipts r SET category_id = c.id
-               FROM categories c
-               WHERE r.category_id IS NULL AND r.category = $1
-                 AND c.org_id = r.org_id AND c.name = $2""",
-            old_name, new_name)

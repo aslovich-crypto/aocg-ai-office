@@ -216,10 +216,10 @@ class FakePool:
         # NB: дедуп-ветки 2/3 (composite, окно 7 дней) с фазы C идут через fetch
         # (массив duplicates), а не fetchrow — их матчеры в методе fetch ниже.
         if q.startswith("INSERT INTO receipts"):
-            # 31-arg insert (legacy fn убрана: org_id, date, … , cashier, category_id).
+            # 30-arg insert (legacy fn + строка category убраны: org_id, date, … , category_id).
             # Зеркалит порядок колонок в receipts.py. card_id не вставляется → None.
-            args = list(args) + [None] * (31 - len(args))
-            kkt_fn_val = args[7]
+            args = list(args) + [None] * (30 - len(args))
+            kkt_fn_val = args[6]
             # Mirror the GLOBAL partial-unique index receipts_kkt_fn_unique:
             # a non-NULL kkt_fn already present (in ANY org) → UniqueViolationError.
             if kkt_fn_val is not None and any(r.get("kkt_fn") == kkt_fn_val for r in self.receipts):
@@ -227,17 +227,17 @@ class FakePool:
                     'duplicate key value violates unique constraint "receipts_kkt_fn_unique"')
             self._rid += 1
             row = dict(id=self._rid,
-                       org_id=args[0], date=args[1], org=args[2], category=args[3],
-                       payment=args[4], amount=args[5], employee=args[6],
-                       kkt_fn=args[7], raw_data=args[8],
-                       source=args[9] or "manual", photo_url=args[10],
-                       datetime=args[11], currency=args[12], operation_type=args[13],
-                       org_legal=args[14], org_brand=args[15], org_inn=args[16],
-                       payment_form=args[17], payment_detail=args[18], card_last4=args[19],
-                       tax_system=args[20], address=args[21],
-                       vat_20=args[22], vat_10=args[23], vat_0=args[24],
-                       kkt_serial=args[25], kkt_rn=args[26], fd_num=args[27],
-                       fpd=args[28], cashier=args[29], category_id=args[30], card_id=None,
+                       org_id=args[0], date=args[1], org=args[2],
+                       payment=args[3], amount=args[4], employee=args[5],
+                       kkt_fn=args[6], raw_data=args[7],
+                       source=args[8] or "manual", photo_url=args[9],
+                       datetime=args[10], currency=args[11], operation_type=args[12],
+                       org_legal=args[13], org_brand=args[14], org_inn=args[15],
+                       payment_form=args[16], payment_detail=args[17], card_last4=args[18],
+                       tax_system=args[19], address=args[20],
+                       vat_20=args[21], vat_10=args[22], vat_0=args[23],
+                       kkt_serial=args[24], kkt_rn=args[25], fd_num=args[26],
+                       fpd=args[27], cashier=args[28], category_id=args[29], card_id=None,
                        created_at=datetime.utcnow())
             self.receipts.append(row)
             return dict(row)
@@ -357,17 +357,6 @@ class FakePool:
                 "id": self._catid, "org_id": args[0], "group_id": args[1], "name": args[2],
                 "tax_kind": args[3], "position": args[4], "is_default": True, "is_visible": True})
             return "INSERT"
-        if q.startswith("UPDATE receipts r SET category_id = c.id"):
-            # Фикс №1 фаза A backfill: старая строка category → category_id статьи
-            # с тем же org_id и именем new_name. Только где category_id ещё NULL.
-            old_name, new_name = args
-            for r in self.receipts:
-                if r.get("category_id") is None and r.get("category") == old_name:
-                    match = next((c for c in self.categories
-                                  if c.get("org_id") == r.get("org_id") and c.get("name") == new_name), None)
-                    if match:
-                        r["category_id"] = match["id"]
-            return "UPDATE"
         raise NotImplementedError(f"execute: {q}")
 
     def acquire(self):
@@ -427,7 +416,7 @@ def db():
 def seeded(db):
     """Pre-populate baseline test data; cleaned up via the db fixture teardown."""
     now = datetime.utcnow()
-    db.receipts.append(dict(id=1, date=date(2026, 5, 10), org="Лукойл", category="Топливо",
+    db.receipts.append(dict(id=1, date=date(2026, 5, 10), org="Лукойл",
                             payment="Корп.карта", amount=5000.0, employee=None,
                             kkt_fn="FN-EXISTING-1", raw_data=None,
                             source="manual", photo_url=None, org_id=1, created_at=now))

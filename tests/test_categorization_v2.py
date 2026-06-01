@@ -92,7 +92,6 @@ async def test_post_auto_categorizes_and_writes_category_id(client, db):
         "date": "2026-05-28", "org": "Лукойл АЗС", "amount": 3000.0})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["category"] == "Топливо"
     assert body["category_id"] == next(
         c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Топливо")
 
@@ -102,7 +101,6 @@ async def test_post_explicit_category_resolves_id(client, db):
     resp = await client.post("/api/receipts/", json={
         "date": "2026-05-28", "org": "Кафе", "amount": 500.0, "category": "Обеды сотрудников"})
     body = resp.json()
-    assert body["category"] == "Обеды сотрудников"
     assert body["category_id"] == next(
         c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Обеды сотрудников")
 
@@ -112,7 +110,6 @@ async def test_post_unknown_org_fallback_category_id(client, db):
     resp = await client.post("/api/receipts/", json={
         "date": "2026-05-28", "org": "Неведомый Контрагент", "amount": 100.0})
     body = resp.json()
-    assert body["category"] == "Прочие хозрасходы"
     assert body["category_id"] == next(
         c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Прочие хозрасходы")
 
@@ -194,7 +191,6 @@ async def test_post_categorizes_by_items_azbuka(client, db):
                                {"name": "Пакет майка", "sum": 1290}]}})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["category"] == "Продукты для офиса"
     assert body["category_id"] == next(
         c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Продукты для офиса")
 
@@ -242,6 +238,5 @@ async def test_post_categorizes_by_brand_when_items_unknown(client, db):
                      "items": [{"name": "Пакет майка ТМ", "sum": 1290}]}})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["category"] == "Продукты для офиса"
     assert body["category_id"] == next(
         c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Продукты для офиса")

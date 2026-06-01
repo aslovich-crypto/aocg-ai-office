@@ -34,8 +34,8 @@ async def test_create_receipt(client):
     assert body["id"] > 0
     assert body["org"] == "Магнит"
     assert body["amount"] == 1234.56
-    # auto-categorization v2: "Магнит" -> "Продукты для офиса" (фаза B, 48 статей)
-    assert body["category"] == "Продукты для офиса"
+    # auto-categorization (вариант B) — резолв имени в category_id проверяется в
+    # test_categorization_v2 с засеянным справочником; здесь орг не засеяна.
 
 
 # ═══ Дедуп — 4 ветки (Фикс №3, 26.05). Жёсткий 409 только в ветках 0/1; ═══
@@ -270,7 +270,8 @@ async def test_dedup_patch_change_doesnt_break_dedup(client, db):
                             org_inn="7813679582", created_at=datetime.utcnow()))
     db._rid = 1
     patched = await client.patch("/api/receipts/1", json={"category": "Питание"})
-    assert patched.status_code == 200 and patched.json()["category"] == "Питание"
+    # вариант B: строки category в ответе нет, ручной выбор фиксируется category_manual
+    assert patched.status_code == 200 and patched.json()["category_manual"] is True
 
     resp = await client.post("/api/receipts/", json={
         "date": "2026-05-26", "org": 'ООО "Мере"', "amount": 1010.0,
@@ -505,7 +506,7 @@ async def test_patch_receipt_multiple_fields(client, seeded):
         "category": "Прочее", "org": "Газпром"})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["category"] == "Прочее"
+    assert body["category_manual"] is True   # ручной выбор категории (вариант B)
     assert body["org"] == "Газпром"
 
 
@@ -537,7 +538,6 @@ async def test_patch_category_resolves_id_and_sets_manual(client, db):
     resp = await client.patch("/api/receipts/1", json={"category": "Продукты для офиса"})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["category"] == "Продукты для офиса"
     assert body["category_id"] == next(
         c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Продукты для офиса")
     assert body["category_manual"] is True
@@ -548,8 +548,8 @@ async def test_patch_category_unknown_name_falls_back_id(client, db):
     _append_receipt(db)
     resp = await client.patch("/api/receipts/1", json={"category": "Несуществующая"})
     body = resp.json()
-    assert body["category"] == "Несуществующая"
-    # category_id резолвится в фолбэк «Прочие хозрасходы» (per-org), флаг всё равно TRUE
+    # строки category в ответе нет (вариант B); неизвестное имя → category_id фолбэк
+    # «Прочие хозрасходы» (per-org), флаг ручного выбора всё равно TRUE
     assert body["category_id"] == next(
         c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Прочие хозрасходы")
     assert body["category_manual"] is True

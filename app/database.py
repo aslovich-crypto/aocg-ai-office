@@ -2,7 +2,7 @@ import asyncpg
 import json
 import os
 
-from app.categories_seed import backfill_category_ids, seed_default_categories
+from app.categories_seed import seed_default_categories
 
 pool = None
 
@@ -238,5 +238,4 @@ async def init_db():
             org_ids = [r["id"] for r in await conn.fetch("SELECT id FROM organizations")]
             for org_id in org_ids:
                 await seed_default_categories(conn, org_id)
-            await backfill_category_ids(conn)
 
