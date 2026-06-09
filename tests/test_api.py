@@ -41,10 +41,13 @@ async def test_create_receipt(client):
 # ═══ Дедуп — 4 ветки (Фикс №3, 26.05). Жёсткий 409 только в ветках 0/1; ═══
 # ═══ ветки 2/3 — мягкое предупреждение (чек создаётся, 200 + body.warning). ═══
 
-# ─── Ветка 1 — точный дубль по kkt_fn → 409 ──────────────────────────
+# ─── Ветка 1 — точный дубль документа по паре (ФН, ФД) → 409 ─────────
 async def test_create_receipt_duplicate_kkt_fn_returns_409(client):
+    # Тот же документ (ФН+ФД) повторно → жёсткий 409. fd_num приходит из
+    # raw_data (fiscalDocumentNumber), как у реального qr_scan.
     payload = {"date": "2026-05-14", "org": "Лукойл", "amount": 5000.0,
-               "kkt_fn": "DUP-FN-123", "source": "qr_scan"}
+               "kkt_fn": "DUP-FN-123", "source": "qr_scan",
+               "raw_data": {"fiscalDocumentNumber": "100500"}}
     first = await client.post("/api/receipts/", json=payload)
     assert first.status_code == 200
 
@@ -55,16 +58,44 @@ async def test_create_receipt_duplicate_kkt_fn_returns_409(client):
     assert detail["existing_id"] == first.json()["id"]
 
 
-async def test_dedup_two_qr_same_fn_blocks(client):
-    # Тот же фискальный номер дважды → ветка 1 (точный дубль).
+async def test_dedup_two_qr_same_fn_and_fd_blocks(client):
+    # Тот же ФН И ТОТ ЖЕ ФД дважды → ветка 1 (точный дубль документа).
     payload = {"date": "2026-05-21", "org": "Лукойл", "amount": 3000.0,
-               "kkt_fn": "QR-FN-555", "source": "qr_scan"}
+               "kkt_fn": "QR-FN-555", "source": "qr_scan",
+               "raw_data": {"fiscalDocumentNumber": "777"}}
     first = await client.post("/api/receipts/", json=payload)
     assert first.status_code == 200
     second = await client.post("/api/receipts/", json=payload)
     assert second.status_code == 409
     assert second.json()["detail"]["error"] == "duplicate_kkt_fn"
     assert second.json()["detail"]["existing_id"] == first.json()["id"]
+
+
+async def test_dedup_same_fn_different_fd_both_pass(client):
+    # БАГ Мере: один ФН на кассу, РАЗНЫЕ ФД = разные документы. Раньше второй
+    # чек падал (ключ был ФН в одиночку) — теперь оба сохраняются.
+    base = {"date": "2026-06-04", "org": 'ООО "Мере"', "amount": 2570.0,
+            "source": "qr_scan", "kkt_fn": "7380440902249741"}
+    first = await client.post("/api/receipts/", json={
+        **base, "raw_data": {"fiscalDocumentNumber": "41946"}})
+    assert first.status_code == 200
+    second = await client.post("/api/receipts/", json={
+        **base, "raw_data": {"fiscalDocumentNumber": "41947"}})
+    assert second.status_code == 200
+    assert second.json()["id"] != first.json()["id"]
+
+
+async def test_dedup_fn_without_fd_no_hard_block(client):
+    # ФН есть, ФД нет (raw_data без fiscalDocumentNumber) → жёсткая ветка 1 НЕ
+    # срабатывает (пара неполна); чек создаётся (макс. мягкое предупреждение).
+    payload = {"date": "2026-06-04", "org": 'ООО "Мере"', "amount": 2570.0,
+               "source": "qr_scan", "kkt_fn": "7380440902249741",
+               "raw_data": {"userInn": "7813679582"}}
+    first = await client.post("/api/receipts/", json=payload)
+    assert first.status_code == 200
+    second = await client.post("/api/receipts/", json=payload)
+    assert second.status_code == 200      # НЕ 409 — без ФД нет жёсткого дубля
+    assert second.json()["id"] != first.json()["id"]
 
 
 async def test_dedup_two_qr_with_different_fn_pass(client):
@@ -382,21 +413,22 @@ async def test_warning_duplicates_marks_in_report(client, db):
     assert dups[resp.json()["id"]]["in_report"] is False   # только что создан
 
 
-# ─── kkt_fn UniqueViolation guard: cross-org collision -> 409 ─────────
+# ─── (ФН, ФД) UniqueViolation guard: cross-org collision -> 409 ──────
 async def test_unique_violation_kkt_fn_cross_org_returns_409(client, db):
-    # The kkt_fn SELECT-dedup is per-org (WHERE kkt_fn=$1 AND org_id=$2), but the
-    # receipts_kkt_fn_unique index is GLOBAL. A receipt with kkt_fn='X' already
-    # exists in another org (org_id=2). Posting kkt_fn='X' as org 1 misses the
-    # per-org dedup, reaches INSERT, trips the global unique index → guard → 409.
+    # SELECT-дедуп per-org (WHERE kkt_fn=$1 AND fd_num=$2 AND org_id=$3), а индекс
+    # receipts_kkt_fn_fd_unique — ГЛОБАЛЬНЫЙ по паре (ФН, ФД). Тот же документ
+    # (ФН+ФД) уже есть в другой org (org_id=2). Пост в org 1 промахивается мимо
+    # per-org дедупа, доходит до INSERT, ловится глобальным индексом → 409.
     db.receipts.append(dict(id=99, date=date(2026, 5, 1), org="Чужая Орг",
                             category="Прочее", payment=None, amount=10.0, employee=None,
-                            fn="GLOBAL-X", kkt_fn="GLOBAL-X", raw_data=None,
+                            fn="GLOBAL-X", kkt_fn="GLOBAL-X", fd_num="555", raw_data=None,
                             source="qr_scan", photo_url=None, org_id=2,
                             created_at=datetime.utcnow()))
 
     resp = await client.post("/api/receipts/", json={
         "date": "2026-05-22", "org": "Лукойл", "amount": 777.0,
-        "kkt_fn": "GLOBAL-X", "source": "qr_scan"})
+        "kkt_fn": "GLOBAL-X", "source": "qr_scan",
+        "raw_data": {"fiscalDocumentNumber": "555"}})
     assert resp.status_code == 409
     assert resp.json()["detail"]["error"] == "duplicate_kkt_fn_cross_org"
 

@@ -149,6 +149,7 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
             logger.warning("raw_data parse failed (source=%s): %s", source, type(e).__name__)
             parsed = {}
     effective_org_inn = parsed.get("org_inn")   # уже провалидирован в parse_*_response
+    effective_fd_num = parsed.get("fd_num")      # ФД из raw_data; документ уникален парой (ФН, ФД)
 
     # Категория: если пользователь не задал (или «Не указано») — авто. Приоритет
     # (Фикс №4 + A2): позиции → бренд (org_brand) → юрлицо (org) → «Прочие хозрасходы».
@@ -192,11 +193,15 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                 "existing_id": dbl["id"],
             })
 
-    # ── Ветка 1 — точный дубль по kkt_fn (per-org, бессрочно). ФНС-номер уникален.
-    if has_reliable_fn:
+    # ── Ветка 1 — точный дубль фискального документа по паре (ФН, ФД), per-org,
+    # бессрочно. ФН (kkt_fn) уникален на накопитель/кассу — общий для ВСЕХ чеков
+    # заведения; документ уникален именно ПАРОЙ (kkt_fn=ФН, fd_num=ФД). Жёсткий
+    # 409 только когда есть И ФН, И ФД; без fd_num (None) — в ключ не входим и
+    # падаем в мягкие ветки 2/3 (иначе все чеки одной кассы схлопывались бы).
+    if has_reliable_fn and effective_fd_num:
         existing = await p.fetchrow(
-            "SELECT id FROM receipts WHERE kkt_fn=$1 AND org_id=$2",
-            effective_kkt_fn, org_id,
+            "SELECT id FROM receipts WHERE kkt_fn=$1 AND fd_num=$2 AND org_id=$3",
+            effective_kkt_fn, effective_fd_num, org_id,
         )
         if existing:
             raise HTTPException(status_code=409, detail={
@@ -305,10 +310,10 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                         logger.warning("items insert failed for receipt %s (source=%s): %s",
                                        row["id"], source, type(e).__name__)
     except asyncpg.exceptions.UniqueViolationError:
-        # Дедуп выше — per-org (WHERE kkt_fn=$1 AND org_id=$2), а partial-unique
-        # индекс receipts_kkt_fn_unique — глобальный. Если один и тот же kkt_fn
-        # пришёл в РАЗНЫЕ org, SELECT-дедуп промахнётся, а индекс поймает на
-        # INSERT — отдаём 409 вместо 500.
+        # Дедуп выше — per-org (WHERE kkt_fn=$1 AND fd_num=$2 AND org_id=$3), а
+        # partial-unique индекс receipts_kkt_fn_fd_unique — глобальный по паре
+        # (kkt_fn, fd_num). Если один и тот же документ (ФН+ФД) пришёл в РАЗНЫЕ
+        # org, SELECT-дедуп промахнётся, а индекс поймает на INSERT — 409 вместо 500.
         raise HTTPException(status_code=409, detail={
             "error": "duplicate_kkt_fn_cross_org",
             "message": "Чек с таким фискальным номером уже зарегистрирован в другой организации",

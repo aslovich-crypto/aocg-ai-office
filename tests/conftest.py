@@ -152,10 +152,12 @@ class FakePool:
         if q.startswith("SELECT photo_url, raw_data FROM receipts WHERE id=$1"):
             r = next((x for x in self.receipts if x["id"] == args[0]), None)
             return dict(photo_url=r.get("photo_url"), raw_data=r.get("raw_data")) if r else None
-        if q.startswith("SELECT id FROM receipts WHERE kkt_fn=$1"):
-            # Дедуп по фискальному номеру — per-org (WHERE kkt_fn=$1 AND org_id=$2).
+        if q.startswith("SELECT id FROM receipts WHERE kkt_fn=$1 AND fd_num=$2"):
+            # Дедуп по документу — per-org, пара (kkt_fn=ФН, fd_num=ФД):
+            # WHERE kkt_fn=$1 AND fd_num=$2 AND org_id=$3.
             return next(({"id": r["id"]} for r in self.receipts
-                         if r.get("kkt_fn") == args[0] and r.get("org_id") == args[1]), None)
+                         if r.get("kkt_fn") == args[0] and r.get("fd_num") == args[1]
+                         and r.get("org_id") == args[2]), None)
         if q.startswith("SELECT id FROM categories WHERE org_id=$1 AND name=$2"):
             # Фикс №1 фаза B: resolve_category_id — имя статьи → id per-org.
             return next(({"id": c["id"]} for c in self.categories
@@ -220,11 +222,15 @@ class FakePool:
             # Зеркалит порядок колонок в receipts.py. card_id не вставляется → None.
             args = list(args) + [None] * (30 - len(args))
             kkt_fn_val = args[6]
-            # Mirror the GLOBAL partial-unique index receipts_kkt_fn_unique:
-            # a non-NULL kkt_fn already present (in ANY org) → UniqueViolationError.
-            if kkt_fn_val is not None and any(r.get("kkt_fn") == kkt_fn_val for r in self.receipts):
+            fd_num_val = args[26]
+            # Mirror the GLOBAL partial-unique index receipts_kkt_fn_fd_unique:
+            # a (kkt_fn, fd_num) pair (both non-NULL) already present (in ANY org)
+            # → UniqueViolationError. ФН в одиночку больше дубль НЕ образует.
+            if kkt_fn_val is not None and fd_num_val is not None and any(
+                    r.get("kkt_fn") == kkt_fn_val and r.get("fd_num") == fd_num_val
+                    for r in self.receipts):
                 raise asyncpg.exceptions.UniqueViolationError(
-                    'duplicate key value violates unique constraint "receipts_kkt_fn_unique"')
+                    'duplicate key value violates unique constraint "receipts_kkt_fn_fd_unique"')
             self._rid += 1
             row = dict(id=self._rid,
                        org_id=args[0], date=args[1], org=args[2],

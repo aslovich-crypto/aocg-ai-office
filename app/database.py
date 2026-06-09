@@ -185,11 +185,14 @@ async def init_db():
 
             -- ── Чекпойнт C задачи №7: kkt_fn — канонический фискальный номер ──
             -- Колонка fn и backfill kkt_fn=fn убраны (kkt_fn устаканился, пишется в
-            -- INSERT напрямую; DROP COLUMN fn — отдельным ЧП). receipts_kkt_fn_unique
-            -- — активный глобальный partial-unique.
+            -- INSERT напрямую; DROP COLUMN fn — отдельным ЧП).
+            -- Уникальность документа — по ПАРЕ (kkt_fn=ФН, fd_num=ФД): ФН один на
+            -- кассу, общий для всех чеков; уникален документ только парой. Старый
+            -- одиночный receipts_kkt_fn_unique дропается на проде явной миграцией
+            -- (CREATE IF NOT EXISTS здесь его НЕ удаляет).
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS kkt_fn VARCHAR(20);
-            CREATE UNIQUE INDEX IF NOT EXISTS receipts_kkt_fn_unique
-                ON receipts(kkt_fn) WHERE kkt_fn IS NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS receipts_kkt_fn_fd_unique
+                ON receipts(kkt_fn, fd_num) WHERE kkt_fn IS NOT NULL AND fd_num IS NOT NULL;
 
             -- ── Фикс №1 фаза A: справочник категорий расходов (11 групп / 48 статей) ──
             -- per-org копии (каждая орг владеет своими); receipts.category_id ссылается
