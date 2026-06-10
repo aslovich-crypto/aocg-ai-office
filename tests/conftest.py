@@ -10,6 +10,10 @@ from httpx import AsyncClient, ASGITransport
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# auth.py теперь требует JWT_SECRET_KEY (fail-fast, без небезопасного дефолта).
+# Тестам нужен любой непустой ключ — ставим ДО импорта приложения ниже.
+os.environ.setdefault("JWT_SECRET_KEY", "test-only-secret-not-used-in-prod")
+
 import app.database as database
 from app.auth import get_current_user
 from app.main import app

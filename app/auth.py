@@ -2,8 +2,8 @@
 
 Reads config from env (set these on Railway at cutover):
   JWT_SECRET_KEY, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS
-A dev fallback secret is used when JWT_SECRET_KEY is unset so the branch boots,
-but it MUST be set in production.
+JWT_SECRET_KEY is REQUIRED — the app refuses to start without it (no insecure
+default), so production can never accidentally sign tokens with a known key.
 """
 
 import os
@@ -17,7 +17,15 @@ from passlib.context import CryptContext
 
 from app.database import get_pool
 
-JWT_SECRET = os.getenv("JWT_SECRET_KEY", "dev-insecure-secret-change-me")
+# Fail-fast: НЕ подписываем токены публично известным дефолтом. Если ключ не
+# задан (Railway variables / локальный .env) — отказываемся стартовать, а не
+# молча падаем на угадываемый секрет (иначе любой смог бы подделать JWT).
+JWT_SECRET = os.getenv("JWT_SECRET_KEY")
+if not JWT_SECRET:
+    raise RuntimeError(
+        "JWT_SECRET_KEY не задан — отказ запуска во избежание подписи токенов "
+        "небезопасным дефолтом. Задайте переменную окружения JWT_SECRET_KEY."
+    )
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "30"))
