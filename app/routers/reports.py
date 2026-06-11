@@ -38,8 +38,20 @@ async def create_report(r: ReportIn, user: dict = Depends(get_current_user)):
             rep = await conn.fetchrow(
                 "INSERT INTO reports (title,total,org_id) VALUES ($1,$2,$3) RETURNING *",
                 r.title, r.total, user["org_id"])
-            for rid in r.receiptIds:
-                await conn.execute("INSERT INTO report_items VALUES ($1,$2)", rep["id"], rid)
+            # IDOR-защита: все receiptIds обязаны принадлежать организации
+            # пользователя. Проверяем ОДНИМ запросом, ДО вставок и внутри
+            # транзакции — любой чужой/несуществующий id → 403 и откат всей
+            # вставки (для финпродукта явная ошибка лучше тихого пропуска).
+            if r.receiptIds:
+                owned = await conn.fetch(
+                    "SELECT id FROM receipts WHERE id = ANY($1::int[]) AND org_id = $2",
+                    r.receiptIds, user["org_id"])
+                if {row["id"] for row in owned} != set(r.receiptIds):
+                    # Обобщённый detail: НЕ перечисляем недоступные id, чтобы не
+                    # подтверждать их существование (это тоже утечка).
+                    raise HTTPException(status_code=403, detail="Один или несколько чеков недоступны")
+                for rid in r.receiptIds:
+                    await conn.execute("INSERT INTO report_items VALUES ($1,$2)", rep["id"], rid)
     d = dict(rep)
     d["receiptIds"] = r.receiptIds
     return d

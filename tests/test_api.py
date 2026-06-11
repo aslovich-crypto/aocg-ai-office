@@ -1163,3 +1163,46 @@ async def test_get_photo_prefers_url_over_base64(client):
     resp = await client.get(f"/api/receipts/{created['id']}/photo",
                             follow_redirects=False)
     assert resp.status_code == 302
+
+
+# ─── S-15: IDOR при создании отчёта — receiptIds скоупятся по org_id ───
+async def test_create_report_own_receipts_ok(client, db):
+    # Свои чеки (org_id=1) → 200, report_items записаны.
+    now = datetime.utcnow()
+    db.receipts.append(dict(id=10, date=date(2026, 6, 1), org="X", amount=100.0,
+                            org_id=1, created_at=now))
+    db.receipts.append(dict(id=11, date=date(2026, 6, 1), org="Y", amount=200.0,
+                            org_id=1, created_at=now))
+    resp = await client.post("/api/reports/", json={
+        "title": "Июнь", "total": 300.0, "receiptIds": [10, 11]})
+    assert resp.status_code == 200
+    assert set(resp.json()["receiptIds"]) == {10, 11}
+    assert {ri["receipt_id"] for ri in db.report_items} == {10, 11}
+    assert len(db.reports) == 1
+
+
+async def test_create_report_foreign_receipt_403_nothing_written(client, db):
+    # Чужой чек (org_id=2) в списке → 403, и отчёт, и позиции откатаны.
+    now = datetime.utcnow()
+    db.receipts.append(dict(id=10, date=date(2026, 6, 1), org="X", amount=100.0,
+                            org_id=1, created_at=now))
+    db.receipts.append(dict(id=20, date=date(2026, 6, 1), org="Чужая", amount=50.0,
+                            org_id=2, created_at=now))
+    resp = await client.post("/api/reports/", json={
+        "title": "Атака", "total": 150.0, "receiptIds": [10, 20]})
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Один или несколько чеков недоступны"
+    assert db.reports == []        # откат: отчёт не появился
+    assert db.report_items == []   # откат: позиции не появились
+
+
+async def test_create_report_nonexistent_receipt_403(client, db):
+    # Несуществующий id 999999 ловится так же (не только чужие, но и фейковые).
+    now = datetime.utcnow()
+    db.receipts.append(dict(id=10, date=date(2026, 6, 1), org="X", amount=100.0,
+                            org_id=1, created_at=now))
+    resp = await client.post("/api/reports/", json={
+        "title": "Фейк", "total": 100.0, "receiptIds": [10, 999999]})
+    assert resp.status_code == 403
+    assert db.reports == []
+    assert db.report_items == []

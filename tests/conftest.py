@@ -110,6 +110,12 @@ class FakePool:
                 dict(keep_id=min(x["id"] for x in rows), date=d, amount=a, org=o, cnt=len(rows))
                 for (d, a, o), rows in groups.items() if len(rows) > 1
             ]
+        if q.startswith("SELECT id FROM receipts WHERE id = ANY($1"):
+            # S-15 IDOR-проверка создания отчёта: какие из запрошенных id реально
+            # принадлежат орг пользователя (чужие/несуществующие сюда не попадут).
+            ids, org_id = args
+            return [{"id": r["id"]} for r in self.receipts
+                    if r["id"] in ids and r.get("org_id") == org_id]
         if "id = ANY($1" in q and "EXISTS" in q:
             # Bulk-delete кандидаты (фаза C): чеки своей орг из списка id + in_report.
             # Чужие id не попадают в выборку (изоляция по org_id).
@@ -401,14 +407,31 @@ class _Conn:
         return await self.pool.fetchval(q, *a)
 
     def transaction(self):
-        return _Txn()
+        return _Txn(self.pool)
 
 
 class _Txn:
+    # Реальный asyncpg откатывает транзакцию при исключении. Раньше FakePool
+    # этого не делал — тесты на rollback были слепы (S-15). Снимаем снапшот
+    # состояния на входе и восстанавливаем на выходе, если поднялось исключение.
+    _LISTS = ("receipts", "receipt_items", "reports", "report_items",
+              "cards", "consents", "category_groups", "categories")
+    _COUNTERS = ("_rid", "_repid", "_cid", "_consid", "_gid", "_catid")
+
+    def __init__(self, pool):
+        self.pool = pool
+
     async def __aenter__(self):
+        self._snap_lists = {n: list(getattr(self.pool, n)) for n in self._LISTS}
+        self._snap_counters = {n: getattr(self.pool, n) for n in self._COUNTERS}
         return self
 
-    async def __aexit__(self, *exc):
+    async def __aexit__(self, exc_type, *rest):
+        if exc_type is not None:   # исключение → откат к снапшоту
+            for n, val in self._snap_lists.items():
+                setattr(self.pool, n, list(val))
+            for n, val in self._snap_counters.items():
+                setattr(self.pool, n, val)
         return False
 
 
