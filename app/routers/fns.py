@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.categorization import categorize
+from aocg_security.masking import mask_log_dict
 
 router = APIRouter(prefix="/api/fns", tags=["fns"])
 
@@ -56,7 +57,8 @@ async def check_receipt(req: CheckRequest):
         print("[FNS] PROVERKACHEKA_TOKEN not set", flush=True)
         return JSONResponse(status_code=500, content={"status": "error", "message": "PROVERKACHEKA_TOKEN not set"})
 
-    print(f"[FNS] POST {PROVERKACHEKA_URL}  qr_raw={req.qr_raw[:80]}", flush=True)
+    # 152-ФЗ: не логируем содержимое QR (там ФН/сумма/ФПД) — только длину.
+    print(f"[FNS] POST {PROVERKACHEKA_URL}  qr_raw len={len(req.qr_raw)}", flush=True)
 
     data: dict | None = None
     last_error: str | None = None
@@ -82,7 +84,7 @@ async def check_receipt(req: CheckRequest):
 
     # B — proverkacheka responded but the receipt isn't confirmed/registered.
     if data.get("code") != 1:
-        print(f"[FNS] not_found: code={data.get('code')} body={str(data)[:200]}", flush=True)
+        print(f"[FNS] not_found: code={data.get('code')} body={str(mask_log_dict(data))[:200]}", flush=True)
         return JSONResponse(status_code=404, content={
             "status": "not_found",
             "message": "Чек не зарегистрирован в ФНС. Возможно, ему больше 30 дней или он не был передан оператору.",

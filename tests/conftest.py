@@ -14,6 +14,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Тестам нужен любой непустой ключ — ставим ДО импорта приложения ниже.
 os.environ.setdefault("JWT_SECRET_KEY", "test-only-secret-not-used-in-prod")
 
+# AOCGSecurityMiddleware читает env при импорте app.main. В тестах: выключаем
+# enforce-HTTPS (TestClient ходит по http) и поднимаем лимиты, чтобы middleware
+# был АКТИВЕН, но не валил тесты 403/429. setdefault — НЕ перетирает, если
+# переменные уже заданы в окружении (можно прогнать с боевыми лимитами явно).
+# Прод-дефолты (60/5, enforce_https=true) тут НЕ меняются — это только тест-env.
+os.environ.setdefault("SECURITY_ENFORCE_HTTPS", "false")
+os.environ.setdefault("SECURITY_RATE_LIMIT", "100000")
+os.environ.setdefault("SECURITY_AUTH_RATE_LIMIT", "100000")
+
 import app.database as database
 from app.auth import get_current_user
 from app.main import app
