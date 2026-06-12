@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -38,5 +38,21 @@ app.include_router(services.router)
 app.include_router(categories.router)
 
 @app.get("/")
-async def root():
+async def root(request: Request):
+    # ── ВРЕМЕННАЯ XFF-проба (revert after). Логирует ТОЛЬКО при ?probe=xff,
+    # чтобы не шуметь и не писать IP обычных пользователей. Ответ не меняется.
+    if request.query_params.get("probe") == "xff":
+        SENSITIVE = ("authorization", "cookie", "proxy-authorization")
+        h = request.headers
+        print(
+            "[HDRPROBE]"
+            f" client_host={request.client.host if request.client else None}"
+            f" | x-forwarded-for={h.get('x-forwarded-for')!r}"
+            f" | x-real-ip={h.get('x-real-ip')!r}"
+            f" | x-envoy-external-address={h.get('x-envoy-external-address')!r}"
+            f" | x-forwarded-proto={h.get('x-forwarded-proto')!r}"
+            f" | header_keys={sorted(h.keys())}"
+            f" | sensitive={ {k: ('present' if h.get(k) else 'absent') for k in SENSITIVE} }",
+            flush=True,
+        )
     return {"app": "AOCG AI Офис", "version": "1.0"}
