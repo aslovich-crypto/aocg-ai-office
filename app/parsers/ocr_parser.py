@@ -27,24 +27,24 @@ def parse_ocr_response(raw_data: dict) -> dict:
         return {}
     g = raw_data.get
     return {
-        "datetime":       _parse_datetime(g("datetime")),   # ISO str → datetime obj
-        "currency":       _str_or_none(g("currency")) or "RUB",
+        "datetime": _parse_datetime(g("datetime")),  # ISO str → datetime obj
+        "currency": _str_or_none(g("currency")) or "RUB",
         "operation_type": _str_or_none(g("operation_type")) or "purchase",
-        "org_legal":      _str_or_none(g("org_legal")),
-        "org_brand":      _str_or_none(g("org_brand")),
-        "org_inn":        _str_or_none(g("org_inn")),        # already validated in _finalize
-        "payment_form":   _str_or_none(g("payment_form")),
+        "org_legal": _str_or_none(g("org_legal")),
+        "org_brand": _str_or_none(g("org_brand")),
+        "org_inn": _str_or_none(g("org_inn")),  # already validated in _finalize
+        "payment_form": _str_or_none(g("payment_form")),
         "payment_detail": _str_or_none(g("payment_detail")),
-        "card_last4":     _str_or_none(g("card_last4")),     # usually None on paper receipts
-        "tax_system":     _str_or_none(g("tax_system")),
-        "address":        _str_or_none(g("address")),
-        "vat_20":         _num(g("vat_20")),                 # RUBLES — do not /100
-        "vat_10":         _num(g("vat_10")),
-        "vat_0":          _num(g("vat_0")),
-        "kkt_fn":         None,                              # Вариант A — never trust OCR fn
-        "kkt_serial":     None,                              # OCR does not extract fiscal reqs
-        "kkt_rn":         None,
-        "fd_num":         None,
-        "fpd":            None,
-        "cashier":        _str_or_none(g("cashier")),
+        "card_last4": _str_or_none(g("card_last4")),  # usually None on paper receipts
+        "tax_system": _str_or_none(g("tax_system")),
+        "address": _str_or_none(g("address")),
+        "vat_20": _num(g("vat_20")),  # RUBLES — do not /100
+        "vat_10": _num(g("vat_10")),
+        "vat_0": _num(g("vat_0")),
+        "kkt_fn": None,  # Вариант A — never trust OCR fn
+        "kkt_serial": None,  # OCR does not extract fiscal reqs
+        "kkt_rn": None,
+        "fd_num": None,
+        "fpd": None,
+        "cashier": _str_or_none(g("cashier")),
     }

@@ -12,6 +12,7 @@ ValueError. Совместимо с Pydantic field_validator (v1 `validator` и 
         inn: str
         _v_inn = field_validator("inn")(validate_inn)
 """
+
 from __future__ import annotations
 
 import re

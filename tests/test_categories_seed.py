@@ -4,6 +4,7 @@ Seed гоняется на FakePool (conftest): нет реального Postgr
 FakePool реализует ровно те запросы, что шлёт seed_default_categories
 (INSERT category_groups RETURNING id, INSERT categories, EXISTS-проверка).
 Бэкфилл строковых категорий удалён вместе с переходом на вариант B."""
+
 from app.categories_seed import (
     DEFAULT_CATEGORIES,
     TAX_KINDS,
@@ -14,7 +15,9 @@ from app.categories_seed import (
 # ─── 1. Структура справочника (без БД) ───
 def test_default_categories_structure():
     assert len(DEFAULT_CATEGORIES) == 11, "должно быть 11 групп"
-    all_cats = [(g, name, tk) for g, items in DEFAULT_CATEGORIES for (name, tk) in items]
+    all_cats = [
+        (g, name, tk) for g, items in DEFAULT_CATEGORIES for (name, tk) in items
+    ]
     assert len(all_cats) == 48, "должно быть 48 статей"
     assert len(TAX_KINDS) == 9
     for _, name, tk in all_cats:
@@ -34,7 +37,7 @@ async def test_seed_creates_groups_and_categories(db):
     assert all(c["org_id"] == 1 for c in db.categories)
     assert all(c["is_default"] and c["is_visible"] for c in db.categories)
     gids = {g["id"] for g in db.category_groups}
-    assert all(c["group_id"] in gids for c in db.categories)   # FK на группу той же орг
+    assert all(c["group_id"] in gids for c in db.categories)  # FK на группу той же орг
 
 
 # ─── 3. Идемпотентность (повторный seed — no-op) ───
@@ -49,7 +52,7 @@ async def test_seed_idempotent(db):
 async def test_seed_bootstrap_multiple_orgs(db):
     for org_id in (1, 2, 3):
         await seed_default_categories(db, org_id)
-    assert len(db.category_groups) == 33   # 11 × 3
-    assert len(db.categories) == 144       # 48 × 3
+    assert len(db.category_groups) == 33  # 11 × 3
+    assert len(db.categories) == 144  # 48 × 3
     for org_id in (1, 2, 3):
         assert sum(1 for c in db.categories if c["org_id"] == org_id) == 48

@@ -4,6 +4,7 @@
 текстом. Все функции чистые (без побочных эффектов) — годятся и для
 logging-фильтра, и для ручного masked-вывода.
 """
+
 from __future__ import annotations
 
 import re
@@ -17,7 +18,7 @@ _INN_KEYS = {"inn", "userinn", "org_inn"}
 _FN_KEYS = {"fn", "kkt_fn", "fiscaldrivenumber", "fiscaldocumentnumber", "fiscalsign"}
 _CARD_KEYS = {"card_last4", "card_number", "card"}
 _SECRET_KEYS = {"password", "password_hash", "old_password", "new_password"}
-_OPERATOR_KEYS = {"operator"}   # кассир в ответе ФНС (parsed-алиас "cashier" — Фаза 2)
+_OPERATOR_KEYS = {"operator"}  # кассир в ответе ФНС (parsed-алиас "cashier" — Фаза 2)
 
 
 def mask_inn(inn) -> str:

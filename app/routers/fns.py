@@ -50,12 +50,17 @@ async def check_receipt(req: CheckRequest):
     from a genuine unregistered receipt.
     """
     if not req.qr_raw or not req.qr_raw.strip():
-        return JSONResponse(status_code=400, content={"status": "error", "message": "qr_raw is empty"})
+        return JSONResponse(
+            status_code=400, content={"status": "error", "message": "qr_raw is empty"}
+        )
 
     token = os.getenv("PROVERKACHEKA_TOKEN", "")
     if not token:
         print("[FNS] PROVERKACHEKA_TOKEN not set", flush=True)
-        return JSONResponse(status_code=500, content={"status": "error", "message": "PROVERKACHEKA_TOKEN not set"})
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": "PROVERKACHEKA_TOKEN not set"},
+        )
 
     # 152-ФЗ: не логируем содержимое QR (там ФН/сумма/ФПД) — только длину.
     print(f"[FNS] POST {PROVERKACHEKA_URL}  qr_raw len={len(req.qr_raw)}", flush=True)
@@ -77,35 +82,44 @@ async def check_receipt(req: CheckRequest):
     # C — transport failure after retry: ФНС недоступна.
     if data is None:
         print(f"[FNS] unavailable ({last_error})", flush=True)
-        return JSONResponse(status_code=503, content={
-            "status": "fns_unavailable",
-            "message": "Сервис проверки ФНС временно недоступен",
-        })
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "fns_unavailable",
+                "message": "Сервис проверки ФНС временно недоступен",
+            },
+        )
 
     # B — proverkacheka responded but the receipt isn't confirmed/registered.
     if data.get("code") != 1:
-        print(f"[FNS] not_found: code={data.get('code')} body={str(mask_log_dict(data))[:200]}", flush=True)
-        return JSONResponse(status_code=404, content={
-            "status": "not_found",
-            "message": "Чек не зарегистрирован в ФНС. Возможно, ему больше 30 дней или он не был передан оператору.",
-        })
+        print(
+            f"[FNS] not_found: code={data.get('code')} body={str(mask_log_dict(data))[:200]}",
+            flush=True,
+        )
+        return JSONResponse(
+            status_code=404,
+            content={
+                "status": "not_found",
+                "message": "Чек не зарегистрирован в ФНС. Возможно, ему больше 30 дней или он не был передан оператору.",
+            },
+        )
 
     # A — success.
     j = data.get("data", {}).get("json", {})
     org = j.get("user", "") or ""
     return {
-        "status":   "ok",
-        "org":      org,
+        "status": "ok",
+        "org": org,
         "category": categorize(org, j.get("items") or [], brand=j.get("retailPlace")),
-        "inn":      j.get("userInn", ""),
-        "address":  j.get("retailPlaceAddress", ""),
-        "total":    j.get("totalSum", 0) / 100,
+        "inn": j.get("userInn", ""),
+        "address": j.get("retailPlaceAddress", ""),
+        "total": j.get("totalSum", 0) / 100,
         "items": [
             {
-                "name":     item.get("name", ""),
+                "name": item.get("name", ""),
                 "quantity": item.get("quantity", 1),
-                "price":    item.get("price", 0) / 100,
-                "sum":      item.get("sum", 0) / 100,
+                "price": item.get("price", 0) / 100,
+                "sum": item.get("sum", 0) / 100,
             }
             for item in j.get("items", [])
         ],

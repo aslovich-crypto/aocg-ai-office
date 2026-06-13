@@ -59,7 +59,10 @@ async def record_consent(req: ConsentRequest):
         """INSERT INTO user_consents (user_id, ip_address, policy_version, consent_text)
            VALUES ($1, $2, $3, $4)
            RETURNING id, consent_at, policy_version""",
-        req.user_id, req.ip_address, POLICY_VERSION, CONSENT_TEXT_V1,
+        req.user_id,
+        req.ip_address,
+        POLICY_VERSION,
+        CONSENT_TEXT_V1,
     )
     return _serialize(row)
 

@@ -12,6 +12,7 @@
 стоит вынести в Redis (см. README) — сигнатуры это допускают. Любой параметр
 можно переопределить аргументом конструктора (имеет приоритет над env).
 """
+
 from __future__ import annotations
 
 import os
@@ -38,16 +39,39 @@ class AOCGSecurityMiddleware(BaseHTTPMiddleware):
     WINDOW_SECONDS = 60
     BAN_SECONDS = 300  # бан IP на 5 минут после превышения порога
 
-    def __init__(self, app, *, rate_limit=None, auth_rate_limit=None,
-                 ban_threshold=None, enforce_https=None):
+    def __init__(
+        self,
+        app,
+        *,
+        rate_limit=None,
+        auth_rate_limit=None,
+        ban_threshold=None,
+        enforce_https=None,
+    ):
         super().__init__(app)
-        self.rate_limit = rate_limit if rate_limit is not None else _env_int("SECURITY_RATE_LIMIT", 60)
-        self.auth_rate_limit = auth_rate_limit if auth_rate_limit is not None else _env_int("SECURITY_AUTH_RATE_LIMIT", 5)
-        self.ban_threshold = ban_threshold if ban_threshold is not None else _env_int("SECURITY_AUTO_BAN_THRESHOLD", 10)
-        self.enforce_https = enforce_https if enforce_https is not None else _env_bool("SECURITY_ENFORCE_HTTPS", True)
-        self._hits: dict = defaultdict(deque)   # (ip, scope) -> очередь меток времени
+        self.rate_limit = (
+            rate_limit
+            if rate_limit is not None
+            else _env_int("SECURITY_RATE_LIMIT", 60)
+        )
+        self.auth_rate_limit = (
+            auth_rate_limit
+            if auth_rate_limit is not None
+            else _env_int("SECURITY_AUTH_RATE_LIMIT", 5)
+        )
+        self.ban_threshold = (
+            ban_threshold
+            if ban_threshold is not None
+            else _env_int("SECURITY_AUTO_BAN_THRESHOLD", 10)
+        )
+        self.enforce_https = (
+            enforce_https
+            if enforce_https is not None
+            else _env_bool("SECURITY_ENFORCE_HTTPS", True)
+        )
+        self._hits: dict = defaultdict(deque)  # (ip, scope) -> очередь меток времени
         self._violations: dict = defaultdict(int)  # ip -> число превышений лимита
-        self._banned: dict = {}                  # ip -> время окончания бана
+        self._banned: dict = {}  # ip -> время окончания бана
 
     @staticmethod
     def _client_ip(request: Request) -> str:
@@ -74,14 +98,16 @@ class AOCGSecurityMiddleware(BaseHTTPMiddleware):
             proto = request.headers.get("x-forwarded-proto", request.url.scheme)
             if proto == "http":
                 return self._apply_headers(
-                    JSONResponse({"detail": "HTTPS required"}, status_code=403))
+                    JSONResponse({"detail": "HTTPS required"}, status_code=403)
+                )
 
         # 2. Действующий бан IP.
         ban_until = self._banned.get(ip)
         if ban_until is not None:
             if now < ban_until:
                 return self._apply_headers(
-                    JSONResponse({"detail": "IP temporarily banned"}, status_code=429))
+                    JSONResponse({"detail": "IP temporarily banned"}, status_code=429)
+                )
             del self._banned[ip]
             self._violations[ip] = 0
 
@@ -94,7 +120,8 @@ class AOCGSecurityMiddleware(BaseHTTPMiddleware):
             if self._violations[ip] >= self.ban_threshold:
                 self._banned[ip] = now + self.BAN_SECONDS
             return self._apply_headers(
-                JSONResponse({"detail": "Rate limit exceeded"}, status_code=429))
+                JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
+            )
 
         response = await call_next(request)
         return self._apply_headers(response)
@@ -102,8 +129,11 @@ class AOCGSecurityMiddleware(BaseHTTPMiddleware):
     def _apply_headers(self, response: Response) -> Response:
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault(
+            "Referrer-Policy", "strict-origin-when-cross-origin"
+        )
         if self.enforce_https:
             response.headers.setdefault(
-                "Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+                "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+            )
         return response

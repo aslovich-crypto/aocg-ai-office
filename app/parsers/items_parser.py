@@ -19,14 +19,16 @@ def parse_fns_items(raw_data: dict) -> List[dict]:
     for pos, item in enumerate(items, start=1):
         if not isinstance(item, dict):
             continue
-        result.append({
-            "position": pos,
-            "name":     _str_or_none(item.get("name")) or "",
-            "quantity": _num(item.get("quantity")),
-            "price":    _kopecks(item.get("price")),
-            "sum":      _kopecks(item.get("sum")),
-            "vat_rate": _VAT_RATE_BY_CODE.get(item.get("nds")),
-        })
+        result.append(
+            {
+                "position": pos,
+                "name": _str_or_none(item.get("name")) or "",
+                "quantity": _num(item.get("quantity")),
+                "price": _kopecks(item.get("price")),
+                "sum": _kopecks(item.get("sum")),
+                "vat_rate": _VAT_RATE_BY_CODE.get(item.get("nds")),
+            }
+        )
     return result
 
 
@@ -46,12 +48,16 @@ def parse_ocr_items(raw_data: dict) -> List[dict]:
     for pos, item in enumerate(items, start=1):
         if not isinstance(item, dict):
             continue
-        result.append({
-            "position": item.get("position", pos),
-            "name":     _str_or_none(item.get("name")) or "",
-            "quantity": _num(item.get("quantity")),
-            "price":    _num(item.get("price")),       # RUBLES — do not /100
-            "sum":      _num(item.get("sum")),         # RUBLES — do not /100
-            "vat_rate": _str_or_none(item.get("vat_rate")),   # string as-is, not a code
-        })
+        result.append(
+            {
+                "position": item.get("position", pos),
+                "name": _str_or_none(item.get("name")) or "",
+                "quantity": _num(item.get("quantity")),
+                "price": _num(item.get("price")),  # RUBLES — do not /100
+                "sum": _num(item.get("sum")),  # RUBLES — do not /100
+                "vat_rate": _str_or_none(
+                    item.get("vat_rate")
+                ),  # string as-is, not a code
+            }
+        )
     return result

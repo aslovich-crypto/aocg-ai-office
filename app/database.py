@@ -6,14 +6,21 @@ from app.categories_seed import seed_default_categories
 
 pool = None
 
+
 async def _init_conn(conn):
-    await conn.set_type_codec('jsonb', encoder=json.dumps, decoder=json.loads, schema='pg_catalog')
+    await conn.set_type_codec(
+        "jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog"
+    )
+
 
 async def get_pool():
     global pool
     if pool is None:
-        pool = await asyncpg.create_pool(os.environ.get("DATABASE_URL"), init=_init_conn)
+        pool = await asyncpg.create_pool(
+            os.environ.get("DATABASE_URL"), init=_init_conn
+        )
     return pool
+
 
 async def init_db():
     p = await get_pool()
@@ -238,7 +245,8 @@ async def init_db():
         # мапим в category_id (per-org, по имени дефолтной статьи). Всё в одной
         # транзакции; seed_default_categories сам no-op для уже засеянных орг.
         async with conn.transaction():
-            org_ids = [r["id"] for r in await conn.fetch("SELECT id FROM organizations")]
+            org_ids = [
+                r["id"] for r in await conn.fetch("SELECT id FROM organizations")
+            ]
             for org_id in org_ids:
                 await seed_default_categories(conn, org_id)
-

@@ -54,7 +54,9 @@ def _create_token(user_id: int, kind: str, expires: timedelta) -> str:
 
 
 def create_access_token(user_id: int) -> str:
-    return _create_token(user_id, "access", timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    return _create_token(
+        user_id, "access", timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
 
 
 def create_refresh_token(user_id: int) -> str:
@@ -85,7 +87,9 @@ async def get_current_user(token: Optional[str] = Depends(oauth2_scheme)) -> dic
     if user_id is None:
         raise cred_exc
     p = await get_pool()
-    row = await p.fetchrow("SELECT * FROM users WHERE id=$1 AND is_active=true", user_id)
+    row = await p.fetchrow(
+        "SELECT * FROM users WHERE id=$1 AND is_active=true", user_id
+    )
     if not row:
         raise cred_exc
     return dict(row)

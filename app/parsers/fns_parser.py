@@ -13,15 +13,25 @@ from typing import Optional
 # operationType: FNS tag 1054. Comes as an int (1..4) but some providers echo
 # the Russian label — accept both.
 _OPERATION_TYPES = {
-    1: "purchase", 2: "refund", 3: "expense", 4: "expense_refund",
-    "Приход": "purchase", "Возврат прихода": "refund",
-    "Расход": "expense", "Возврат расхода": "expense_refund",
+    1: "purchase",
+    2: "refund",
+    3: "expense",
+    4: "expense_refund",
+    "Приход": "purchase",
+    "Возврат прихода": "refund",
+    "Расход": "expense",
+    "Возврат расхода": "expense_refund",
 }
 
 # taxationType / appliedTaxationType: FNS tag 1055, a bitmask. Lowest set bit wins.
 _TAXATION_TYPES = {
-    1: "osno", 2: "usn_income", 4: "usn_income_minus_expense",
-    8: "envd", 16: "eshn", 32: "psn", 64: "npd",
+    1: "osno",
+    2: "usn_income",
+    4: "usn_income_minus_expense",
+    8: "envd",
+    16: "eshn",
+    32: "psn",
+    64: "npd",
 }
 
 # Per-item nds code (FNS tag 1199): 1=20%, 2=10%, 3=20/120, 4=10/110, 5=0%, 6=без НДС.
@@ -90,7 +100,7 @@ def _parse_datetime(value) -> Optional[datetime]:
             return datetime.fromisoformat(v)
         except ValueError:
             pass
-        try:                                   # unix timestamp as a string
+        try:  # unix timestamp as a string
             return datetime.fromtimestamp(int(v), tz=timezone.utc)
         except (ValueError, OSError, OverflowError):
             return None
@@ -115,7 +125,7 @@ def _taxation_type(raw: dict) -> Optional[str]:
         value = int(value)
     except (TypeError, ValueError):
         return None
-    for bit, name in _TAXATION_TYPES.items():   # dict insertion order = ascending bits
+    for bit, name in _TAXATION_TYPES.items():  # dict insertion order = ascending bits
         if value & bit:
             return name
     return None
@@ -123,8 +133,12 @@ def _taxation_type(raw: dict) -> Optional[str]:
 
 def _payment_form(raw: dict) -> Optional[str]:
     """Pick the payment kind whose sum > 0 (cash/card most common)."""
-    for form, key in (("cash", "cashTotalSum"), ("card", "ecashTotalSum"),
-                      ("prepaid", "prepaidSum"), ("credit", "creditSum")):
+    for form, key in (
+        ("cash", "cashTotalSum"),
+        ("card", "ecashTotalSum"),
+        ("prepaid", "prepaidSum"),
+        ("credit", "creditSum"),
+    ):
         val = raw.get(key)
         try:
             if val is not None and float(val) > 0:
@@ -153,29 +167,29 @@ def parse_fns_response(raw_data: dict) -> dict:
     g = raw_data.get
 
     inn = g("userInn")
-    org_inn = str(inn).strip() if validate_inn(inn) else None   # invalid INN → drop
+    org_inn = str(inn).strip() if validate_inn(inn) else None  # invalid INN → drop
 
     nds20 = g("nds20")
     nds_zero = g("ndsNo")
     return {
-        "datetime":       _parse_datetime(g("dateTime")),
-        "currency":       "RUB",
+        "datetime": _parse_datetime(g("dateTime")),
+        "currency": "RUB",
         "operation_type": _operation_type(g("operationType")),
-        "org_legal":      _str_or_none(g("user")),
-        "org_brand":      _str_or_none(g("retailPlace")),
-        "org_inn":        org_inn,
-        "payment_form":   _payment_form(raw_data),
+        "org_legal": _str_or_none(g("user")),
+        "org_brand": _str_or_none(g("retailPlace")),
+        "org_inn": org_inn,
+        "payment_form": _payment_form(raw_data),
         "payment_detail": _str_or_none(g("paymentDetail")),
-        "card_last4":     _card_last4(raw_data),
-        "tax_system":     _taxation_type(raw_data),
-        "address":        _str_or_none(g("retailPlaceAddress")),
-        "vat_20":         _kopecks(nds20 if nds20 is not None else g("nds18")),
-        "vat_10":         _kopecks(g("nds10")),
-        "vat_0":          _kopecks(nds_zero if nds_zero is not None else g("nds0")),
-        "kkt_fn":         _str_or_none(g("fiscalDriveNumber")),
-        "kkt_serial":     _str_or_none(g("kktNumber")),       # ЗН (заводской); часто отсутствует
-        "kkt_rn":         _str_or_none(g("kktRegId")),        # РН (регистрационный)
-        "fd_num":         _str_or_none(g("fiscalDocumentNumber")),
-        "fpd":            _str_or_none(g("fiscalSign")),
-        "cashier":        _str_or_none(g("operator")),
+        "card_last4": _card_last4(raw_data),
+        "tax_system": _taxation_type(raw_data),
+        "address": _str_or_none(g("retailPlaceAddress")),
+        "vat_20": _kopecks(nds20 if nds20 is not None else g("nds18")),
+        "vat_10": _kopecks(g("nds10")),
+        "vat_0": _kopecks(nds_zero if nds_zero is not None else g("nds0")),
+        "kkt_fn": _str_or_none(g("fiscalDriveNumber")),
+        "kkt_serial": _str_or_none(g("kktNumber")),  # ЗН (заводской); часто отсутствует
+        "kkt_rn": _str_or_none(g("kktRegId")),  # РН (регистрационный)
+        "fd_num": _str_or_none(g("fiscalDocumentNumber")),
+        "fpd": _str_or_none(g("fiscalSign")),
+        "cashier": _str_or_none(g("operator")),
     }

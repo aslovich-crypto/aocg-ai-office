@@ -4,7 +4,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from app.database import init_db
-from app.routers import receipts, reports, fns, cards, ocr, consent, users, services, auth, categories
+from app.routers import (
+    receipts,
+    reports,
+    fns,
+    cards,
+    ocr,
+    consent,
+    users,
+    services,
+    auth,
+    categories,
+)
 from aocg_security.middleware import AOCGSecurityMiddleware
 
 
@@ -47,6 +58,7 @@ app.include_router(consent.router)
 app.include_router(users.router)
 app.include_router(services.router)
 app.include_router(categories.router)
+
 
 @app.get("/")
 async def root():

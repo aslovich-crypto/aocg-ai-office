@@ -1,6 +1,7 @@
 """Фикс №1 фаза B: auto_categorize_v2 (чистая) + resolve_category_id (per-org) +
 запись category_id в POST /api/receipts/. resolve/POST гоняются на FakePool со
 справочником, засеянным seed_default_categories."""
+
 from app.categories_seed import DEFAULT_CATEGORIES, seed_default_categories
 from app.categorization import (
     DEFAULT_FALLBACK,
@@ -39,7 +40,11 @@ def test_v2_substring_in_full_name():
 
 
 def test_v2_no_match_fallback():
-    assert auto_categorize_v2("Неизвестный Поставщик XYZ") == DEFAULT_FALLBACK == "Прочие хозрасходы"
+    assert (
+        auto_categorize_v2("Неизвестный Поставщик XYZ")
+        == DEFAULT_FALLBACK
+        == "Прочие хозрасходы"
+    )
 
 
 def test_v2_empty_fallback():
@@ -62,13 +67,19 @@ def test_v2_all_trigger_keys_are_real_categories():
 async def test_resolve_known_category(db):
     await seed_default_categories(db, 1)
     cid = await resolve_category_id(db, 1, "Топливо")
-    assert cid == next(c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Топливо")
+    assert cid == next(
+        c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Топливо"
+    )
 
 
 async def test_resolve_unknown_falls_back_to_prochie(db):
     await seed_default_categories(db, 1)
     cid = await resolve_category_id(db, 1, "Несуществующая статья")
-    assert cid == next(c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Прочие хозрасходы")
+    assert cid == next(
+        c["id"]
+        for c in db.categories
+        if c["org_id"] == 1 and c["name"] == "Прочие хозрасходы"
+    )
 
 
 async def test_resolve_per_org_isolation(db):
@@ -88,30 +99,48 @@ async def test_resolve_unseeded_org_returns_none(db):
 # ─── POST /api/receipts/ пишет category_id (org_id=1 из client-фикстуры) ───
 async def test_post_auto_categorizes_and_writes_category_id(client, db):
     await seed_default_categories(db, 1)
-    resp = await client.post("/api/receipts/", json={
-        "date": "2026-05-28", "org": "Лукойл АЗС", "amount": 3000.0})
+    resp = await client.post(
+        "/api/receipts/",
+        json={"date": "2026-05-28", "org": "Лукойл АЗС", "amount": 3000.0},
+    )
     assert resp.status_code == 200
     body = resp.json()
     assert body["category_id"] == next(
-        c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Топливо")
+        c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Топливо"
+    )
 
 
 async def test_post_explicit_category_resolves_id(client, db):
     await seed_default_categories(db, 1)
-    resp = await client.post("/api/receipts/", json={
-        "date": "2026-05-28", "org": "Кафе", "amount": 500.0, "category": "Обеды сотрудников"})
+    resp = await client.post(
+        "/api/receipts/",
+        json={
+            "date": "2026-05-28",
+            "org": "Кафе",
+            "amount": 500.0,
+            "category": "Обеды сотрудников",
+        },
+    )
     body = resp.json()
     assert body["category_id"] == next(
-        c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Обеды сотрудников")
+        c["id"]
+        for c in db.categories
+        if c["org_id"] == 1 and c["name"] == "Обеды сотрудников"
+    )
 
 
 async def test_post_unknown_org_fallback_category_id(client, db):
     await seed_default_categories(db, 1)
-    resp = await client.post("/api/receipts/", json={
-        "date": "2026-05-28", "org": "Неведомый Контрагент", "amount": 100.0})
+    resp = await client.post(
+        "/api/receipts/",
+        json={"date": "2026-05-28", "org": "Неведомый Контрагент", "amount": 100.0},
+    )
     body = resp.json()
     assert body["category_id"] == next(
-        c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Прочие хозрасходы")
+        c["id"]
+        for c in db.categories
+        if c["org_id"] == 1 and c["name"] == "Прочие хозрасходы"
+    )
 
 
 # ─── Фикс №4: categorize_items / categorize (по позициям) ───
@@ -121,13 +150,19 @@ def _it(name, s):
 
 def test_items_products_win_by_sum():
     # продукты (298+1026) перебивают хозтовары (200) по сумме
-    items = [_it("Огурцы Бакинские 350 г", 298), _it("Бедро индейки охл", 1026),
-             _it("Туалетная бумага 4 рулона", 200)]
+    items = [
+        _it("Огурцы Бакинские 350 г", 298),
+        _it("Бедро индейки охл", 1026),
+        _it("Туалетная бумага 4 рулона", 200),
+    ]
     assert categorize_items(items) == "Продукты для офиса"
 
 
 def test_items_office_coffee():
-    assert categorize_items([_it("Кофе зерновой Lavazza 1кг", 1200)]) == "Кофе и напитки в офис"
+    assert (
+        categorize_items([_it("Кофе зерновой Lavazza 1кг", 1200)])
+        == "Кофе и напитки в офис"
+    )
     assert categorize_items([_it("Вода питьевая 5 л", 150)]) == "Кофе и напитки в офис"
 
 
@@ -139,8 +174,12 @@ def test_items_cappuccino_not_matched():
 
 def test_items_fuel_and_stationery():
     assert categorize_items([_it("АИ-95 32.5 л", 2500)]) == "Топливо"
-    assert categorize_items([_it("Бумага А4 SvetoCopy 500л", 350),
-                             _it("Степлер Erich Krause", 200)]) == "Канцелярские товары"
+    assert (
+        categorize_items(
+            [_it("Бумага А4 SvetoCopy 500л", 350), _it("Степлер Erich Krause", 200)]
+        )
+        == "Канцелярские товары"
+    )
 
 
 def test_items_zero_sums_fall_back_to_count():
@@ -182,28 +221,47 @@ def test_categorize_falls_back_to_prochie():
 async def test_post_categorizes_by_items_azbuka(client, db):
     # Реальный кейс id=3: org=юрлицо (без триггера), но позиции — продукты → Продукты.
     await seed_default_categories(db, 1)
-    resp = await client.post("/api/receipts/", json={
-        "date": "2026-05-28", "org": 'ООО "Городской супермаркет"', "amount": 1500.0,
-        "source": "qr_scan",
-        "raw_data": {"user": 'ООО "Городской супермаркет"', "userInn": "7705466989",
-                     "items": [{"name": "Огурцы Бакинские 350 г", "sum": 29800},
-                               {"name": "Бедро индейки охл Россия", "sum": 102600},
-                               {"name": "Пакет майка", "sum": 1290}]}})
+    resp = await client.post(
+        "/api/receipts/",
+        json={
+            "date": "2026-05-28",
+            "org": 'ООО "Городской супермаркет"',
+            "amount": 1500.0,
+            "source": "qr_scan",
+            "raw_data": {
+                "user": 'ООО "Городской супермаркет"',
+                "userInn": "7705466989",
+                "items": [
+                    {"name": "Огурцы Бакинские 350 г", "sum": 29800},
+                    {"name": "Бедро индейки охл Россия", "sum": 102600},
+                    {"name": "Пакет майка", "sum": 1290},
+                ],
+            },
+        },
+    )
     assert resp.status_code == 200
     body = resp.json()
     assert body["category_id"] == next(
-        c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Продукты для офиса")
+        c["id"]
+        for c in db.categories
+        if c["org_id"] == 1 and c["name"] == "Продукты для офиса"
+    )
 
 
 # ─── Фикс A2: приоритет бренда (org_brand) над юрлицом ───
 def test_v2_brand_priority_over_legal():
     # юрлицо без триггера, но бренд узнаётся → категория по бренду
-    assert auto_categorize_v2('ООО "Городской супермаркет"', brand="Азбука Вкуса") == "Продукты для офиса"
+    assert (
+        auto_categorize_v2('ООО "Городской супермаркет"', brand="Азбука Вкуса")
+        == "Продукты для офиса"
+    )
 
 
 def test_v2_brand_unknown_falls_back_to_legal():
     # бренд не узнан → пробуем юрлицо (тот самый OCR-баг: раньше юрлицо не пробовалось)
-    assert auto_categorize_v2("Лукойл АЗС №1", brand="Неизвестный Бренд XYZ") == "Топливо"
+    assert (
+        auto_categorize_v2("Лукойл АЗС №1", brand="Неизвестный Бренд XYZ") == "Топливо"
+    )
 
 
 def test_v2_brand_none_backward_compat():
@@ -224,19 +282,34 @@ def test_categorize_items_beat_brand():
 
 def test_categorize_brand_without_items():
     # позиций нет → бренд решает (юрлицо без триггера)
-    assert categorize('ООО "Городской супермаркет"', [], brand="Азбука Вкуса") == "Продукты для офиса"
+    assert (
+        categorize('ООО "Городской супермаркет"', [], brand="Азбука Вкуса")
+        == "Продукты для офиса"
+    )
 
 
 async def test_post_categorizes_by_brand_when_items_unknown(client, db):
     # Фикс A2 end-to-end: юрлицо без триггера + позиции не узнаны, но retailPlace=бренд Азбука
     await seed_default_categories(db, 1)
-    resp = await client.post("/api/receipts/", json={
-        "date": "2026-05-28", "org": 'ООО "Городской супермаркет"', "amount": 12.90,
-        "source": "qr_scan",
-        "raw_data": {"user": 'ООО "Городской супермаркет"', "userInn": "7705466989",
-                     "retailPlace": 'Супермаркет "Азбука Вкуса"',
-                     "items": [{"name": "Пакет майка ТМ", "sum": 1290}]}})
+    resp = await client.post(
+        "/api/receipts/",
+        json={
+            "date": "2026-05-28",
+            "org": 'ООО "Городской супермаркет"',
+            "amount": 12.90,
+            "source": "qr_scan",
+            "raw_data": {
+                "user": 'ООО "Городской супермаркет"',
+                "userInn": "7705466989",
+                "retailPlace": 'Супермаркет "Азбука Вкуса"',
+                "items": [{"name": "Пакет майка ТМ", "sum": 1290}],
+            },
+        },
+    )
     assert resp.status_code == 200
     body = resp.json()
     assert body["category_id"] == next(
-        c["id"] for c in db.categories if c["org_id"] == 1 and c["name"] == "Продукты для офиса")
+        c["id"]
+        for c in db.categories
+        if c["org_id"] == 1 and c["name"] == "Продукты для офиса"
+    )

@@ -6,6 +6,7 @@ middleware реально подключён в app.main и навешивает
 приоритет над env, поэтому тест-дефолты conftest тут не мешают) — проверяют
 429 на /api/auth/* и что обычный путь не задет строгим auth-лимитом.
 """
+
 from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
@@ -26,6 +27,7 @@ async def test_real_app_emits_security_headers(client):
 def _standalone(**cfg):
     async def ok(request):
         return PlainTextResponse("ok")
+
     app = Starlette(routes=[Route("/ping", ok), Route("/api/auth/login", ok)])
     app.add_middleware(AOCGSecurityMiddleware, **cfg)
     return TestClient(app)
@@ -39,6 +41,6 @@ def test_mw_normal_request_passes():
 def test_mw_auth_path_rate_limit_429():
     c = _standalone(enforce_https=False, rate_limit=1000, auth_rate_limit=2)
     codes = [c.get("/api/auth/login").status_code for _ in range(3)]
-    assert codes == [200, 200, 429]            # строгий auth-лимит 2 → 3-й заблокирован
+    assert codes == [200, 200, 429]  # строгий auth-лимит 2 → 3-й заблокирован
     general = [c.get("/ping").status_code for _ in range(3)]
-    assert general == [200, 200, 200]          # обычный путь не задет (лимит 1000)
+    assert general == [200, 200, 200]  # обычный путь не задет (лимит 1000)
