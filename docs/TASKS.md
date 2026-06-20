@@ -16,7 +16,7 @@
 | #14  | Мониторинг (UptimeRobot + Sentry)        |  🔴  |   ⬜    | код                          |
 | S-05 | Уведомление Роскомнадзора (ИП Шукалович) |  🔴  |   ⬜    | не код                       |
 | S-06 | Миграция Railway → Yandex Cloud (152-ФЗ) |  🔴  |   ⬜    | инфра; обязательна XFF-проба |
-| S-19 | CORS whitelist (CORS_ORIGINS вместо `*`) |  🔴  |   🔵    | код `6df8f90`; выставить CORS_ORIGINS в Railway = домен фронта |
+| S-19 | CORS whitelist (CORS_ORIGINS вместо `*`) |  🔴  |   ✅    | `6df8f90` + CORS_ORIGINS в Railway; preflight-проба: фронт ✅, чужой origin закрыт |
 
 > **XFF-проба (S-06):** защита `_client_ip` держится на том, что Railway затирает клиентский `X-Forwarded-For`. Если Yandex не затирает — IP подделывается, rate-limit обходится. Повторить пробу при миграции.
 
@@ -111,6 +111,7 @@
 | ----------------------------------------------- | -------------------------------------------------------- |
 | #6 — Расширение схемы receipts                  | 20+ колонок + receipt_items + индексы + unique (kkt_fn,fd_num); INSERT-обвязка; legacy fn/category дропнуты |
 | E2 — Аудит репозиториев (read-only)             | сводка в чат (структура/безопасность/тесты/TODO); находки: CORS→S-19, App.jsx монолит 11.4k строк |
+| S-19 — CORS whitelist (CORS_ORIGINS вместо `*`) | `6df8f90` + env в Railway; preflight: фронт-origin ✅, чужой закрыт |
 | #8 — a11y (frontend)                            | `83c6e43` (frontend); aria, focus-trap, клавиатура       |
 | E1 — стартовый комплект + pre-commit (gitleaks) | `51eecac` + `80cac49` (ruff-format); деплой SUCCESS, 200 |
 | Дедуп — ключ уникальности ФН + ФД (вместо ФН)   | fix(dedup): миграция индекса + автотест + живая проверка |
