@@ -12,23 +12,41 @@ import re
 # Ключи словаря, которые маскируются в mask_log_dict (регистронезависимо).
 # Базовый набор из спецификации + практичные алиасы под схему aocg-ai-office
 # (org_inn / userInn / kkt_fn / fiscalDriveNumber реально встречаются в raw_data).
-_INN_KEYS = {"inn", "userinn", "org_inn"}
+_INN_KEYS = {"inn", "inns", "userinn", "org_inn"}
 # fiscaldrivenumber=ФН, fiscaldocumentnumber=ФД, fiscalsign=ФПД — все фискальные
 # номера маскируются как ФН (0.1.1: добавлены ФД/ФПД из ответа ФНС).
 _FN_KEYS = {"fn", "kkt_fn", "fiscaldrivenumber", "fiscaldocumentnumber", "fiscalsign"}
 _CARD_KEYS = {"card_last4", "card_number", "card"}
-_SECRET_KEYS = {"password", "password_hash", "old_password", "new_password"}
-_OPERATOR_KEYS = {"operator"}  # кассир в ответе ФНС (parsed-алиас "cashier" — Фаза 2)
+# Полное скрытие ('***'): пароли, токены, ключи доступа, паспорт, СНИЛС.
+_SECRET_KEYS = {
+    "password",
+    "password_hash",
+    "old_password",
+    "new_password",
+    "token",
+    "tokens",
+    "access_token",
+    "refresh_token",
+    "secret",
+    "api_key",
+    "apikey",
+    "authorization",
+    "passport",
+    "snils",
+}
+_OPERATOR_KEYS = {"operator", "cashier"}  # кассир в ответе ФНС и parsed-алиас
 
 
 def mask_inn(inn) -> str:
-    """7707083893 → '770****93'. Пустой ввод → '', слишком короткий → '***'."""
+    """7707083893 → '****3893'. Видны только последние 4 цифры — по реестрам
+    ФНС открытые код региона+ИФНС позволяли сузить идентификацию, поэтому
+    префикс скрыт (152-ФЗ). Пустой ввод → '', слишком короткий (<6) → '***'."""
     s = re.sub(r"\s", "", str(inn or ""))
     if not s:
         return ""
     if len(s) < 6:
         return "***"
-    return f"{s[:3]}****{s[-2:]}"
+    return f"****{s[-4:]}"
 
 
 def mask_card(card) -> str:
@@ -44,10 +62,28 @@ def mask_fn(fn) -> str:
     return "[fn:скрыт]" if str(fn or "").strip() else ""
 
 
+def _mask_scalar(kl, v):
+    """Маскирует одиночное значение по классу ключа (kl — ключ в lower-case).
+    Нечувствительный ключ → значение возвращается без изменений."""
+    if kl in _INN_KEYS:
+        return mask_inn(v)
+    if kl in _FN_KEYS:
+        return mask_fn(v)
+    if kl in _CARD_KEYS:
+        return mask_card(v)
+    if kl in _OPERATOR_KEYS:
+        return "[скрыт]"
+    if kl in _SECRET_KEYS:
+        return "***"
+    return v
+
+
 def mask_log_dict(d):
     """Рекурсивно возвращает КОПИЮ словаря с маскированными чувствительными
     полями. Не-dict значения отдаются как есть; вложенные dict/list тоже
-    обходятся (например, raw_data чека). Исходный словарь не мутируется."""
+    обходятся (например, raw_data чека). Элементы списка под чувствительным
+    ключом (inns: [...], tokens: [...]) маскируются поэлементно. Исходный
+    словарь не мутируется."""
     if not isinstance(d, dict):
         return d
     out = {}
@@ -56,17 +92,10 @@ def mask_log_dict(d):
         if isinstance(v, dict):
             out[k] = mask_log_dict(v)
         elif isinstance(v, list):
-            out[k] = [mask_log_dict(x) if isinstance(x, dict) else x for x in v]
-        elif kl in _INN_KEYS:
-            out[k] = mask_inn(v)
-        elif kl in _FN_KEYS:
-            out[k] = mask_fn(v)
-        elif kl in _CARD_KEYS:
-            out[k] = mask_card(v)
-        elif kl in _OPERATOR_KEYS:
-            out[k] = "[скрыт]"
-        elif kl in _SECRET_KEYS:
-            out[k] = "***"
+            out[k] = [
+                mask_log_dict(x) if isinstance(x, dict) else _mask_scalar(kl, x)
+                for x in v
+            ]
         else:
-            out[k] = v
+            out[k] = _mask_scalar(kl, v)
     return out

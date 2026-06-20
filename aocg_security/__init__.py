@@ -11,7 +11,7 @@ from aocg_security.validators import (
 )
 from aocg_security.middleware import AOCGSecurityMiddleware
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 __all__ = [
     "mask_inn",
     "mask_card",
