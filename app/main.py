@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,9 +42,17 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # получают CORS-заголовки, а preflight OPTIONS обрабатывается CORS первым.
 app.add_middleware(AOCGSecurityMiddleware)
 
+# CORS-whitelist через env CORS_ORIGINS — запятая-разделённый список origin'ов
+# (напр. "https://app.example.ru,https://example.ru"). Если переменная не задана —
+# fallback "*" (как было: не ломает прод до выставления env и локальную разработку).
+# На проде выставить CORS_ORIGINS в Railway = домен(ы) фронта → whitelist включится
+# на ближайшем рестарте контейнера, без передеплоя кода. См. задачу S-19.
+_cors_env = os.environ.get("CORS_ORIGINS", "").strip()
+_cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()] or ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
