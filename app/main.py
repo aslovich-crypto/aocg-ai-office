@@ -16,6 +16,7 @@ from app.routers import (
     services,
     auth,
     categories,
+    organizations,
 )
 from aocg_security.middleware import AOCGSecurityMiddleware
 
@@ -67,6 +68,7 @@ app.include_router(consent.router)
 app.include_router(users.router)
 app.include_router(services.router)
 app.include_router(categories.router)
+app.include_router(organizations.router)
 
 
 @app.get("/")

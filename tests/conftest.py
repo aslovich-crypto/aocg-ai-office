@@ -68,6 +68,7 @@ class FakePool:
         self.consents = []
         self.category_groups = []  # Фикс №1 фаза A: справочник категорий (per-org)
         self.categories = []
+        self.organizations = []  # Задача #1: профиль организации
         self._rid = self._repid = self._cid = self._consid = 0
         self._gid = self._catid = 0
 
@@ -225,6 +226,28 @@ class FakePool:
 
     async def fetchrow(self, query, *args):
         q = _norm(query)
+        # Задача #1: профиль организации (GET /api/organizations/me).
+        if q.startswith(
+            "SELECT id, name, inn, type, owner_id, created_at FROM organizations"
+        ):
+            return next(
+                (dict(o) for o in self.organizations if o["id"] == args[0]), None
+            )
+        # auth-payload _org(): краткий профиль для ответа логина/me.
+        if q.startswith("SELECT id, name, inn, type FROM organizations WHERE id=$1"):
+            o = next((x for x in self.organizations if x["id"] == args[0]), None)
+            return {k: o.get(k) for k in ("id", "name", "inn", "type")} if o else None
+        # Задача #1: правка профиля (PATCH) — COALESCE сохраняет текущее при None.
+        if q.startswith("UPDATE organizations SET name=COALESCE($1,name)"):
+            new_name, new_inn, org_id = args
+            o = next((x for x in self.organizations if x["id"] == org_id), None)
+            if not o:
+                return None
+            if new_name is not None:
+                o["name"] = new_name
+            if new_inn is not None:
+                o["inn"] = new_inn
+            return dict(o)
         if q.startswith("SELECT payment FROM receipts WHERE org=$1"):
             counts = {}
             for r in self.receipts:
