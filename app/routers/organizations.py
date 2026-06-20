@@ -2,7 +2,7 @@
 
 2 эндпоинта:
   GET   /api/organizations/me  — профиль СВОЕЙ орг (любой член орг)
-  PATCH /api/organizations/me  — правка name/inn (только admin)
+  PATCH /api/organizations/me  — правка name/inn/tax_system (только admin)
 
 Org-scope by design: org_id берётся из get_current_user (токен), НЕ из пути,
 поэтому cross-org доступ (IDOR) невозможен — чужой id передать некуда.
@@ -21,6 +21,13 @@ from app.routers.auth import _require_admin
 
 router = APIRouter(prefix="/api/organizations", tags=["organizations"])
 
+# Налоговые режимы организации (блок «Налоговый учёт» в Сводке):
+#   osno   — ОСНО (плательщик НДС; расходы уменьшают базу)
+#   usn_d  — УСН «Доходы» (расходы НЕ уменьшают налог)
+#   usn_dr — УСН «Доходы минус расходы» (расходы уменьшают базу)
+#   psn    — Патент · npd — НПД · eshn — ЕСХН
+TAX_SYSTEMS = {"osno", "usn_d", "usn_dr", "psn", "npd", "eshn"}
+
 
 class OrgUpdateIn(BaseModel):
     # extra="forbid": попытка передать read-only поле (type, owner_id, …) → 422,
@@ -28,6 +35,7 @@ class OrgUpdateIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: Optional[str] = None
     inn: Optional[str] = None
+    tax_system: Optional[str] = None
 
     @field_validator("inn")
     @classmethod
@@ -35,13 +43,24 @@ class OrgUpdateIn(BaseModel):
         # ИНН: 10/12 цифр + контрольная сумма. None = не меняем → пропускаем.
         return validate_inn(v) if v is not None else v
 
+    @field_validator("tax_system")
+    @classmethod
+    def _check_tax_system(cls, v):
+        # None = не меняем. Иначе — строго один из допустимых режимов.
+        if v is not None and v not in TAX_SYSTEMS:
+            raise ValueError(
+                "Недопустимый налоговый режим. Допустимые: "
+                + ", ".join(sorted(TAX_SYSTEMS))
+            )
+        return v
+
 
 @router.get("/me")
 async def get_my_org(user: dict = Depends(get_current_user)):
     """Профиль организации текущего пользователя (type — read-only в v1)."""
     p = await get_pool()
     row = await p.fetchrow(
-        "SELECT id, name, inn, type, owner_id, created_at "
+        "SELECT id, name, inn, type, owner_id, created_at, tax_system "
         "FROM organizations WHERE id=$1",
         user["org_id"],
     )
@@ -62,11 +81,13 @@ async def update_my_org(body: OrgUpdateIn, user: dict = Depends(get_current_user
         )
     p = await get_pool()
     row = await p.fetchrow(
-        "UPDATE organizations SET name=COALESCE($1,name), inn=COALESCE($2,inn) "
-        "WHERE id=$3 "
-        "RETURNING id, name, inn, type, owner_id, created_at",
+        "UPDATE organizations SET name=COALESCE($1,name), inn=COALESCE($2,inn), "
+        "tax_system=COALESCE($3,tax_system) "
+        "WHERE id=$4 "
+        "RETURNING id, name, inn, type, owner_id, created_at, tax_system",
         body.name.strip() if body.name is not None else None,
         body.inn.strip() if body.inn is not None else None,
+        body.tax_system,
         user["org_id"],
     )
     if not row:

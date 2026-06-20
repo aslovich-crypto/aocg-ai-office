@@ -226,9 +226,9 @@ class FakePool:
 
     async def fetchrow(self, query, *args):
         q = _norm(query)
-        # Задача #1: профиль организации (GET /api/organizations/me).
+        # Задача #1/INT: профиль организации (GET /api/organizations/me).
         if q.startswith(
-            "SELECT id, name, inn, type, owner_id, created_at FROM organizations"
+            "SELECT id, name, inn, type, owner_id, created_at, tax_system FROM organizations"
         ):
             return next(
                 (dict(o) for o in self.organizations if o["id"] == args[0]), None
@@ -237,9 +237,9 @@ class FakePool:
         if q.startswith("SELECT id, name, inn, type FROM organizations WHERE id=$1"):
             o = next((x for x in self.organizations if x["id"] == args[0]), None)
             return {k: o.get(k) for k in ("id", "name", "inn", "type")} if o else None
-        # Задача #1: правка профиля (PATCH) — COALESCE сохраняет текущее при None.
+        # Задача #1/INT: правка профиля (PATCH) — COALESCE сохраняет текущее при None.
         if q.startswith("UPDATE organizations SET name=COALESCE($1,name)"):
-            new_name, new_inn, org_id = args
+            new_name, new_inn, new_tax, org_id = args
             o = next((x for x in self.organizations if x["id"] == org_id), None)
             if not o:
                 return None
@@ -247,6 +247,8 @@ class FakePool:
                 o["name"] = new_name
             if new_inn is not None:
                 o["inn"] = new_inn
+            if new_tax is not None:
+                o["tax_system"] = new_tax
             return dict(o)
         if q.startswith("SELECT payment FROM receipts WHERE org=$1"):
             counts = {}

@@ -8,7 +8,9 @@ client = admin (org_id=1), client_employee = сотрудник (мутации 
 from datetime import datetime
 
 
-def _seed_org(db, org_id=1, name="АОЦГ", inn="7707083893", type="company"):
+def _seed_org(
+    db, org_id=1, name="АОЦГ", inn="7707083893", type="company", tax_system=None
+):
     db.organizations.append(
         dict(
             id=org_id,
@@ -17,6 +19,7 @@ def _seed_org(db, org_id=1, name="АОЦГ", inn="7707083893", type="company"):
             type=type,
             owner_id=1,
             created_at=datetime.utcnow(),
+            tax_system=tax_system,
         )
     )
 
@@ -95,3 +98,35 @@ async def test_patch_my_org_non_admin_403(client_employee, db):
     assert resp.status_code == 403
     org = next(o for o in db.organizations if o["id"] == 1)
     assert org["name"] == "АОЦГ"  # не изменилось
+
+
+# ─── tax_system (INT, блок «Налоговый учёт») ───
+async def test_get_my_org_includes_tax_system(client, db):
+    _seed_org(db, tax_system="usn_dr")
+    body = (await client.get("/api/organizations/me")).json()
+    assert body["tax_system"] == "usn_dr"
+
+
+async def test_patch_my_org_sets_tax_system(client, db):
+    _seed_org(db)
+    resp = await client.patch("/api/organizations/me", json={"tax_system": "osno"})
+    assert resp.status_code == 200
+    assert resp.json()["tax_system"] == "osno"
+    org = next(o for o in db.organizations if o["id"] == 1)
+    assert org["tax_system"] == "osno"
+
+
+async def test_patch_my_org_invalid_tax_system_422(client, db):
+    _seed_org(db, tax_system="osno")
+    resp = await client.patch("/api/organizations/me", json={"tax_system": "envd"})
+    assert resp.status_code == 422
+    org = next(o for o in db.organizations if o["id"] == 1)
+    assert org["tax_system"] == "osno"  # не изменилось
+
+
+async def test_patch_my_org_tax_system_non_admin_403(client_employee, db):
+    _seed_org(db, tax_system="osno")
+    resp = await client_employee.patch(
+        "/api/organizations/me", json={"tax_system": "usn_d"}
+    )
+    assert resp.status_code == 403

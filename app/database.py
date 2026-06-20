@@ -96,6 +96,10 @@ async def init_db():
                 owner_id    INTEGER,
                 created_at  TIMESTAMPTZ DEFAULT NOW()
             );
+            -- Налоговый режим организации (задача INT, блок «Налоговый учёт»):
+            -- osno | usn_d | usn_dr | psn | npd | eshn. NULL = не указан.
+            -- Откат: ALTER TABLE organizations DROP COLUMN tax_system;
+            ALTER TABLE organizations ADD COLUMN IF NOT EXISTS tax_system VARCHAR(30);
             ALTER TABLE users ADD COLUMN IF NOT EXISTS org_id INTEGER REFERENCES organizations(id);
             ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
