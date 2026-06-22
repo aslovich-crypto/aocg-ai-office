@@ -30,3 +30,4 @@ passlib==1.7.4
 bcrypt==4.0.1
 slowapi==0.1.9
 resend==2.4.0
+sentry-sdk[fastapi]==2.63.0

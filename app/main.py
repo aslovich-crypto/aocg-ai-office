@@ -19,6 +19,12 @@ from app.routers import (
     organizations,
 )
 from aocg_security.middleware import AOCGSecurityMiddleware
+from app.monitoring import init_sentry, unhandled_exception_handler
+
+# Sentry (error-capture). init ДО создания app, чтобы интеграция
+# инструментировала всё приложение. Пустой SENTRY_DSN → init пропускается
+# (паттерн RESEND_API_KEY): локалка и CI стартуют без Sentry.
+init_sentry()
 
 
 @asynccontextmanager
@@ -32,6 +38,9 @@ app = FastAPI(title="AOCG AI Офис API", lifespan=lifespan)
 # Rate limiting (slowapi) — used by the login endpoint.
 app.state.limiter = auth.limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# Catch-all для необработанных исключений (500): структурный лог + generic-JSON
+# без traceback. HTTPException/RateLimitExceeded не перехватывает (свои хендлеры).
+app.add_exception_handler(Exception, unhandled_exception_handler)
 
 # Security middleware (rate-limit per IP, авто-бан, security-headers, enforce
 # HTTPS). Конфиг через env SECURITY_* — все НЕ обязательны (дефолты: 60/мин,
@@ -74,3 +83,10 @@ app.include_router(organizations.router)
 @app.get("/")
 async def root():
     return {"app": "AOCG AI Офис", "version": "1.0"}
+
+
+@app.get("/health")
+async def health():
+    # Liveness для UptimeRobot: всегда 200, БД НЕ трогаем. Под общим
+    # rate-лимитом 60/мин (не под auth 5/мин — путь не /api/auth/*).
+    return {"status": "ok"}
