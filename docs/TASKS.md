@@ -1,6 +1,6 @@
 # AOCG AI Офис — Трекер задач
 
-**Документ:** AOCG-TASKS-001-2026 · **Обновлён:** 23.06.2026
+**Документ:** AOCG-TASKS-001-2026 · **Обновлён:** 26.06.2026
 
 ## Легенда
 
@@ -13,7 +13,7 @@
 
 | ID   | Задача                                   | Пр. | Статус | Примечание                   |
 | ---- | ---------------------------------------- | :-: | :----: | ---------------------------- |
-| #14  | Мониторинг (UptimeRobot + Sentry)        |  🔴  |   ✅    | Sentry live (DSN в Railway, EU) + `/health` 200; UptimeRobot навести на `/health` |
+| #14  | Мониторинг (UptimeRobot + Sentry)        |  🔴  |   ✅    | `2c20ded`; Sentry live (DSN в Railway, EU) + `/health` 200; UptimeRobot пингует `/health` 5 мин |
 | S-05 | Уведомление Роскомнадзора (ИП Шукалович) |  🔴  |   ⬜    | не код                       |
 | S-06 | Миграция Railway → Yandex Cloud (152-ФЗ) |  🔴  |   ⬜    | инфра; обязательна XFF-проба |
 | S-19 | CORS whitelist (CORS_ORIGINS вместо `*`) |  🔴  |   ✅    | `6df8f90` + CORS_ORIGINS в Railway; preflight-проба: фронт ✅, чужой origin закрыт |
