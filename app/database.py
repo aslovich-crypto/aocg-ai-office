@@ -161,6 +161,9 @@ async def init_db():
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS payment_detail VARCHAR(100);
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS card_last4     VARCHAR(4);
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS card_id        INTEGER REFERENCES cards(id);
+            -- Автор чека (A-ACL): кто создал. NULLABLE навсегда — старые строки и
+            -- пограничные кейсы без автора остаются валидны. Доступ по роли — в роутере.
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS user_id        INTEGER REFERENCES users(id);
             -- Желательные (5):
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS tax_system     VARCHAR(30);
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS address        TEXT;
@@ -192,7 +195,16 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_receipts_org_inn         ON receipts(org_inn);
             CREATE INDEX IF NOT EXISTS idx_receipts_card_id         ON receipts(card_id);
             CREATE INDEX IF NOT EXISTS idx_receipts_org_id          ON receipts(org_id);
+            CREATE INDEX IF NOT EXISTS idx_receipts_user_id         ON receipts(user_id);
             CREATE INDEX IF NOT EXISTS idx_receipt_items_receipt_id ON receipt_items(receipt_id);
+
+            -- A-ACL backfill: старым чекам без автора проставляем первого админа их
+            -- организации (по created_at). Идемпотентно — только user_id IS NULL.
+            UPDATE receipts SET user_id = (
+                SELECT u.id FROM users u
+                WHERE u.org_id = receipts.org_id AND u.role='admin'
+                ORDER BY u.created_at LIMIT 1
+            ) WHERE user_id IS NULL;
 
             -- ── Чекпойнт C задачи №7: kkt_fn — канонический фискальный номер ──
             -- Колонка fn и backfill kkt_fn=fn убраны (kkt_fn устаканился, пишется в

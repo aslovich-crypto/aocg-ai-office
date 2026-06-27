@@ -33,6 +33,22 @@ REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "30"))
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
+# Роли (строки в users.role) и предикаты доступа к чекам (A-ACL).
+# Семантика VIEW/PATCH и DELETE расходится — два разных предиката.
+ROLE_ADMIN = "admin"
+ROLE_ACCOUNTANT = "accountant"
+ROLE_EMPLOYEE = "employee"
+
+
+def can_see_all(role: str) -> bool:
+    """Видит и правит ВСЕ чеки своей орг (admin, accountant). Иначе — только свои."""
+    return role in (ROLE_ADMIN, ROLE_ACCOUNTANT)
+
+
+def can_delete_any(role: str) -> bool:
+    """Удаляет ЛЮБЫЕ чеки орг (только admin). accountant удаляет только свои."""
+    return role == ROLE_ADMIN
+
 
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)

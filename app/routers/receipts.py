@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse, Response
 from pydantic import BaseModel
 
-from app.auth import get_current_user
+from app.auth import can_delete_any, can_see_all, get_current_user
 from app.categorization import DEFAULT_FALLBACK, categorize
 from app.database import get_pool
 from app.parsers.fns_parser import parse_fns_response
@@ -45,9 +45,17 @@ class ReceiptIn(BaseModel):
 @router.get("/")
 async def get_receipts(user: dict = Depends(get_current_user)):
     p = await get_pool()
-    rows = await p.fetch(
-        "SELECT * FROM receipts WHERE org_id=$1 ORDER BY date DESC", user["org_id"]
-    )
+    # A-ACL: accountant/admin видят все чеки орг; employee — только свои (по автору).
+    if can_see_all(user["role"]):
+        rows = await p.fetch(
+            "SELECT * FROM receipts WHERE org_id=$1 ORDER BY date DESC", user["org_id"]
+        )
+    else:
+        rows = await p.fetch(
+            "SELECT * FROM receipts WHERE org_id=$1 AND user_id=$2 ORDER BY date DESC",
+            user["org_id"],
+            user["id"],
+        )
     return [dict(r) for r in rows]
 
 
@@ -70,11 +78,20 @@ async def suggest_payment(org: str, user: dict = Depends(get_current_user)):
 async def get_receipt_photo(id: int, user: dict = Depends(get_current_user)):
     """Return the receipt's photo (photo_url redirect, or inline raw_data.photo_base64)."""
     p = await get_pool()
-    row = await p.fetchrow(
-        "SELECT photo_url, raw_data FROM receipts WHERE id=$1 AND org_id=$2",
-        id,
-        user["org_id"],
-    )
+    # A-ACL: employee видит фото только своего чека; accountant/admin — любого в орг.
+    if can_see_all(user["role"]):
+        row = await p.fetchrow(
+            "SELECT photo_url, raw_data FROM receipts WHERE id=$1 AND org_id=$2",
+            id,
+            user["org_id"],
+        )
+    else:
+        row = await p.fetchrow(
+            "SELECT photo_url, raw_data FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3",
+            id,
+            user["org_id"],
+            user["id"],
+        )
     if not row:
         raise HTTPException(status_code=404, detail="Receipt not found")
     if row["photo_url"]:
@@ -93,9 +110,18 @@ async def get_receipt_photo(id: int, user: dict = Depends(get_current_user)):
 @router.get("/{id}")
 async def get_receipt(id: int, user: dict = Depends(get_current_user)):
     p = await get_pool()
-    row = await p.fetchrow(
-        "SELECT * FROM receipts WHERE id=$1 AND org_id=$2", id, user["org_id"]
-    )
+    # A-ACL: employee видит только свой чек; accountant/admin — любой в орг.
+    if can_see_all(user["role"]):
+        row = await p.fetchrow(
+            "SELECT * FROM receipts WHERE id=$1 AND org_id=$2", id, user["org_id"]
+        )
+    else:
+        row = await p.fetchrow(
+            "SELECT * FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3",
+            id,
+            user["org_id"],
+            user["id"],
+        )
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
     return dict(row)
@@ -320,11 +346,11 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                         datetime, currency, operation_type, org_legal, org_brand,
                         org_inn, payment_form, payment_detail, card_last4,
                         tax_system, address, vat_20, vat_10, vat_0,
-                        kkt_serial, kkt_rn, fd_num, fpd, cashier, category_id
+                        kkt_serial, kkt_rn, fd_num, fpd, cashier, category_id, user_id
                     ) VALUES (
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
                         $12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,
-                        $24,$25,$26,$27,$28,$29,$30
+                        $24,$25,$26,$27,$28,$29,$30,$31
                     ) RETURNING *""",
                     user["org_id"],
                     r.date,
@@ -356,6 +382,7 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                     parsed.get("fpd"),
                     parsed.get("cashier"),
                     category_id,
+                    user["id"],
                 )
                 # Позиции — best-effort: вложенная транзакция (SAVEPOINT), чтобы
                 # сбой вставки/парсинга позиций откатывал ТОЛЬКО их, а чек оставался.
@@ -424,6 +451,9 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
 
 @router.post("/dedupe-cleanup/")
 async def dedupe_cleanup(user: dict = Depends(get_current_user)):
+    # A-ACL: орг-уровневая деструктивная чистка дублей — только admin.
+    if not can_delete_any(user["role"]):
+        raise HTTPException(status_code=403, detail="Только для администратора")
     p = await get_pool()
     rows = await p.fetch(
         """
@@ -475,13 +505,25 @@ async def bulk_delete_receipts(
         }
     p = await get_pool()
     # Кандидаты — только чеки текущей орг; чужие id в выборку не попадают (изоляция).
-    rows = await p.fetch(
-        """SELECT id, kkt_fn,
-                  EXISTS(SELECT 1 FROM report_items ri WHERE ri.receipt_id = receipts.id) AS in_report
-           FROM receipts WHERE id = ANY($1::int[]) AND org_id = $2""",
-        body.ids,
-        org_id,
-    )
+    # A-ACL: admin может удалять любые в орг; employee/accountant — только свои (по
+    # автору) — чужие молча отсеиваются из кандидатов, как и чужие org_id.
+    if can_delete_any(user["role"]):
+        rows = await p.fetch(
+            """SELECT id, kkt_fn,
+                      EXISTS(SELECT 1 FROM report_items ri WHERE ri.receipt_id = receipts.id) AS in_report
+               FROM receipts WHERE id = ANY($1::int[]) AND org_id = $2""",
+            body.ids,
+            org_id,
+        )
+    else:
+        rows = await p.fetch(
+            """SELECT id, kkt_fn,
+                      EXISTS(SELECT 1 FROM report_items ri WHERE ri.receipt_id = receipts.id) AS in_report
+               FROM receipts WHERE id = ANY($1::int[]) AND org_id = $2 AND user_id = $3""",
+            body.ids,
+            org_id,
+            user["id"],
+        )
     for row in rows:
         if row["in_report"]:
             blocked_in_report.append(row["id"])  # блок ВСЕГДА
@@ -539,17 +581,29 @@ async def patch_receipt(
         values.append(True)
         fields.append(f"category_manual=${len(values)}")
     if not fields:
-        row = await p.fetchrow(
-            "SELECT * FROM receipts WHERE id=$1 AND org_id=$2", id, user["org_id"]
-        )
+        if can_see_all(user["role"]):
+            row = await p.fetchrow(
+                "SELECT * FROM receipts WHERE id=$1 AND org_id=$2", id, user["org_id"]
+            )
+        else:
+            row = await p.fetchrow(
+                "SELECT * FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3",
+                id,
+                user["org_id"],
+                user["id"],
+            )
         if not row:
             raise HTTPException(status_code=404, detail="Not found")
         return dict(row)
     values.append(id)
     values.append(user["org_id"])
+    where = f"WHERE id=${len(values) - 1} AND org_id=${len(values)}"
+    # A-ACL: employee правит только свой чек; accountant/admin — любой в орг.
+    if not can_see_all(user["role"]):
+        values.append(user["id"])
+        where += f" AND user_id=${len(values)}"
     row = await p.fetchrow(
-        f"UPDATE receipts SET {', '.join(fields)} "
-        f"WHERE id=${len(values) - 1} AND org_id=${len(values)} RETURNING *",
+        f"UPDATE receipts SET {', '.join(fields)} {where} RETURNING *",
         *values,
     )
     if not row:
@@ -565,15 +619,32 @@ async def delete_receipt(id: int, user: dict = Depends(get_current_user)):
         async with conn.transaction():
             # org-безопасная чистка связей (защита от IDOR P1, аналог bulk-delete):
             # report_items трогаем ТОЛЬКО для чеков своей орг.
-            await conn.execute(
-                """DELETE FROM report_items
-                   WHERE receipt_id=$1
-                   AND receipt_id IN (SELECT id FROM receipts WHERE org_id=$2)""",
-                id,
-                org_id,
-            )
-            await conn.execute(
-                "DELETE FROM receipts WHERE id=$1 AND org_id=$2", id, org_id
-            )
+            # A-ACL: admin удаляет любой чек орг; employee/accountant — только свой (по автору).
+            if can_delete_any(user["role"]):
+                await conn.execute(
+                    """DELETE FROM report_items
+                       WHERE receipt_id=$1
+                       AND receipt_id IN (SELECT id FROM receipts WHERE org_id=$2)""",
+                    id,
+                    org_id,
+                )
+                await conn.execute(
+                    "DELETE FROM receipts WHERE id=$1 AND org_id=$2", id, org_id
+                )
+            else:
+                await conn.execute(
+                    """DELETE FROM report_items
+                       WHERE receipt_id=$1
+                       AND receipt_id IN (SELECT id FROM receipts WHERE org_id=$2 AND user_id=$3)""",
+                    id,
+                    org_id,
+                    user["id"],
+                )
+                await conn.execute(
+                    "DELETE FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3",
+                    id,
+                    org_id,
+                    user["id"],
+                )
     # Всегда 200 {"ok": True} — не палим существование чужих чеков (anti-enumeration).
     return {"ok": True}

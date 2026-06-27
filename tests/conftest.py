@@ -116,6 +116,19 @@ class FakePool:
                 key=lambda r: str(r["date"]),
                 reverse=True,
             )
+        if q.startswith(
+            "SELECT * FROM receipts WHERE org_id=$1 AND user_id=$2 ORDER BY date DESC"
+        ):
+            # A-ACL: employee видит только свои чеки (org_id + автор).
+            return sorted(
+                [
+                    r
+                    for r in self.receipts
+                    if r.get("org_id") == args[0] and r.get("user_id") == args[1]
+                ],
+                key=lambda r: str(r["date"]),
+                reverse=True,
+            )
         if q.startswith("SELECT * FROM reports WHERE org_id=$1 ORDER BY created DESC"):
             return sorted(
                 [r for r in self.reports if r.get("org_id") == args[0]],
@@ -172,7 +185,10 @@ class FakePool:
         if "id = ANY($1" in q and "EXISTS" in q:
             # Bulk-delete кандидаты (фаза C): чеки своей орг из списка id + in_report.
             # Чужие id не попадают в выборку (изоляция по org_id).
-            ids, org_id = args
+            # A-ACL: для не-admin добавляется user_id=$3 — чужие по автору отсеиваются.
+            ids = args[0]
+            org_id = args[1]
+            user_id = args[2] if len(args) > 2 else None
             return [
                 {
                     "id": r["id"],
@@ -182,7 +198,9 @@ class FakePool:
                     ),
                 }
                 for r in self.receipts
-                if r["id"] in ids and r.get("org_id") == org_id
+                if r["id"] in ids
+                and r.get("org_id") == org_id
+                and (user_id is None or r.get("user_id") == user_id)
             ]
         if "org_inn = $3" in q and "7 days" in q:
             # Ветка 2 — сильный composite (фаза C): ВСЕ совпадения, created_at ASC.
@@ -261,9 +279,35 @@ class FakePool:
                     counts[r["payment"]] = counts.get(r["payment"], 0) + 1
             return {"payment": max(counts, key=counts.get)} if counts else None
         if q.startswith("SELECT * FROM receipts WHERE id=$1"):
-            return next((dict(r) for r in self.receipts if r["id"] == args[0]), None)
+            # A-ACL: enforce org_id (и user_id для employee), а не только id.
+            rid = args[0]
+            org_id = args[1] if len(args) > 1 else None
+            user_id = args[2] if len(args) > 2 else None
+            return next(
+                (
+                    dict(r)
+                    for r in self.receipts
+                    if r["id"] == rid
+                    and (org_id is None or r.get("org_id") == org_id)
+                    and (user_id is None or r.get("user_id") == user_id)
+                ),
+                None,
+            )
         if q.startswith("SELECT photo_url, raw_data FROM receipts WHERE id=$1"):
-            r = next((x for x in self.receipts if x["id"] == args[0]), None)
+            # A-ACL: enforce org_id (и user_id для employee).
+            rid = args[0]
+            org_id = args[1] if len(args) > 1 else None
+            user_id = args[2] if len(args) > 2 else None
+            r = next(
+                (
+                    x
+                    for x in self.receipts
+                    if x["id"] == rid
+                    and (org_id is None or x.get("org_id") == org_id)
+                    and (user_id is None or x.get("user_id") == user_id)
+                ),
+                None,
+            )
             return (
                 dict(photo_url=r.get("photo_url"), raw_data=r.get("raw_data"))
                 if r
@@ -388,9 +432,9 @@ class FakePool:
         # NB: дедуп-ветки 2/3 (composite, окно 7 дней) с фазы C идут через fetch
         # (массив duplicates), а не fetchrow — их матчеры в методе fetch ниже.
         if q.startswith("INSERT INTO receipts"):
-            # 30-arg insert (legacy fn + строка category убраны: org_id, date, … , category_id).
+            # 31-arg insert (org_id, date, … , category_id, user_id — автор чека, A-ACL).
             # Зеркалит порядок колонок в receipts.py. card_id не вставляется → None.
-            args = list(args) + [None] * (30 - len(args))
+            args = list(args) + [None] * (31 - len(args))
             kkt_fn_val = args[6]
             fd_num_val = args[26]
             # Mirror the GLOBAL partial-unique index receipts_kkt_fn_fd_unique:
@@ -440,6 +484,7 @@ class FakePool:
                 fpd=args[27],
                 cashier=args[28],
                 category_id=args[29],
+                user_id=args[30],
                 card_id=None,
                 created_at=datetime.utcnow(),
             )
@@ -451,10 +496,14 @@ class FakePool:
             for pair in set_part.split(","):
                 m = re.match(r"\s*(\w+)\s*=\s*\$(\d+)", pair)
                 assignments.append((m.group(1), int(m.group(2)) - 1))
-            where_idx = int(re.search(r"\$(\d+)", where_part).group(1)) - 1
-            rid = args[where_idx]
+            # A-ACL: honor ВСЕ условия WHERE (id, org_id и — для employee — user_id),
+            # а не только id (раньше org_id игнорировался).
+            where_conds = [
+                (mm.group(1), int(mm.group(2)) - 1)
+                for mm in re.finditer(r"(\w+)=\$(\d+)", where_part)
+            ]
             for r in self.receipts:
-                if r["id"] == rid:
+                if all(r.get(col) == args[idx] for col, idx in where_conds):
                     for field, idx in assignments:
                         r[field] = args[idx]
                     return dict(r)
@@ -536,6 +585,21 @@ class FakePool:
                 )
             ]
             return "DELETE"
+        if q.startswith(
+            "DELETE FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3"
+        ):
+            # A-ACL: employee/accountant удаляют только свой чек (по автору).
+            rid, org_id, user_id = args
+            self.receipts = [
+                r
+                for r in self.receipts
+                if not (
+                    r["id"] == rid
+                    and r.get("org_id") == org_id
+                    and r.get("user_id") == user_id
+                )
+            ]
+            return "DELETE"
         if q.startswith("DELETE FROM receipts WHERE id=$1 AND org_id=$2"):
             # Одиночный DELETE: только чек своей орг (фикс P1 — был фильтр лишь по id).
             rid, org_id = args
@@ -549,8 +613,16 @@ class FakePool:
             "DELETE FROM report_items WHERE receipt_id=$1 AND receipt_id IN"
         ):
             # Одиночный DELETE (фикс P1): org-безопасно — только связь чека СВОЕЙ орг.
-            rid, org_id = args
-            own = {r["id"] for r in self.receipts if r.get("org_id") == org_id}
+            # A-ACL: для не-admin добавляется user_id=$3 (только связи своих чеков).
+            rid = args[0]
+            org_id = args[1]
+            user_id = args[2] if len(args) > 2 else None
+            own = {
+                r["id"]
+                for r in self.receipts
+                if r.get("org_id") == org_id
+                and (user_id is None or r.get("user_id") == user_id)
+            }
             self.report_items = [
                 ri
                 for ri in self.report_items
