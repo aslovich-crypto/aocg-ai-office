@@ -100,6 +100,7 @@
 | S-22 | Рефактор f-string в динамическом PATCH       |  🟢  |   ⬜    | `receipts.py` patch_receipt: SET/WHERE через f-string (ключи из белого списка — инъекции нет, но против конвенции; находка security-review A-ACL) |
 | S-23 | ПД оператора в init_db → env                 |  🟢  |   ⬜    | `database.py` bootstrap: ФИО+email захардкожены, попадают в git-историю; вынести в переменную окружения (находка security-review A-ACL) |
 | S-24 | Валидация роли в приглашении (белый список)  |  🟡  |   ⬜    | InviteCreateIn.role: str без Literal (auth.py:67-70), register_by_invite берёт role как есть (auth.py:396). Приглашение с role=admin/accountant → новый юзер легально видит всё. Ограничить Literal['employee','accountant','admin'] + проверка прав пригласившего. Находка диагностики A-ACL |
+| S-25 | Подтвердить read-only субагента security-reviewer | 🟢 | ✅ | tools: Read/Glob/Grep — строгий allowlist (сверено с офдок code.claude.com); Edit/Write/Bash физически недоступны. Правка не нужна, принцип least privilege соблюдён (создан 19c8371) |
 
 ---
 
