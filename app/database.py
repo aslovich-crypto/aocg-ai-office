@@ -170,6 +170,7 @@ async def init_db():
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS vat_20         NUMERIC(15,2);
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS vat_10         NUMERIC(15,2);
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS vat_0          NUMERIC(15,2);
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS vat_breakdown  JSONB;
             -- Фискальные (5 — fn уже есть, переименуем в Чекпойнте C):
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS kkt_serial     VARCHAR(20);
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS kkt_rn         VARCHAR(20);

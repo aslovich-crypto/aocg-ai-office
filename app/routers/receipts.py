@@ -346,11 +346,12 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                         datetime, currency, operation_type, org_legal, org_brand,
                         org_inn, payment_form, payment_detail, card_last4,
                         tax_system, address, vat_20, vat_10, vat_0,
-                        kkt_serial, kkt_rn, fd_num, fpd, cashier, category_id, user_id
+                        kkt_serial, kkt_rn, fd_num, fpd, cashier, category_id, user_id,
+                        vat_breakdown
                     ) VALUES (
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
                         $12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,
-                        $24,$25,$26,$27,$28,$29,$30,$31
+                        $24,$25,$26,$27,$28,$29,$30,$31,$32
                     ) RETURNING *""",
                     user["org_id"],
                     r.date,
@@ -383,6 +384,7 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                     parsed.get("cashier"),
                     category_id,
                     user["id"],
+                    parsed.get("vat_breakdown"),
                 )
                 # Позиции — best-effort: вложенная транзакция (SAVEPOINT), чтобы
                 # сбой вставки/парсинга позиций откатывал ТОЛЬКО их, а чек оставался.

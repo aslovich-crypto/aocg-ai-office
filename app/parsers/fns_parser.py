@@ -158,6 +158,25 @@ def _card_last4(raw: dict) -> Optional[str]:
     return None
 
 
+# Тег 1199 ФФД: код ставки → процент. Расчётные (3/4/9/10/12) = та же ставка, что прямые.
+VAT_RATE = {1: 20, 2: 10, 3: 20, 4: 10, 5: 0, 7: 5, 8: 7, 9: 5, 10: 7, 11: 22, 12: 22}
+
+
+def _vat_breakdown(items) -> Optional[dict]:
+    """{ставка_str: сумма_НДС_рубли} по позициям (items[].nds + ndsSum). Top-level
+    nds* ФНС шлёт не для всех ставок → считаем из позиций. 0%/без НДС не кладём."""
+    acc: dict = {}
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        rate = VAT_RATE.get(it.get("nds"))
+        if rate:  # >0
+            ns = it.get("ndsSum")
+            if ns:
+                acc[str(rate)] = acc.get(str(rate), 0) + ns
+    return {k: round(v / 100, 2) for k, v in acc.items()} or None
+
+
 def parse_fns_response(raw_data: dict) -> dict:
     """Map an FNS receipt json into the typed receipts columns. Returns {} for a
     non-dict input. `kkt_fn` is returned for reference, but the INSERT writes the
@@ -186,6 +205,7 @@ def parse_fns_response(raw_data: dict) -> dict:
         "vat_20": _kopecks(nds20 if nds20 is not None else g("nds18")),
         "vat_10": _kopecks(g("nds10")),
         "vat_0": _kopecks(nds_zero if nds_zero is not None else g("nds0")),
+        "vat_breakdown": _vat_breakdown(g("items")),
         "kkt_fn": _str_or_none(g("fiscalDriveNumber")),
         "kkt_serial": _str_or_none(g("kktNumber")),  # ЗН (заводской); часто отсутствует
         "kkt_rn": _str_or_none(g("kktRegId")),  # РН (регистрационный)

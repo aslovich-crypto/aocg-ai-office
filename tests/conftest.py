@@ -432,9 +432,9 @@ class FakePool:
         # NB: дедуп-ветки 2/3 (composite, окно 7 дней) с фазы C идут через fetch
         # (массив duplicates), а не fetchrow — их матчеры в методе fetch ниже.
         if q.startswith("INSERT INTO receipts"):
-            # 31-arg insert (org_id, date, … , category_id, user_id — автор чека, A-ACL).
+            # 32-arg insert (org_id, date, … , category_id, user_id, vat_breakdown).
             # Зеркалит порядок колонок в receipts.py. card_id не вставляется → None.
-            args = list(args) + [None] * (31 - len(args))
+            args = list(args) + [None] * (32 - len(args))
             kkt_fn_val = args[6]
             fd_num_val = args[26]
             # Mirror the GLOBAL partial-unique index receipts_kkt_fn_fd_unique:
@@ -485,6 +485,7 @@ class FakePool:
                 cashier=args[28],
                 category_id=args[29],
                 user_id=args[30],
+                vat_breakdown=args[31],
                 card_id=None,
                 created_at=datetime.utcnow(),
             )

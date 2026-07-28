@@ -41,6 +41,7 @@ def parse_ocr_response(raw_data: dict) -> dict:
         "vat_20": _num(g("vat_20")),  # RUBLES — do not /100
         "vat_10": _num(g("vat_10")),
         "vat_0": _num(g("vat_0")),
+        "vat_breakdown": None,  # OCR не даёт надёжных кодов ставок ФНС; ключ для keys_match
         "kkt_fn": None,  # Вариант A — never trust OCR fn
         "kkt_serial": None,  # OCR does not extract fiscal reqs
         "kkt_rn": None,
