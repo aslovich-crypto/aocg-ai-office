@@ -39,7 +39,7 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS reports (
                 id SERIAL PRIMARY KEY,
                 title VARCHAR(255) NOT NULL,
-                status VARCHAR(50) DEFAULT 'Личные',
+                status VARCHAR(50) DEFAULT 'Черновик',
                 total NUMERIC(12,2),
                 created DATE DEFAULT CURRENT_DATE,
                 created_at TIMESTAMP DEFAULT NOW()
@@ -112,6 +112,11 @@ async def init_db():
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS org_id INTEGER;
             ALTER TABLE reports  ADD COLUMN IF NOT EXISTS org_id INTEGER;
             ALTER TABLE cards    ADD COLUMN IF NOT EXISTS org_id INTEGER;
+            -- Жизненный цикл статусов отчёта: Черновик → На проверке → Одобрен/Отклонён.
+            -- CREATE TABLE выше с IF NOT EXISTS на существующей БД — no-op, поэтому дефолт
+            -- существующей колонки меняем явным идемпотентным ALTER (был 'Личные').
+            -- Откат: ALTER TABLE reports ALTER COLUMN status SET DEFAULT 'Личные';
+            ALTER TABLE reports  ALTER COLUMN status SET DEFAULT 'Черновик';
             CREATE TABLE IF NOT EXISTS invite_links (
                 id          SERIAL PRIMARY KEY,
                 token       TEXT UNIQUE NOT NULL,

@@ -1174,9 +1174,15 @@ async def test_create_report(client):
 
 # ─── PATCH /api/reports/{id} ──────────────────────────────────────────
 async def test_patch_report_status(client, seeded):
-    resp = await client.patch("/api/reports/1", json={"status": "Отправлено"})
+    resp = await client.patch("/api/reports/1", json={"status": "На проверке"})
     assert resp.status_code == 200
-    assert resp.json()["status"] == "Отправлено"
+    assert resp.json()["status"] == "На проверке"
+
+
+async def test_patch_report_status_invalid_rejected(client, seeded):
+    # Статус вне жизненного цикла (в т.ч. старый 'Личные') — 422, не проходит.
+    resp = await client.patch("/api/reports/1", json={"status": "Личные"})
+    assert resp.status_code == 422
 
 
 # ─── GET /api/cards/ ──────────────────────────────────────────────────

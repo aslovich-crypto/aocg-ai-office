@@ -514,7 +514,7 @@ class FakePool:
             row = dict(
                 id=self._repid,
                 title=args[0],
-                status="Личные",
+                status="Черновик",
                 total=args[1],
                 org_id=args[2] if len(args) > 2 else None,
                 created=date.today(),
@@ -799,7 +799,7 @@ def seeded(db):
         dict(
             id=1,
             title="Отчёт за май",
-            status="Личные",
+            status="Черновик",
             total=5000.0,
             org_id=1,
             created=date(2026, 5, 10),

@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -16,7 +16,9 @@ class ReportIn(BaseModel):
 
 
 class StatusIn(BaseModel):
-    status: str
+    # Жизненный цикл отчёта: Черновик → На проверке → Одобрен / Отклонён.
+    # Literal закрывает дыру — PATCH больше не примет произвольную строку статуса.
+    status: Literal["Черновик", "На проверке", "Одобрен", "Отклонён"]
 
 
 @router.get("/")
