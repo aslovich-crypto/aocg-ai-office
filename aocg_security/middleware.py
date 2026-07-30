@@ -39,6 +39,14 @@ class AOCGSecurityMiddleware(BaseHTTPMiddleware):
     WINDOW_SECONDS = 60
     BAN_SECONDS = 300  # бан IP на 5 минут после превышения порога
 
+    # Служебные /api/auth/* эндпоинты — НЕ поверхность перебора ПАРОЛЯ.
+    # refresh — высокоэнтропийный машинный токен (фоновый вызов, в т.ч.
+    # из нескольких вкладок); me — чтение своей сессии по валидному JWT.
+    # Держим их под ОБЩИМ лимитом (rate_limit), а не строгим auth (5/мин),
+    # иначе фоновые вызовы выжигают бюджет логина. login/register/
+    # register-by-invite/verify-email/logout — строгие. См. S-27.
+    STRICT_AUTH_EXEMPT = frozenset({"/api/auth/refresh", "/api/auth/me"})
+
     def __init__(
         self,
         app,
@@ -89,6 +97,11 @@ class AOCGSecurityMiddleware(BaseHTTPMiddleware):
         q.append(now)
         return len(q) > limit
 
+    def _is_strict_auth(self, path: str) -> bool:
+        """Путь под СТРОГИМ auth-лимитом (поверхность перебора пароля)?
+        Все /api/auth/*, КРОМЕ служебных STRICT_AUTH_EXEMPT."""
+        return path.startswith("/api/auth/") and path not in self.STRICT_AUTH_EXEMPT
+
     async def dispatch(self, request: Request, call_next):
         now = time.time()
         ip = self._client_ip(request)
@@ -111,8 +124,8 @@ class AOCGSecurityMiddleware(BaseHTTPMiddleware):
             del self._banned[ip]
             self._violations[ip] = 0
 
-        # 3. Rate limit (для /api/auth/* — строже).
-        is_auth = request.url.path.startswith("/api/auth/")
+        # 3. Rate limit (для /api/auth/* — строже; служебные исключены — S-27).
+        is_auth = self._is_strict_auth(request.url.path)
         limit = self.auth_rate_limit if is_auth else self.rate_limit
         scope = "auth" if is_auth else "general"
         if self._over_limit(ip, scope, limit):

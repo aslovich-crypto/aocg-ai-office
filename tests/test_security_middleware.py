@@ -28,7 +28,14 @@ def _standalone(**cfg):
     async def ok(request):
         return PlainTextResponse("ok")
 
-    app = Starlette(routes=[Route("/ping", ok), Route("/api/auth/login", ok)])
+    app = Starlette(
+        routes=[
+            Route("/ping", ok),
+            Route("/api/auth/login", ok),
+            Route("/api/auth/refresh", ok),
+            Route("/api/auth/me", ok),
+        ]
+    )
     app.add_middleware(AOCGSecurityMiddleware, **cfg)
     return TestClient(app)
 
@@ -44,3 +51,26 @@ def test_mw_auth_path_rate_limit_429():
     assert codes == [200, 200, 429]  # строгий auth-лимит 2 → 3-й заблокирован
     general = [c.get("/ping").status_code for _ in range(3)]
     assert general == [200, 200, 200]  # обычный путь не задет (лимит 1000)
+
+
+def test_mw_refresh_exempt_from_strict_auth_limit():
+    # refresh — служебный: под ОБЩИМ лимитом (1000), не строгим auth (2).
+    c = _standalone(enforce_https=False, rate_limit=1000, auth_rate_limit=2)
+    assert [c.get("/api/auth/refresh").status_code for _ in range(5)] == [200] * 5
+    # login под тем же строгим лимитом — 429 на 3-м (регресс-страховка).
+    assert [c.get("/api/auth/login").status_code for _ in range(3)] == [200, 200, 429]
+
+
+def test_mw_me_exempt_from_strict_auth_limit():
+    c = _standalone(enforce_https=False, rate_limit=1000, auth_rate_limit=2)
+    assert [c.get("/api/auth/me").status_code for _ in range(5)] == [200] * 5
+
+
+def test_is_strict_auth_classification():
+    mw = AOCGSecurityMiddleware(None, enforce_https=False)
+    assert mw._is_strict_auth("/api/auth/login") is True
+    assert mw._is_strict_auth("/api/auth/register") is True
+    assert mw._is_strict_auth("/api/auth/logout") is True  # остаётся строгим
+    assert mw._is_strict_auth("/api/auth/refresh") is False
+    assert mw._is_strict_auth("/api/auth/me") is False
+    assert mw._is_strict_auth("/api/receipts/") is False
