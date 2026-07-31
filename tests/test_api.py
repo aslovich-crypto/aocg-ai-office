@@ -1381,6 +1381,54 @@ async def test_report_author_in_all_shapes(client):
         assert "user_id" in body
 
 
+# ─── REP-ROLES: кто утверждает отчёт ──────────────────────────────────
+async def test_employee_cannot_approve_own_report(client_employee, db):
+    # Сотрудник не утверждает собственный отчёт — это контроль расходов.
+    _report(db, 520, user_id=2, status="На проверке")
+    resp = await client_employee.patch("/api/reports/520", json={"status": "Одобрен"})
+    assert resp.status_code == 403
+    assert "бухгалтер" in resp.json()["detail"]
+    assert next(r for r in db.reports if r["id"] == 520)["status"] == "На проверке"
+
+
+async def test_employee_cannot_reject_report(client_employee, db):
+    _report(db, 521, user_id=2, status="На проверке")
+    resp = await client_employee.patch("/api/reports/521", json={"status": "Отклонён"})
+    assert resp.status_code == 403
+
+
+async def test_employee_can_submit_and_recall_own_report(client_employee, db):
+    # «На проверке» (отправить) и «Черновик» (отозвать) автор делает сам.
+    _report(db, 522, user_id=2, status="Черновик")
+    sent = await client_employee.patch(
+        "/api/reports/522", json={"status": "На проверке"}
+    )
+    assert sent.status_code == 200 and sent.json()["status"] == "На проверке"
+    back = await client_employee.patch("/api/reports/522", json={"status": "Черновик"})
+    assert back.status_code == 200 and back.json()["status"] == "Черновик"
+
+
+async def test_accountant_approves_employee_report(client_accountant, db):
+    _report(db, 523, user_id=2, status="На проверке")
+    resp = await client_accountant.patch("/api/reports/523", json={"status": "Одобрен"})
+    assert resp.status_code == 200 and resp.json()["status"] == "Одобрен"
+
+
+async def test_admin_approves_report(client, db):
+    _report(db, 524, user_id=2, status="На проверке")
+    resp = await client.patch("/api/reports/524", json={"status": "Одобрен"})
+    assert resp.status_code == 200
+
+
+async def test_employee_approving_foreign_report_403(client_employee, db):
+    # Ролевой гейт срабатывает раньше поиска отчёта: 403 говорит о правах
+    # действующего лица и не раскрывает, существует ли чужой отчёт.
+    _report(db, 525, user_id=1, status="На проверке")
+    resp = await client_employee.patch("/api/reports/525", json={"status": "Одобрен"})
+    assert resp.status_code == 403
+    assert next(r for r in db.reports if r["id"] == 525)["status"] == "На проверке"
+
+
 # ─── REP-ACL: видимость отчётов ───────────────────────────────────────
 def _report(db, rid, user_id, *, title="Отчёт", status="Черновик", org_id=1):
     db.reports.append(
