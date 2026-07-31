@@ -162,6 +162,12 @@ async def init_db():
             UPDATE reports SET user_id = (
                 SELECT owner_id FROM organizations o WHERE o.id = reports.org_id
             ) WHERE user_id IS NULL;
+            -- ③ Второй деплой (REP-AUTHOR ЧП2): код выше уже на проде и всегда
+            -- пишет user_id, бэкфилл ② отработал (0 строк с NULL) — значит
+            -- ограничение можно закрепить. Идемпотентно: повторный SET NOT NULL
+            -- на уже NOT NULL колонке — no-op, init_db на каждом старте не падает.
+            -- Откат: ALTER TABLE reports ALTER COLUMN user_id DROP NOT NULL;
+            ALTER TABLE reports ALTER COLUMN user_id SET NOT NULL;
             CREATE TABLE IF NOT EXISTS invite_links (
                 id          SERIAL PRIMARY KEY,
                 token       TEXT UNIQUE NOT NULL,
