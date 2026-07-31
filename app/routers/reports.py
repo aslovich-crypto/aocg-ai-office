@@ -61,6 +61,26 @@ class ReceiptsIn(BaseModel):
 # клиент показал текст, а не «500 Internal Server Error».
 RECEIPT_TAKEN = "Чек уже в другом отчёте"
 
+# Инвариант АО-1: авансовый отчёт закрывает подотчёт КОНКРЕТНОГО лица, поэтому
+# все его чеки принадлежат одному сотруднику — автору отчёта. Смешанный отчёт
+# невозможно провести: непонятно, кому возмещать. Бухгалтер видит все чеки орг
+# (can_see_all) и технически мог бы собрать «солянку» — это и запрещаем.
+# «Собрать отчёт ЗА сотрудника» появится явной фичей REP-ONBEHALF.
+RECEIPT_FOREIGN = "Чек другого сотрудника — соберите отдельный отчёт"
+# receipts.user_id остался nullable с A-ACL (легаси; на проде таких строк нет).
+# «Ничей» чек ломал бы инвариант, поэтому в отчёт не пускаем.
+RECEIPT_NO_OWNER = "У чека нет владельца — его нельзя включить в отчёт"
+
+
+def _ensure_same_owner(rows, author_id: int) -> None:
+    """Все чеки принадлежат подотчётному лицу отчёта. rows — те же строки, что
+    уже прочитаны IDOR-проверкой, второго обращения к БД не делаем."""
+    for row in rows:
+        if row["user_id"] is None:
+            raise HTTPException(status_code=409, detail=RECEIPT_NO_OWNER)
+        if row["user_id"] != author_id:
+            raise HTTPException(status_code=409, detail=RECEIPT_FOREIGN)
+
 
 async def _recalc_total(conn, report_id: int, org_id: int):
     """Пересчитать reports.total из фактического состава и вернуть строку отчёта.
@@ -151,7 +171,8 @@ async def create_report(r: ReportIn, user: dict = Depends(get_current_user)):
             # вставки (для финпродукта явная ошибка лучше тихого пропуска).
             if r.receiptIds:
                 owned = await conn.fetch(
-                    "SELECT id FROM receipts WHERE id = ANY($1::int[]) AND org_id = $2",
+                    "SELECT id, user_id FROM receipts "
+                    "WHERE id = ANY($1::int[]) AND org_id = $2",
                     r.receiptIds,
                     user["org_id"],
                 )
@@ -161,6 +182,8 @@ async def create_report(r: ReportIn, user: dict = Depends(get_current_user)):
                     raise HTTPException(
                         status_code=403, detail="Один или несколько чеков недоступны"
                     )
+                # Автор отчёта = создатель, значит и все чеки — его.
+                _ensure_same_owner(owned, user["id"])
                 for rid in r.receiptIds:
                     try:
                         await conn.execute(
@@ -246,11 +269,12 @@ async def add_receipts(id: int, r: ReceiptsIn, user: dict = Depends(get_current_
     p = await get_pool()
     async with p.acquire() as conn:
         async with conn.transaction():
-            await _load_editable_report(conn, id, user["org_id"])
+            rep = await _load_editable_report(conn, id, user["org_id"])
             if r.receiptIds:
                 # IDOR: те же правила, что при создании отчёта.
                 owned = await conn.fetch(
-                    "SELECT id FROM receipts WHERE id = ANY($1::int[]) AND org_id = $2",
+                    "SELECT id, user_id FROM receipts "
+                    "WHERE id = ANY($1::int[]) AND org_id = $2",
                     r.receiptIds,
                     user["org_id"],
                 )
@@ -258,6 +282,9 @@ async def add_receipts(id: int, r: ReceiptsIn, user: dict = Depends(get_current_
                     raise HTTPException(
                         status_code=403, detail="Один или несколько чеков недоступны"
                     )
+                # Эталон здесь — автор ОТЧЁТА, а не тот, кто добавляет: состав
+                # обязан остаться однородным даже если чеки кладёт админ.
+                _ensure_same_owner(owned, rep["user_id"])
                 # Где эти чеки уже лежат: в этом отчёте — пропускаем, в чужом —
                 # 409 с понятным текстом (а не сырое нарушение констрейнта).
                 existing = await conn.fetch(

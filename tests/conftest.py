@@ -188,12 +188,13 @@ class FakePool:
                 for ri in self.report_items
                 if ri["receipt_id"] in ids
             ]
-        if q.startswith("SELECT id FROM receipts WHERE id = ANY($1"):
+        if q.startswith("SELECT id, user_id FROM receipts WHERE id = ANY($1"):
             # S-15 IDOR-проверка создания отчёта: какие из запрошенных id реально
             # принадлежат орг пользователя (чужие/несуществующие сюда не попадут).
+            # user_id — для инварианта REP-AUTHOR ЧП3 (все чеки одного автора).
             ids, org_id = args
             return [
-                {"id": r["id"]}
+                {"id": r["id"], "user_id": r.get("user_id")}
                 for r in self.receipts
                 if r["id"] in ids and r.get("org_id") == org_id
             ]

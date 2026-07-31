@@ -1049,7 +1049,7 @@ async def test_delete_receipt_org_safe_report_items(client, db):
 
 
 # ─── POST /api/receipts/bulk-delete (задача №9 фаза C) ────────────────
-def _mk(db, rid, *, source="manual", kkt_fn=None, org_id=1, amount=100.0):
+def _mk(db, rid, *, source="manual", kkt_fn=None, org_id=1, amount=100.0, user_id=1):
     db.receipts.append(
         dict(
             id=rid,
@@ -1064,6 +1064,7 @@ def _mk(db, rid, *, source="manual", kkt_fn=None, org_id=1, amount=100.0):
             source=source,
             photo_url=None,
             org_id=org_id,
+            user_id=user_id,  # REP-AUTHOR: у чека всегда есть владелец
             created_at=datetime.utcnow(),
         )
     )
@@ -1378,6 +1379,94 @@ async def test_report_author_in_all_shapes(client):
     detail = await client.get(f"/api/reports/{rid}")
     for body in (created.json(), patched.json(), item, detail.json()):
         assert "user_id" in body
+
+
+# ─── REP-AUTHOR ЧП3: один отчёт = один подотчётный ────────────────────
+async def test_create_report_own_receipts_ok_invariant(client, db):
+    # Свои чеки (автор = создатель, id=1 из фикстуры) — проходят.
+    _mk(db, 400, user_id=1)
+    _mk(db, 401, user_id=1)
+    resp = await client.post(
+        "/api/reports/", json={"title": "Свои", "receiptIds": [400, 401]}
+    )
+    assert resp.status_code == 200
+
+
+async def test_create_report_foreign_employee_receipt_409(client, db):
+    # Чек ЧУЖОГО сотрудника той же орг: IDOR не срабатывает (org совпадает),
+    # но инвариант АО-1 не пускает — иначе непонятно, кому возмещать.
+    _mk(db, 402, user_id=1)
+    _mk(db, 403, user_id=2)  # другой сотрудник той же организации
+    resp = await client.post(
+        "/api/reports/", json={"title": "Солянка", "receiptIds": [402, 403]}
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "Чек другого сотрудника — соберите отдельный отчёт"
+    assert db.reports == []  # откат: отчёт не создан
+
+
+async def test_create_report_ownerless_receipt_409(client, db):
+    # Легаси-чек без владельца (receipts.user_id nullable) — «ничей»,
+    # в отчёт не пускаем, иначе инвариант дырявый.
+    _mk(db, 404, user_id=None)
+    resp = await client.post(
+        "/api/reports/", json={"title": "Ничей", "receiptIds": [404]}
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "У чека нет владельца — его нельзя включить в отчёт"
+    assert db.reports == []
+
+
+async def test_add_foreign_employee_receipt_to_report_409(client, db):
+    # Тот же инвариант на добавлении в существующий отчёт.
+    _mk(db, 405, user_id=1)
+    created = await client.post(
+        "/api/reports/", json={"title": "Мой", "receiptIds": [405]}
+    )
+    rid = created.json()["id"]
+    _mk(db, 406, user_id=2)
+    resp = await client.post(f"/api/reports/{rid}/receipts", json={"receiptIds": [406]})
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "Чек другого сотрудника — соберите отдельный отчёт"
+    assert 406 not in [ri["receipt_id"] for ri in db.report_items]
+
+
+async def test_add_ownerless_receipt_to_report_409(client, db):
+    _mk(db, 407, user_id=1)
+    created = await client.post(
+        "/api/reports/", json={"title": "Мой2", "receiptIds": [407]}
+    )
+    rid = created.json()["id"]
+    _mk(db, 408, user_id=None)
+    resp = await client.post(f"/api/reports/{rid}/receipts", json={"receiptIds": [408]})
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "У чека нет владельца — его нельзя включить в отчёт"
+
+
+async def test_add_receipt_matches_report_author_not_adder(client, db):
+    # Эталон — автор ОТЧЁТА, а не тот, кто добавляет. Отчёт сотрудника id=2,
+    # добавляет админ id=1: чек автора отчёта пройдёт, чек админа — нет.
+    db.reports.append(
+        dict(
+            id=900,
+            title="Отчёт сотрудника",
+            status="Черновик",
+            total=0,
+            org_id=1,
+            user_id=2,
+            created=date(2026, 7, 1),
+            created_at=datetime.utcnow(),
+        )
+    )
+    db._repid = 900
+    _mk(db, 409, user_id=2)  # чек автора отчёта
+    ok = await client.post("/api/reports/900/receipts", json={"receiptIds": [409]})
+    assert ok.status_code == 200
+
+    _mk(db, 410, user_id=1)  # чек добавляющего админа — чужой для этого отчёта
+    bad = await client.post("/api/reports/900/receipts", json={"receiptIds": [410]})
+    assert bad.status_code == 409
+    assert bad.json()["detail"] == "Чек другого сотрудника — соберите отдельный отчёт"
 
 
 # ─── REP-CRUD ЧП3: состав отчёта ──────────────────────────────────────
@@ -2111,6 +2200,7 @@ async def test_create_report_own_receipts_ok(client, db):
             org="X",
             amount=100.0,
             org_id=1,
+            user_id=1,  # REP-AUTHOR: чек принадлежит создателю отчёта
             created_at=now,
         )
     )
@@ -2121,6 +2211,7 @@ async def test_create_report_own_receipts_ok(client, db):
             org="Y",
             amount=200.0,
             org_id=1,
+            user_id=1,
             created_at=now,
         )
     )
