@@ -44,10 +44,33 @@ async def init_db():
                 created DATE DEFAULT CURRENT_DATE,
                 created_at TIMESTAMP DEFAULT NOW()
             );
+            -- report_items — фактически 1:N, НЕ M:N: отчёт → много чеков,
+            -- чек → РОВНО ОДИН отчёт. Это правило про деньги: один чек в двух
+            -- авансовых отчётах = двойное возмещение сотруднику и задвоение
+            -- расхода в налоговом учёте (ст. 252 НК РФ требует документального
+            -- подтверждения; один документ не может обосновывать две записи).
+            -- Фиксируется индексом uq_report_items_receipt_id ниже. Не читать
+            -- таблицу как «многие-ко-многим» — прежние описания её так называли
+            -- ошибочно, из-за этого правило держалось только на фронте.
             CREATE TABLE IF NOT EXISTS report_items (
-                report_id INTEGER REFERENCES reports(id) ON DELETE CASCADE,
-                receipt_id INTEGER REFERENCES receipts(id)
+                report_id INTEGER NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+                receipt_id INTEGER NOT NULL REFERENCES receipts(id)
             );
+            -- Для СУЩЕСТВУЮЩИХ баз CREATE TABLE выше — no-op (IF NOT EXISTS
+            -- пропускает таблицу целиком), поэтому те же правила навешиваем
+            -- идемпотентными ALTER/INDEX. UNIQUE делаем индексом, а не
+            -- ADD CONSTRAINT: init_db крутится на КАЖДОМ старте контейнера,
+            -- а ADD CONSTRAINT не идемпотентен и уронил бы приложение.
+            -- Откат: DROP INDEX idx_report_items_report_id;
+            --        DROP INDEX uq_report_items_receipt_id;
+            --        ALTER TABLE report_items ALTER COLUMN receipt_id DROP NOT NULL;
+            --        ALTER TABLE report_items ALTER COLUMN report_id  DROP NOT NULL;
+            ALTER TABLE report_items ALTER COLUMN report_id  SET NOT NULL;
+            ALTER TABLE report_items ALTER COLUMN receipt_id SET NOT NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_report_items_receipt_id
+                ON report_items(receipt_id);
+            CREATE INDEX IF NOT EXISTS idx_report_items_report_id
+                ON report_items(report_id);
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS raw_data JSONB;
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual';
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS photo_url TEXT;

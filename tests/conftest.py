@@ -520,13 +520,29 @@ class FakePool:
                 id=self._repid,
                 title=args[0],
                 status="Черновик",
-                total=args[1],
-                org_id=args[2] if len(args) > 2 else None,
+                total=0,  # проставит _recalc_total, как в проде
+                org_id=args[1] if len(args) > 1 else None,
                 created=date.today(),
                 created_at=datetime.utcnow(),
             )
             self.reports.append(row)
             return dict(row)
+        # Зеркало _recalc_total: сумма чеков состава, org-scope как в SQL.
+        if q.startswith("UPDATE reports SET total"):
+            for r in self.reports:
+                if r["id"] == args[0] and r.get("org_id") == args[1]:
+                    ids = [
+                        i["receipt_id"]
+                        for i in self.report_items
+                        if i["report_id"] == r["id"]
+                    ]
+                    r["total"] = sum(
+                        float(rc["amount"])
+                        for rc in self.receipts
+                        if rc["id"] in ids and rc.get("org_id") == args[1]
+                    )
+                    return dict(r)
+            return None
         if q.startswith("UPDATE reports SET status=$1"):
             for r in self.reports:
                 if r["id"] == args[1]:
@@ -636,6 +652,13 @@ class FakePool:
             ]
             return "DELETE"
         if q.startswith("INSERT INTO report_items"):
+            # Зеркало uq_report_items_receipt_id: чек живёт ровно в одном отчёте
+            # (один чек в двух авансовых отчётах = двойное возмещение).
+            if any(ri["receipt_id"] == args[1] for ri in self.report_items):
+                raise asyncpg.exceptions.UniqueViolationError(
+                    "duplicate key value violates unique constraint "
+                    '"uq_report_items_receipt_id"'
+                )
             self.report_items.append({"report_id": args[0], "receipt_id": args[1]})
             return "INSERT"
         if q.startswith("INSERT INTO receipt_items"):

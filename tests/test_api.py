@@ -6,6 +6,9 @@ touched. Each test gets a fresh store via the `db` / `seeded` fixtures.
 
 from datetime import date, datetime, timedelta
 
+import asyncpg
+import pytest
+
 from app.categories_seed import seed_default_categories
 
 
@@ -1210,6 +1213,65 @@ async def test_patch_report_returns_receipt_ids(client):
     listed = await client.get("/api/reports/")
     item = next(r for r in listed.json() if r["id"] == report_id)
     assert set(body) == set(item)
+
+
+# ─── REP-CRUD ЧП1: total производный от состава ───────────────────────
+async def test_create_report_total_computed_from_receipts(client):
+    # total считает БЭК из состава: присланное клиентом значение игнорируется.
+    a = await client.post(
+        "/api/receipts/", json={"date": "2026-07-01", "org": "А", "amount": 100.0}
+    )
+    b = await client.post(
+        "/api/receipts/", json={"date": "2026-07-02", "org": "Б", "amount": 250.5}
+    )
+    ids = [a.json()["id"], b.json()["id"]]
+    resp = await client.post(
+        "/api/reports/",
+        json={"title": "Июль", "total": 99999, "receiptIds": ids},  # вранью не верим
+    )
+    assert resp.status_code == 200
+    assert float(resp.json()["total"]) == 350.5
+
+
+async def test_create_report_without_total_field_ok(client):
+    # total больше не входит в контракт запроса — без него POST валиден.
+    rc = await client.post(
+        "/api/receipts/", json={"date": "2026-07-03", "org": "В", "amount": 10.0}
+    )
+    resp = await client.post(
+        "/api/reports/", json={"title": "Без суммы", "receiptIds": [rc.json()["id"]]}
+    )
+    assert resp.status_code == 200
+    assert float(resp.json()["total"]) == 10.0
+
+
+async def test_report_empty_has_zero_total(client):
+    resp = await client.post(
+        "/api/reports/", json={"title": "Пустой", "receiptIds": []}
+    )
+    assert resp.status_code == 200
+    assert float(resp.json()["total"]) == 0
+
+
+async def test_receipt_cannot_be_in_two_reports(client, db):
+    # Правило «один чек = ровно один отчёт» (uq_report_items_receipt_id):
+    # один чек в двух авансовых отчётах = двойное возмещение.
+    # ЧП1 ждёт сырой UniqueViolationError из БД; в ЧП3 (POST /{id}/receipts)
+    # это переедет на дружелюбный 409 «Чек уже в другом отчёте» —
+    # тогда assert станет resp.status_code == 409.
+    rc = await client.post(
+        "/api/receipts/", json={"date": "2026-07-04", "org": "Г", "amount": 5.0}
+    )
+    rid = rc.json()["id"]
+    first = await client.post(
+        "/api/reports/", json={"title": "Первый", "receiptIds": [rid]}
+    )
+    assert first.status_code == 200
+    with pytest.raises(asyncpg.exceptions.UniqueViolationError):
+        await client.post(
+            "/api/reports/", json={"title": "Второй", "receiptIds": [rid]}
+        )
+    assert len(db.reports) == 1  # второй отчёт не создался (откат транзакции)
 
 
 # ─── GET /api/cards/ ──────────────────────────────────────────────────

@@ -10,8 +10,10 @@ router = APIRouter(prefix="/api/reports", tags=["reports"])
 
 
 class ReportIn(BaseModel):
+    # total НЕ принимаем: он производный от состава (см. _recalc_total).
+    # Раньше сумму присылал клиент, и после любого изменения состава она
+    # протухала. Лишнее поле в запросе Pydantic просто игнорирует.
     title: str
-    total: float
     receiptIds: List[int]
 
 
@@ -19,6 +21,29 @@ class StatusIn(BaseModel):
     # Жизненный цикл отчёта: Черновик → На проверке → Одобрен / Отклонён.
     # Literal закрывает дыру — PATCH больше не примет произвольную строку статуса.
     status: Literal["Черновик", "На проверке", "Одобрен", "Отклонён"]
+
+
+async def _recalc_total(conn, report_id: int, org_id: int):
+    """Пересчитать reports.total из фактического состава и вернуть строку отчёта.
+
+    total — ПРОИЗВОДНОЕ значение, а не пользовательский ввод: клиент его не
+    присылает, БД хранит как снимок для списка. Вызывать в ОДНОЙ транзакции с
+    любым изменением состава (создание отчёта, добавление/удаление чека), иначе
+    сумма разъедется с чеками. org_id внутри подзапроса — та же org-scope
+    защита, что и везде: чужие чеки в сумму не попадут даже теоретически.
+    """
+    return await conn.fetchrow(
+        """UPDATE reports SET total = COALESCE((
+               SELECT SUM(rc.amount)
+               FROM report_items ri
+               JOIN receipts rc ON rc.id = ri.receipt_id
+               WHERE ri.report_id = reports.id AND rc.org_id = $2
+           ), 0)
+           WHERE id = $1 AND org_id = $2
+           RETURNING *""",
+        report_id,
+        org_id,
+    )
 
 
 @router.get("/")
@@ -47,9 +72,8 @@ async def create_report(r: ReportIn, user: dict = Depends(get_current_user)):
     async with p.acquire() as conn:
         async with conn.transaction():
             rep = await conn.fetchrow(
-                "INSERT INTO reports (title,total,org_id) VALUES ($1,$2,$3) RETURNING *",
+                "INSERT INTO reports (title,org_id) VALUES ($1,$2) RETURNING *",
                 r.title,
-                r.total,
                 user["org_id"],
             )
             # IDOR-защита: все receiptIds обязаны принадлежать организации
@@ -72,6 +96,8 @@ async def create_report(r: ReportIn, user: dict = Depends(get_current_user)):
                     await conn.execute(
                         "INSERT INTO report_items VALUES ($1,$2)", rep["id"], rid
                     )
+            # total считаем ПОСЛЕ вставки состава, в той же транзакции.
+            rep = await _recalc_total(conn, rep["id"], user["org_id"])
     d = dict(rep)
     d["receiptIds"] = r.receiptIds
     return d
