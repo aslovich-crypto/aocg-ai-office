@@ -3,10 +3,36 @@ from typing import List, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.auth import get_current_user
+from app.auth import can_see_all, get_current_user
 from app.database import get_pool
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
+
+# Статусы, в которых отчёт разрешено ИЗМЕНЯТЬ: удалять (ЧП2) и править состав
+# (ЧП3). «На проверке» и «Одобрен» заморожены — это уже поданный либо принятый
+# к учёту документ, менять его за спиной проверяющего нельзя.
+EDITABLE_STATUSES = ("Черновик", "Отклонён")
+
+
+def _ensure_editable(status: str) -> None:
+    """Единый гейт изменения отчёта — один на удаление и на правку состава.
+
+    Тексты объясняют СЛЕДУЮЩИЙ ШАГ, а не просто запрещают: пользователь должен
+    понять, что делать дальше, не читая документацию.
+    """
+    if status in EDITABLE_STATUSES:
+        return
+    if status == "На проверке":
+        raise HTTPException(
+            status_code=409,
+            detail="Отчёт на проверке — сначала отзовите его, потом изменяйте",
+        )
+    # «Одобрен»: следующего шага пока нет — снятие одобрения появится
+    # отдельной задачей REP-UNAPPROVE (право бухгалтера/админа).
+    raise HTTPException(
+        status_code=409,
+        detail="Одобренный отчёт изменить нельзя: он принят к учёту",
+    )
 
 
 class ReportIn(BaseModel):
@@ -101,6 +127,67 @@ async def create_report(r: ReportIn, user: dict = Depends(get_current_user)):
     d = dict(rep)
     d["receiptIds"] = r.receiptIds
     return d
+
+
+@router.get("/{id}")
+async def get_report(id: int, user: dict = Depends(get_current_user)):
+    """Детали отчёта: сам отчёт + receiptIds + РАЗВЁРНУТЫЕ чеки.
+
+    Чеки тянем тем же `SELECT *`, что и список GET /api/receipts/ — форма чека
+    в деталях отчёта совпадает с формой в списке чеков по построению, а не по
+    договорённости (отдельный список колонок разъехался бы при первой же новой
+    колонке). Ролевой фильтр — тот же can_see_all: employee видит только свои
+    чеки, поэтому массив receipts может быть короче receiptIds.
+    """
+    p = await get_pool()
+    row = await p.fetchrow(
+        "SELECT * FROM reports WHERE id=$1 AND org_id=$2", id, user["org_id"]
+    )
+    # Чужой отчёт неотличим от несуществующего — как в PATCH.
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    items = await p.fetch(
+        "SELECT receipt_id FROM report_items WHERE report_id=$1 ORDER BY receipt_id",
+        id,
+    )
+    ids = [i["receipt_id"] for i in items]
+    receipts = []
+    if ids:
+        if can_see_all(user["role"]):
+            receipts = await p.fetch(
+                "SELECT * FROM receipts WHERE id = ANY($1::int[]) AND org_id=$2 "
+                "ORDER BY date DESC",
+                ids,
+                user["org_id"],
+            )
+        else:
+            receipts = await p.fetch(
+                "SELECT * FROM receipts WHERE id = ANY($1::int[]) AND org_id=$2 "
+                "AND user_id=$3 ORDER BY date DESC",
+                ids,
+                user["org_id"],
+                user["id"],
+            )
+    d = dict(row)
+    d["receiptIds"] = ids
+    d["receipts"] = [dict(r) for r in receipts]
+    return d
+
+
+@router.delete("/{id}", status_code=204)
+async def delete_report(id: int, user: dict = Depends(get_current_user)):
+    """Удалить отчёт. Состав (report_items) уходит каскадом — ON DELETE CASCADE
+    на report_id. Сами чеки НЕ трогаем: они просто освобождаются и снова
+    доступны для другого отчёта."""
+    p = await get_pool()
+    row = await p.fetchrow(
+        "SELECT status FROM reports WHERE id=$1 AND org_id=$2", id, user["org_id"]
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    _ensure_editable(row["status"])
+    await p.execute("DELETE FROM reports WHERE id=$1 AND org_id=$2", id, user["org_id"])
+    return None
 
 
 @router.patch("/{id}")

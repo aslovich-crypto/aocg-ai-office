@@ -1215,6 +1215,159 @@ async def test_patch_report_returns_receipt_ids(client):
     assert set(body) == set(item)
 
 
+# ─── REP-CRUD ЧП2: контракт форм ──────────────────────────────────────
+async def test_report_shapes_post_patch_list_identical(client):
+    # Один ресурс — одна форма: POST == PATCH == элемент GET-списка.
+    # Разъезд форм уже приводил к багу «0 чеков» после смены статуса.
+    rc = await client.post(
+        "/api/receipts/", json={"date": "2026-07-10", "org": "Форма", "amount": 42.0}
+    )
+    created = await client.post(
+        "/api/reports/", json={"title": "Формы", "receiptIds": [rc.json()["id"]]}
+    )
+    assert created.status_code == 200
+    rid = created.json()["id"]
+    patched = await client.patch(f"/api/reports/{rid}", json={"status": "На проверке"})
+    listed = await client.get("/api/reports/")
+    item = next(r for r in listed.json() if r["id"] == rid)
+    assert set(created.json()) == set(patched.json()) == set(item)
+
+
+async def test_get_report_detail_has_list_fields_plus_receipts(client):
+    # GET /{id} — надмножество элемента списка: все его поля + receipts.
+    rc = await client.post(
+        "/api/receipts/", json={"date": "2026-07-11", "org": "Деталь", "amount": 15.0}
+    )
+    receipt_id = rc.json()["id"]
+    created = await client.post(
+        "/api/reports/", json={"title": "Детали", "receiptIds": [receipt_id]}
+    )
+    rid = created.json()["id"]
+
+    detail = await client.get(f"/api/reports/{rid}")
+    assert detail.status_code == 200
+    body = detail.json()
+
+    listed = await client.get("/api/reports/")
+    item = next(r for r in listed.json() if r["id"] == rid)
+    assert set(item).issubset(set(body))  # ничего не потеряли
+    assert set(body) - set(item) == {"receipts"}  # добавили ровно развёрнутые чеки
+
+    assert body["receiptIds"] == [receipt_id]
+    assert len(body["receipts"]) == 1
+    # Форма чека в деталях = форма чека в списке чеков (оба SELECT *).
+    all_receipts = await client.get("/api/receipts/")
+    listed_receipt = next(r for r in all_receipts.json() if r["id"] == receipt_id)
+    assert set(body["receipts"][0]) == set(listed_receipt)
+
+
+# ─── REP-CRUD ЧП2: GET /{id} ──────────────────────────────────────────
+async def test_get_report_detail_not_found(client):
+    resp = await client.get("/api/reports/99999")
+    assert resp.status_code == 404
+
+
+async def test_get_report_detail_foreign_org_404(client, db):
+    # Чужой отчёт неотличим от несуществующего.
+    db.reports.append(
+        dict(
+            id=777,
+            title="Чужой",
+            status="Черновик",
+            total=0,
+            org_id=999,
+            created=date(2026, 7, 1),
+            created_at=datetime.utcnow(),
+        )
+    )
+    resp = await client.get("/api/reports/777")
+    assert resp.status_code == 404
+
+
+async def test_get_report_detail_empty_report(client):
+    created = await client.post(
+        "/api/reports/", json={"title": "Пустой", "receiptIds": []}
+    )
+    resp = await client.get(f"/api/reports/{created.json()['id']}")
+    assert resp.status_code == 200
+    assert resp.json()["receiptIds"] == [] and resp.json()["receipts"] == []
+
+
+# ─── REP-CRUD ЧП2: DELETE /{id} ───────────────────────────────────────
+async def test_delete_report_draft_ok(client, db):
+    rc = await client.post(
+        "/api/receipts/", json={"date": "2026-07-12", "org": "Удал", "amount": 7.0}
+    )
+    created = await client.post(
+        "/api/reports/", json={"title": "Черновик", "receiptIds": [rc.json()["id"]]}
+    )
+    rid = created.json()["id"]
+
+    resp = await client.delete(f"/api/reports/{rid}")
+    assert resp.status_code == 204
+    assert all(r["id"] != rid for r in db.reports)
+    # Состав ушёл каскадом, сам чек остался и снова свободен.
+    assert all(ri["report_id"] != rid for ri in db.report_items)
+    assert any(r["id"] == rc.json()["id"] for r in db.receipts)
+
+
+async def test_delete_report_rejected_ok(client, db):
+    created = await client.post(
+        "/api/reports/", json={"title": "Отклонённый", "receiptIds": []}
+    )
+    rid = created.json()["id"]
+    await client.patch(f"/api/reports/{rid}", json={"status": "На проверке"})
+    await client.patch(f"/api/reports/{rid}", json={"status": "Отклонён"})
+
+    resp = await client.delete(f"/api/reports/{rid}")
+    assert resp.status_code == 204
+    assert all(r["id"] != rid for r in db.reports)
+
+
+async def test_delete_report_in_review_409_says_recall_first(client, db):
+    created = await client.post(
+        "/api/reports/", json={"title": "На проверке", "receiptIds": []}
+    )
+    rid = created.json()["id"]
+    await client.patch(f"/api/reports/{rid}", json={"status": "На проверке"})
+
+    resp = await client.delete(f"/api/reports/{rid}")
+    assert resp.status_code == 409
+    assert "отзовите" in resp.json()["detail"]  # текст объясняет следующий шаг
+    assert any(r["id"] == rid for r in db.reports)  # отчёт на месте
+
+
+async def test_delete_report_approved_409(client, db):
+    created = await client.post(
+        "/api/reports/", json={"title": "Одобренный", "receiptIds": []}
+    )
+    rid = created.json()["id"]
+    await client.patch(f"/api/reports/{rid}", json={"status": "На проверке"})
+    await client.patch(f"/api/reports/{rid}", json={"status": "Одобрен"})
+
+    resp = await client.delete(f"/api/reports/{rid}")
+    assert resp.status_code == 409
+    assert "принят к учёту" in resp.json()["detail"]
+    assert any(r["id"] == rid for r in db.reports)
+
+
+async def test_delete_report_foreign_org_404(client, db):
+    db.reports.append(
+        dict(
+            id=778,
+            title="Чужой",
+            status="Черновик",
+            total=0,
+            org_id=999,
+            created=date(2026, 7, 1),
+            created_at=datetime.utcnow(),
+        )
+    )
+    resp = await client.delete("/api/reports/778")
+    assert resp.status_code == 404
+    assert any(r["id"] == 778 for r in db.reports)  # чужой отчёт не тронут
+
+
 # ─── REP-CRUD ЧП1: total производный от состава ───────────────────────
 async def test_create_report_total_computed_from_receipts(client):
     # total считает БЭК из состава: присланное клиентом значение игнорируется.

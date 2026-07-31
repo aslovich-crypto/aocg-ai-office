@@ -187,6 +187,22 @@ class FakePool:
                 for r in self.receipts
                 if r["id"] in ids and r.get("org_id") == org_id
             ]
+        # REP-CRUD ЧП2: развёрнутые чеки в деталях отчёта. SELECT * — та же
+        # форма, что у списка чеков; A-ACL user_id=$3 для employee.
+        if q.startswith("SELECT * FROM receipts WHERE id = ANY($1"):
+            ids, org_id = args[0], args[1]
+            user_id = args[2] if len(args) > 2 else None
+            return sorted(
+                [
+                    dict(r)
+                    for r in self.receipts
+                    if r["id"] in ids
+                    and r.get("org_id") == org_id
+                    and (user_id is None or r.get("user_id") == user_id)
+                ],
+                key=lambda r: str(r["date"]),
+                reverse=True,
+            )
         if "id = ANY($1" in q and "EXISTS" in q:
             # Bulk-delete кандидаты (фаза C): чеки своей орг из списка id + in_report.
             # Чужие id не попадают в выборку (изоляция по org_id).
@@ -283,6 +299,25 @@ class FakePool:
                 ):
                     counts[r["payment"]] = counts.get(r["payment"], 0) + 1
             return {"payment": max(counts, key=counts.get)} if counts else None
+        # REP-CRUD ЧП2: детали отчёта / гейт удаления (org-scope в самом SQL).
+        if q.startswith("SELECT * FROM reports WHERE id=$1 AND org_id=$2"):
+            return next(
+                (
+                    dict(r)
+                    for r in self.reports
+                    if r["id"] == args[0] and r.get("org_id") == args[1]
+                ),
+                None,
+            )
+        if q.startswith("SELECT status FROM reports WHERE id=$1 AND org_id=$2"):
+            return next(
+                (
+                    {"status": r["status"]}
+                    for r in self.reports
+                    if r["id"] == args[0] and r.get("org_id") == args[1]
+                ),
+                None,
+            )
         if q.startswith("SELECT * FROM receipts WHERE id=$1"):
             # A-ACL: enforce org_id (и user_id для employee), а не только id.
             rid = args[0]
@@ -686,6 +721,20 @@ class FakePool:
                 if not (c["id"] == cat_id and c.get("org_id") == org_id)
             ]
             return "DELETE"
+        # REP-CRUD ЧП2: удаление отчёта. Состав уходит каскадом — зеркалим
+        # ON DELETE CASCADE на report_id, чеки при этом не трогаем.
+        if q.startswith("DELETE FROM reports WHERE id=$1 AND org_id=$2"):
+            before = len(self.reports)
+            self.reports = [
+                r
+                for r in self.reports
+                if not (r["id"] == args[0] and r.get("org_id") == args[1])
+            ]
+            if before != len(self.reports):
+                self.report_items = [
+                    ri for ri in self.report_items if ri["report_id"] != args[0]
+                ]
+            return f"DELETE {before - len(self.reports)}"
         if q.startswith("DELETE FROM report_items WHERE receipt_id = ANY($1"):
             # Bulk (фаза C): org-безопасно — только связи чеков СВОЕЙ орг.
             ids, org_id = args
