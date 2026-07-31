@@ -137,6 +137,11 @@ class FakePool:
             )
         if q.startswith("SELECT ri.* FROM report_items"):
             return list(self.report_items)
+        if q.startswith("SELECT receipt_id FROM report_items WHERE report_id=$1"):
+            return sorted(
+                [ri for ri in self.report_items if ri["report_id"] == args[0]],
+                key=lambda ri: ri["receipt_id"],
+            )
         if q.startswith("SELECT * FROM cards WHERE org_id=$1 ORDER BY id"):
             return sorted(
                 [c for c in self.cards if c.get("org_id") == args[0]],

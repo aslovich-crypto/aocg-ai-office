@@ -1185,6 +1185,33 @@ async def test_patch_report_status_invalid_rejected(client, seeded):
     assert resp.status_code == 422
 
 
+async def test_patch_report_returns_receipt_ids(client):
+    # Ответ PATCH — той же формы, что GET: с составом чеков. Без этого клиент,
+    # подставляя ответ в список, показывал «0 чеков».
+    rc = await client.post(
+        "/api/receipts/", json={"date": "2026-07-01", "org": "Лента", "amount": 100.0}
+    )
+    rid = rc.json()["id"]
+    created = await client.post(
+        "/api/reports/",
+        json={"title": "Июль", "total": 100.0, "receiptIds": [rid]},
+    )
+    report_id = created.json()["id"]
+
+    resp = await client.patch(
+        f"/api/reports/{report_id}", json={"status": "На проверке"}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "На проверке"
+    assert body["receiptIds"] == [rid]
+
+    # Форма ответа PATCH совпадает с формой элемента списка GET.
+    listed = await client.get("/api/reports/")
+    item = next(r for r in listed.json() if r["id"] == report_id)
+    assert set(body) == set(item)
+
+
 # ─── GET /api/cards/ ──────────────────────────────────────────────────
 async def test_get_cards_returns_list(client, seeded):
     resp = await client.get("/api/cards/")

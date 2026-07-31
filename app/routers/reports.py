@@ -88,4 +88,14 @@ async def update_status(id: int, s: StatusIn, user: dict = Depends(get_current_u
     )
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
-    return dict(row)
+    # Ответ ТОЙ ЖЕ формы, что у GET /api/reports/ — вместе с receiptIds.
+    # Иначе клиент, подставляя ответ PATCH в список, терял состав отчёта
+    # (карточка показывала «0 чеков»). Разная форма ответов на один ресурс —
+    # источник таких багов, поэтому добираем состав здесь, а не мержим на фронте.
+    items = await p.fetch(
+        "SELECT receipt_id FROM report_items WHERE report_id=$1 ORDER BY receipt_id",
+        id,
+    )
+    d = dict(row)
+    d["receiptIds"] = [i["receipt_id"] for i in items]
+    return d
