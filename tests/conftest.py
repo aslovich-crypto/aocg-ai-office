@@ -178,6 +178,16 @@ class FakePool:
                 for (d, a, o), rows in groups.items()
                 if len(rows) > 1
             ]
+        # REP-CRUD ЧП3: где уже лежат эти чеки (свой отчёт / чужой → 409).
+        if q.startswith(
+            "SELECT report_id, receipt_id FROM report_items WHERE receipt_id = ANY($1"
+        ):
+            ids = args[0]
+            return [
+                {"report_id": ri["report_id"], "receipt_id": ri["receipt_id"]}
+                for ri in self.report_items
+                if ri["receipt_id"] in ids
+            ]
         if q.startswith("SELECT id FROM receipts WHERE id = ANY($1"):
             # S-15 IDOR-проверка создания отчёта: какие из запрошенных id реально
             # принадлежат орг пользователя (чужие/несуществующие сюда не попадут).
@@ -735,6 +745,23 @@ class FakePool:
                     ri for ri in self.report_items if ri["report_id"] != args[0]
                 ]
             return f"DELETE {before - len(self.reports)}"
+        # REP-CRUD ЧП3: убрать один чек из отчёта (org-scope по чеку).
+        if q.startswith(
+            "DELETE FROM report_items WHERE report_id=$1 AND receipt_id=$2"
+        ):
+            report_id, receipt_id, org_id = args
+            own = {r["id"] for r in self.receipts if r.get("org_id") == org_id}
+            before = len(self.report_items)
+            self.report_items = [
+                ri
+                for ri in self.report_items
+                if not (
+                    ri["report_id"] == report_id
+                    and ri["receipt_id"] == receipt_id
+                    and receipt_id in own
+                )
+            ]
+            return f"DELETE {before - len(self.report_items)}"
         if q.startswith("DELETE FROM report_items WHERE receipt_id = ANY($1"):
             # Bulk (фаза C): org-безопасно — только связи чеков СВОЕЙ орг.
             ids, org_id = args

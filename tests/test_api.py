@@ -6,8 +6,6 @@ touched. Each test gets a fresh store via the `db` / `seeded` fixtures.
 
 from datetime import date, datetime, timedelta
 
-import asyncpg
-import pytest
 
 from app.categories_seed import seed_default_categories
 
@@ -1351,6 +1349,153 @@ async def test_delete_report_approved_409(client, db):
     assert any(r["id"] == rid for r in db.reports)
 
 
+# ─── REP-CRUD ЧП3: состав отчёта ──────────────────────────────────────
+async def _draft_with(client, amounts):
+    """Черновик из чеков с указанными суммами → (report_id, [receipt_ids])."""
+    ids = []
+    for i, amount in enumerate(amounts):
+        rc = await client.post(
+            "/api/receipts/",
+            json={"date": "2026-07-20", "org": f"Орг{i}", "amount": amount},
+        )
+        ids.append(rc.json()["id"])
+    created = await client.post(
+        "/api/reports/", json={"title": "Состав", "receiptIds": ids}
+    )
+    return created.json()["id"], ids
+
+
+async def test_add_receipt_updates_ids_and_total(client):
+    rid, ids = await _draft_with(client, [100.0])
+    extra = await client.post(
+        "/api/receipts/", json={"date": "2026-07-21", "org": "Ещё", "amount": 50.0}
+    )
+    resp = await client.post(
+        f"/api/reports/{rid}/receipts", json={"receiptIds": [extra.json()["id"]]}
+    )
+    assert resp.status_code == 200
+    assert sorted(resp.json()["receiptIds"]) == sorted(ids + [extra.json()["id"]])
+    assert float(resp.json()["total"]) == 150.0  # total пересчитан
+
+
+async def test_add_receipt_already_in_this_report_is_idempotent(client, db):
+    rid, ids = await _draft_with(client, [10.0])
+    resp = await client.post(f"/api/reports/{rid}/receipts", json={"receiptIds": ids})
+    assert resp.status_code == 200
+    assert resp.json()["receiptIds"] == ids  # дубля не появилось
+    assert len([ri for ri in db.report_items if ri["receipt_id"] == ids[0]]) == 1
+    assert float(resp.json()["total"]) == 10.0
+
+
+async def test_add_receipt_from_another_report_409(client):
+    rid_a, ids_a = await _draft_with(client, [10.0])
+    rid_b, _ = await _draft_with(client, [20.0])
+    resp = await client.post(
+        f"/api/reports/{rid_b}/receipts", json={"receiptIds": ids_a}
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "Чек уже в другом отчёте"
+
+
+async def test_add_foreign_receipt_403(client, db):
+    rid, _ = await _draft_with(client, [10.0])
+    db.receipts.append(
+        dict(
+            id=5000,
+            date=date(2026, 7, 22),
+            org="Чужая",
+            amount=1.0,
+            org_id=999,
+            source="manual",
+            kkt_fn=None,
+        )
+    )
+    resp = await client.post(
+        f"/api/reports/{rid}/receipts", json={"receiptIds": [5000]}
+    )
+    assert resp.status_code == 403
+
+
+async def test_add_receipt_frozen_report_409(client):
+    rid, _ = await _draft_with(client, [10.0])
+    extra = await client.post(
+        "/api/receipts/", json={"date": "2026-07-23", "org": "Х", "amount": 3.0}
+    )
+    await client.patch(f"/api/reports/{rid}", json={"status": "На проверке"})
+    resp = await client.post(
+        f"/api/reports/{rid}/receipts", json={"receiptIds": [extra.json()["id"]]}
+    )
+    assert resp.status_code == 409
+    assert "отзовите" in resp.json()["detail"]
+
+
+async def test_add_receipt_foreign_report_404(client, db):
+    db.reports.append(
+        dict(
+            id=779,
+            title="Чужой",
+            status="Черновик",
+            total=0,
+            org_id=999,
+            created=date(2026, 7, 1),
+            created_at=datetime.utcnow(),
+        )
+    )
+    rc = await client.post(
+        "/api/receipts/", json={"date": "2026-07-24", "org": "Й", "amount": 1.0}
+    )
+    resp = await client.post(
+        "/api/reports/779/receipts", json={"receiptIds": [rc.json()["id"]]}
+    )
+    assert resp.status_code == 404
+
+
+async def test_remove_receipt_frees_it_and_recalcs_total(client, db):
+    rid, ids = await _draft_with(client, [100.0, 40.0])
+    resp = await client.delete(f"/api/reports/{rid}/receipts/{ids[0]}")
+    assert resp.status_code == 200
+    assert resp.json()["receiptIds"] == [ids[1]]
+    assert float(resp.json()["total"]) == 40.0
+    # Сам чек цел и свободен — его можно положить в другой отчёт.
+    assert any(r["id"] == ids[0] for r in db.receipts)
+    again = await client.post(
+        "/api/reports/", json={"title": "Другой", "receiptIds": [ids[0]]}
+    )
+    assert again.status_code == 200
+
+
+async def test_remove_receipt_not_in_report_is_idempotent(client):
+    rid, ids = await _draft_with(client, [10.0])
+    other = await client.post(
+        "/api/receipts/",
+        json={"date": "2026-07-25", "org": "Не в отчёте", "amount": 9.0},
+    )
+    resp = await client.delete(f"/api/reports/{rid}/receipts/{other.json()['id']}")
+    assert resp.status_code == 200
+    assert resp.json()["receiptIds"] == ids  # состав не изменился
+    assert float(resp.json()["total"]) == 10.0
+
+
+async def test_remove_receipt_frozen_report_409(client):
+    rid, ids = await _draft_with(client, [10.0])
+    await client.patch(f"/api/reports/{rid}", json={"status": "На проверке"})
+    await client.patch(f"/api/reports/{rid}", json={"status": "Одобрен"})
+    resp = await client.delete(f"/api/reports/{rid}/receipts/{ids[0]}")
+    assert resp.status_code == 409
+    assert "принят к учёту" in resp.json()["detail"]
+
+
+async def test_compose_endpoints_return_list_item_shape(client):
+    # Ответы ручек состава — та же форма, что элемент GET-списка.
+    rid, ids = await _draft_with(client, [10.0])
+    listed = await client.get("/api/reports/")
+    item = next(r for r in listed.json() if r["id"] == rid)
+    added = await client.post(f"/api/reports/{rid}/receipts", json={"receiptIds": []})
+    removed = await client.delete(f"/api/reports/{rid}/receipts/{ids[0]}")
+    assert set(added.json()) == set(item)
+    assert set(removed.json()) == set(item)
+
+
 async def test_delete_report_foreign_org_404(client, db):
     db.reports.append(
         dict(
@@ -1409,9 +1554,7 @@ async def test_report_empty_has_zero_total(client):
 async def test_receipt_cannot_be_in_two_reports(client, db):
     # Правило «один чек = ровно один отчёт» (uq_report_items_receipt_id):
     # один чек в двух авансовых отчётах = двойное возмещение.
-    # ЧП1 ждёт сырой UniqueViolationError из БД; в ЧП3 (POST /{id}/receipts)
-    # это переедет на дружелюбный 409 «Чек уже в другом отчёте» —
-    # тогда assert станет resp.status_code == 409.
+    # ЧП3: сырой UniqueViolationError переведён в дружелюбный 409.
     rc = await client.post(
         "/api/receipts/", json={"date": "2026-07-04", "org": "Г", "amount": 5.0}
     )
@@ -1420,10 +1563,11 @@ async def test_receipt_cannot_be_in_two_reports(client, db):
         "/api/reports/", json={"title": "Первый", "receiptIds": [rid]}
     )
     assert first.status_code == 200
-    with pytest.raises(asyncpg.exceptions.UniqueViolationError):
-        await client.post(
-            "/api/reports/", json={"title": "Второй", "receiptIds": [rid]}
-        )
+    second = await client.post(
+        "/api/reports/", json={"title": "Второй", "receiptIds": [rid]}
+    )
+    assert second.status_code == 409
+    assert second.json()["detail"] == "Чек уже в другом отчёте"
     assert len(db.reports) == 1  # второй отчёт не создался (откат транзакции)
 
 

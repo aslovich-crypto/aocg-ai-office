@@ -1,5 +1,6 @@
 from typing import List, Literal
 
+import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -49,6 +50,18 @@ class StatusIn(BaseModel):
     status: Literal["Черновик", "На проверке", "Одобрен", "Отклонён"]
 
 
+class ReceiptsIn(BaseModel):
+    # Список, а не один id: «добавить выбранные» из шторки — тот же вызов,
+    # что и «прикрепить этот чек» ([rid]).
+    receiptIds: List[int]
+
+
+# Один чек живёт ровно в одном отчёте (uq_report_items_receipt_id). Нарушение
+# приходит из БД как UniqueViolationError — переводим в понятный 409, чтобы
+# клиент показал текст, а не «500 Internal Server Error».
+RECEIPT_TAKEN = "Чек уже в другом отчёте"
+
+
 async def _recalc_total(conn, report_id: int, org_id: int):
     """Пересчитать reports.total из фактического состава и вернуть строку отчёта.
 
@@ -70,6 +83,32 @@ async def _recalc_total(conn, report_id: int, org_id: int):
         report_id,
         org_id,
     )
+
+
+async def _with_receipt_ids(conn, rep) -> dict:
+    """Отчёт + receiptIds — форма элемента GET-списка (и ответа PATCH/POST)."""
+    items = await conn.fetch(
+        "SELECT receipt_id FROM report_items WHERE report_id=$1 ORDER BY receipt_id",
+        rep["id"],
+    )
+    d = dict(rep)
+    d["receiptIds"] = [i["receipt_id"] for i in items]
+    return d
+
+
+async def _load_editable_report(conn, id: int, org_id: int):
+    """Отчёт своей орг + проверка, что его вообще можно менять.
+
+    404 для чужого/несуществующего (неотличимы), 409 с объяснением следующего
+    шага для замороженных статусов. Используется обеими ручками состава.
+    """
+    rep = await conn.fetchrow(
+        "SELECT * FROM reports WHERE id=$1 AND org_id=$2", id, org_id
+    )
+    if not rep:
+        raise HTTPException(status_code=404, detail="Not found")
+    _ensure_editable(rep["status"])
+    return rep
 
 
 @router.get("/")
@@ -119,9 +158,13 @@ async def create_report(r: ReportIn, user: dict = Depends(get_current_user)):
                         status_code=403, detail="Один или несколько чеков недоступны"
                     )
                 for rid in r.receiptIds:
-                    await conn.execute(
-                        "INSERT INTO report_items VALUES ($1,$2)", rep["id"], rid
-                    )
+                    try:
+                        await conn.execute(
+                            "INSERT INTO report_items VALUES ($1,$2)", rep["id"], rid
+                        )
+                    except asyncpg.UniqueViolationError:
+                        # Чек уже лежит в другом отчёте — вся вставка откатится.
+                        raise HTTPException(status_code=409, detail=RECEIPT_TAKEN)
             # total считаем ПОСЛЕ вставки состава, в той же транзакции.
             rep = await _recalc_total(conn, rep["id"], user["org_id"])
     d = dict(rep)
@@ -188,6 +231,73 @@ async def delete_report(id: int, user: dict = Depends(get_current_user)):
     _ensure_editable(row["status"])
     await p.execute("DELETE FROM reports WHERE id=$1 AND org_id=$2", id, user["org_id"])
     return None
+
+
+@router.post("/{id}/receipts")
+async def add_receipts(id: int, r: ReceiptsIn, user: dict = Depends(get_current_user)):
+    """Добавить чеки в отчёт. Отдельная ручка, а не PATCH всего состава: клиент
+    (карточка чека) не знает актуальный состав, и две вкладки не затирают правки
+    друг друга. Идемпотентна: чек, уже лежащий В ЭТОМ отчёте, повторно не
+    вставляется и ошибкой не считается — двойной тап безопасен."""
+    p = await get_pool()
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            await _load_editable_report(conn, id, user["org_id"])
+            if r.receiptIds:
+                # IDOR: те же правила, что при создании отчёта.
+                owned = await conn.fetch(
+                    "SELECT id FROM receipts WHERE id = ANY($1::int[]) AND org_id = $2",
+                    r.receiptIds,
+                    user["org_id"],
+                )
+                if {row["id"] for row in owned} != set(r.receiptIds):
+                    raise HTTPException(
+                        status_code=403, detail="Один или несколько чеков недоступны"
+                    )
+                # Где эти чеки уже лежат: в этом отчёте — пропускаем, в чужом —
+                # 409 с понятным текстом (а не сырое нарушение констрейнта).
+                existing = await conn.fetch(
+                    "SELECT report_id, receipt_id FROM report_items "
+                    "WHERE receipt_id = ANY($1::int[])",
+                    r.receiptIds,
+                )
+                if any(e["report_id"] != id for e in existing):
+                    raise HTTPException(status_code=409, detail=RECEIPT_TAKEN)
+                here = {e["receipt_id"] for e in existing}
+                for rid in (x for x in r.receiptIds if x not in here):
+                    try:
+                        await conn.execute(
+                            "INSERT INTO report_items VALUES ($1,$2)", id, rid
+                        )
+                    except asyncpg.UniqueViolationError:
+                        # Гонка: чек заняли между SELECT и INSERT.
+                        raise HTTPException(status_code=409, detail=RECEIPT_TAKEN)
+            rep = await _recalc_total(conn, id, user["org_id"])
+            return await _with_receipt_ids(conn, rep)
+
+
+@router.delete("/{id}/receipts/{receipt_id}")
+async def remove_receipt(
+    id: int, receipt_id: int, user: dict = Depends(get_current_user)
+):
+    """Убрать чек из отчёта. Сам чек НЕ удаляется — освобождается и снова
+    доступен для другого отчёта. Идемпотентна: если чека в отчёте нет, ответ
+    тот же (состав уже такой, какой просят). Возвращает обновлённый отчёт —
+    у клиента сразу свежие receiptIds и total, без второго запроса."""
+    p = await get_pool()
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            await _load_editable_report(conn, id, user["org_id"])
+            # org-scope и на связи: чужой чек не отвяжем даже теоретически.
+            await conn.execute(
+                "DELETE FROM report_items WHERE report_id=$1 AND receipt_id=$2 "
+                "AND receipt_id IN (SELECT id FROM receipts WHERE org_id=$3)",
+                id,
+                receipt_id,
+                user["org_id"],
+            )
+            rep = await _recalc_total(conn, id, user["org_id"])
+            return await _with_receipt_ids(conn, rep)
 
 
 @router.patch("/{id}")
