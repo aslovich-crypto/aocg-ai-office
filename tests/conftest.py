@@ -567,6 +567,7 @@ class FakePool:
                 status="Черновик",
                 total=0,  # проставит _recalc_total, как в проде
                 org_id=args[1] if len(args) > 1 else None,
+                user_id=args[2] if len(args) > 2 else None,  # REP-AUTHOR
                 created=date.today(),
                 created_at=datetime.utcnow(),
             )

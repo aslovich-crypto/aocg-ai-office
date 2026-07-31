@@ -1349,6 +1349,37 @@ async def test_delete_report_approved_409(client, db):
     assert any(r["id"] == rid for r in db.reports)
 
 
+# ─── REP-AUTHOR ЧП1: автор отчёта ─────────────────────────────────────
+async def test_create_report_stores_author(client, db):
+    # Автор отчёта = создатель (АО-1 — документ конкретного подотчётного лица).
+    rc = await client.post(
+        "/api/receipts/", json={"date": "2026-07-30", "org": "Автор", "amount": 12.0}
+    )
+    resp = await client.post(
+        "/api/reports/", json={"title": "С автором", "receiptIds": [rc.json()["id"]]}
+    )
+    assert resp.status_code == 200
+    # Фикстура client ходит фиксированным пользователем id=1 (см. _override_user).
+    assert resp.json()["user_id"] == 1
+    stored = next(r for r in db.reports if r["id"] == resp.json()["id"])
+    assert stored["user_id"] == 1
+
+
+async def test_report_author_in_all_shapes(client):
+    # user_id виден во всех формах ответа (POST/PATCH/список/детали) —
+    # они все SELECT *, поэтому колонка появляется везде разом.
+    created = await client.post(
+        "/api/reports/", json={"title": "Формы автора", "receiptIds": []}
+    )
+    rid = created.json()["id"]
+    patched = await client.patch(f"/api/reports/{rid}", json={"status": "На проверке"})
+    listed = await client.get("/api/reports/")
+    item = next(r for r in listed.json() if r["id"] == rid)
+    detail = await client.get(f"/api/reports/{rid}")
+    for body in (created.json(), patched.json(), item, detail.json()):
+        assert "user_id" in body
+
+
 # ─── REP-CRUD ЧП3: состав отчёта ──────────────────────────────────────
 async def _draft_with(client, amounts):
     """Черновик из чеков с указанными суммами → (report_id, [receipt_ids])."""

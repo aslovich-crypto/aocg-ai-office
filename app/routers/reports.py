@@ -136,10 +136,14 @@ async def create_report(r: ReportIn, user: dict = Depends(get_current_user)):
     p = await get_pool()
     async with p.acquire() as conn:
         async with conn.transaction():
+            # REP-AUTHOR: автор = создатель. Бухгалтеру «создать ЗА сотрудника»
+            # пока нельзя — это отдельная явная фича REP-ONBEHALF с правом
+            # и следом в audit log, а не побочный эффект отсутствия проверки.
             rep = await conn.fetchrow(
-                "INSERT INTO reports (title,org_id) VALUES ($1,$2) RETURNING *",
+                "INSERT INTO reports (title,org_id,user_id) VALUES ($1,$2,$3) RETURNING *",
                 r.title,
                 user["org_id"],
+                user["id"],
             )
             # IDOR-защита: все receiptIds обязаны принадлежать организации
             # пользователя. Проверяем ОДНИМ запросом, ДО вставок и внутри

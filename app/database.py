@@ -140,6 +140,28 @@ async def init_db():
             -- существующей колонки меняем явным идемпотентным ALTER (был 'Личные').
             -- Откат: ALTER TABLE reports ALTER COLUMN status SET DEFAULT 'Личные';
             ALTER TABLE reports  ALTER COLUMN status SET DEFAULT 'Черновик';
+            -- REP-AUTHOR: подотчётное лицо отчёта. Авансовый отчёт (АО-1) —
+            -- документ КОНКРЕТНОГО сотрудника, «отчёта без автора» не бывает.
+            -- Целевое состояние — NOT NULL, но добавляем в ДВА деплоя:
+            --   ① колонка (nullable) + индекс + бэкфилл   ← этот деплой
+            --   ③ ALTER COLUMN user_id SET NOT NULL       ← следующий деплой,
+            --      когда весь код гарантированно пишет автора.
+            -- Иначе строка, созданная старым кодом между деплоями, уронит
+            -- контейнер на SET NOT NULL.
+            -- Откат: DROP INDEX idx_reports_user_id;
+            --        ALTER TABLE reports DROP COLUMN user_id;
+            ALTER TABLE reports ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
+            CREATE INDEX IF NOT EXISTS idx_reports_user_id ON reports(user_id);
+            -- Бэкфилл ②, идемпотентный (WHERE user_id IS NULL): автор = автор
+            -- чеков состава; для отчёта без чеков — владелец организации.
+            UPDATE reports SET user_id = (
+                SELECT MIN(rc.user_id)
+                FROM report_items ri JOIN receipts rc ON rc.id = ri.receipt_id
+                WHERE ri.report_id = reports.id
+            ) WHERE user_id IS NULL;
+            UPDATE reports SET user_id = (
+                SELECT owner_id FROM organizations o WHERE o.id = reports.org_id
+            ) WHERE user_id IS NULL;
             CREATE TABLE IF NOT EXISTS invite_links (
                 id          SERIAL PRIMARY KEY,
                 token       TEXT UNIQUE NOT NULL,
