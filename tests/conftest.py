@@ -135,6 +135,29 @@ class FakePool:
                 key=lambda r: str(r["created"]),
                 reverse=True,
             )
+        # REP-ACL: сотрудник видит только свои отчёты (org + автор).
+        if q.startswith(
+            "SELECT * FROM reports WHERE org_id=$1 AND user_id=$2 ORDER BY created DESC"
+        ):
+            return sorted(
+                [
+                    r
+                    for r in self.reports
+                    if r.get("org_id") == args[0] and r.get("user_id") == args[1]
+                ],
+                key=lambda r: str(r["created"]),
+                reverse=True,
+            )
+        if q.startswith(
+            "SELECT ri.* FROM report_items ri JOIN reports r ON r.id = ri.report_id "
+            "WHERE r.org_id=$1 AND r.user_id=$2"
+        ):
+            own = {
+                r["id"]
+                for r in self.reports
+                if r.get("org_id") == args[0] and r.get("user_id") == args[1]
+            }
+            return [ri for ri in self.report_items if ri["report_id"] in own]
         if q.startswith("SELECT ri.* FROM report_items"):
             return list(self.report_items)
         if q.startswith("SELECT receipt_id FROM report_items WHERE report_id=$1"):
@@ -310,6 +333,22 @@ class FakePool:
                 ):
                     counts[r["payment"]] = counts.get(r["payment"], 0) + 1
             return {"payment": max(counts, key=counts.get)} if counts else None
+        # REP-ACL: отчёт с author-scope (для не-can_see_all). ВАЖНО: проверка
+        # стоит ДО org-scope-варианта ниже — тот более общий по префиксу
+        # и иначе перехватил бы этот запрос, «потеряв» фильтр по автору.
+        if q.startswith(
+            "SELECT * FROM reports WHERE id=$1 AND org_id=$2 AND user_id=$3"
+        ):
+            return next(
+                (
+                    dict(r)
+                    for r in self.reports
+                    if r["id"] == args[0]
+                    and r.get("org_id") == args[1]
+                    and r.get("user_id") == args[2]
+                ),
+                None,
+            )
         # REP-CRUD ЧП2: детали отчёта / гейт удаления (org-scope в самом SQL).
         if q.startswith("SELECT * FROM reports WHERE id=$1 AND org_id=$2"):
             return next(
@@ -320,6 +359,18 @@ class FakePool:
                 ),
                 None,
             )
+        if q.startswith(
+            "UPDATE reports SET status=$1 WHERE id=$2 AND org_id=$3 AND user_id=$4"
+        ):
+            for r in self.reports:
+                if (
+                    r["id"] == args[1]
+                    and r.get("org_id") == args[2]
+                    and r.get("user_id") == args[3]
+                ):
+                    r["status"] = args[0]
+                    return dict(r)
+            return None
         if q.startswith("SELECT status FROM reports WHERE id=$1 AND org_id=$2"):
             return next(
                 (

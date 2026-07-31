@@ -1381,6 +1381,96 @@ async def test_report_author_in_all_shapes(client):
         assert "user_id" in body
 
 
+# ─── REP-ACL: видимость отчётов ───────────────────────────────────────
+def _report(db, rid, user_id, *, title="Отчёт", status="Черновик", org_id=1):
+    db.reports.append(
+        dict(
+            id=rid,
+            title=title,
+            status=status,
+            total=0,
+            org_id=org_id,
+            user_id=user_id,
+            created=date(2026, 7, 1),
+            created_at=datetime.utcnow(),
+        )
+    )
+    db._repid = max(db._repid, rid)
+
+
+async def test_employee_sees_only_own_reports(client_employee, db):
+    # Сотрудник (id=2) видит свой отчёт и НЕ видит чужой.
+    _report(db, 500, user_id=2, title="Мой")
+    _report(db, 501, user_id=1, title="Чужой")
+    resp = await client_employee.get("/api/reports/")
+    assert resp.status_code == 200
+    assert [r["id"] for r in resp.json()] == [500]
+
+
+async def test_admin_sees_all_reports(client, db):
+    _report(db, 502, user_id=2, title="Сотрудника")
+    _report(db, 503, user_id=1, title="Свой")
+    resp = await client.get("/api/reports/")
+    assert {r["id"] for r in resp.json()} == {502, 503}
+
+
+async def test_accountant_sees_all_reports(client_accountant, db):
+    # Бухгалтер тоже can_see_all — ему нужно проверять чужие отчёты.
+    _report(db, 504, user_id=2, title="Сотрудника")
+    resp = await client_accountant.get("/api/reports/")
+    assert [r["id"] for r in resp.json()] == [504]
+
+
+async def test_employee_foreign_report_404_on_all_endpoints(client_employee, db):
+    # Чужой отчёт неотличим от несуществующего — 404, а не 403.
+    _report(db, 505, user_id=1, title="Чужой")
+    _mk(db, 600, user_id=2)
+
+    assert (await client_employee.get("/api/reports/505")).status_code == 404
+    assert (
+        await client_employee.patch("/api/reports/505", json={"status": "На проверке"})
+    ).status_code == 404
+    assert (await client_employee.delete("/api/reports/505")).status_code == 404
+    assert (
+        await client_employee.post(
+            "/api/reports/505/receipts", json={"receiptIds": [600]}
+        )
+    ).status_code == 404
+    assert (
+        await client_employee.delete("/api/reports/505/receipts/600")
+    ).status_code == 404
+    # Чужой отчёт цел и не изменился.
+    foreign = next(r for r in db.reports if r["id"] == 505)
+    assert foreign["status"] == "Черновик"
+
+
+async def test_employee_cannot_touch_foreign_report_composition(client_employee, db):
+    # Состав чужого отчёта не тронуть даже зная id чека.
+    _report(db, 506, user_id=1)
+    _mk(db, 601, user_id=1)
+    db.report_items.append({"report_id": 506, "receipt_id": 601})
+    resp = await client_employee.delete("/api/reports/506/receipts/601")
+    assert resp.status_code == 404
+    assert {"report_id": 506, "receipt_id": 601} in db.report_items
+
+
+async def test_employee_detail_has_no_receiptids_gap(client_employee, db):
+    # Следствие REP-ACL (п.4): расхождение receiptIds/receipts из ЧП2 исчезает.
+    # Сотрудник видит только СВОИ отчёты, а в них — только свои чеки,
+    # поэтому длина receipts всегда равна длине receiptIds.
+    _report(db, 507, user_id=2, title="Мой полный")
+    _mk(db, 602, user_id=2)
+    _mk(db, 603, user_id=2)
+    db.report_items.append({"report_id": 507, "receipt_id": 602})
+    db.report_items.append({"report_id": 507, "receipt_id": 603})
+
+    resp = await client_employee.get("/api/reports/507")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["receiptIds"] == [602, 603]
+    assert len(body["receipts"]) == len(body["receiptIds"])  # разрыва больше нет
+
+
 # ─── REP-AUTHOR ЧП3: один отчёт = один подотчётный ────────────────────
 async def test_create_report_own_receipts_ok_invariant(client, db):
     # Свои чеки (автор = создатель, id=1 из фикстуры) — проходят.

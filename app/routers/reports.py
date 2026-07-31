@@ -116,15 +116,33 @@ async def _with_receipt_ids(conn, rep) -> dict:
     return d
 
 
-async def _load_editable_report(conn, id: int, org_id: int):
-    """Отчёт своей орг + проверка, что его вообще можно менять.
+async def _fetch_report(conn, id: int, user: dict):
+    """Отчёт с учётом org-scope И author-scope (REP-ACL).
+
+    Авансовый отчёт принадлежит подотчётному лицу, поэтому сотрудник видит
+    только свои; бухгалтер и админ (can_see_all) — все в организации. Тот же
+    приём, что в receipts. Возвращает None, если отчёта нет ИЛИ он недоступен —
+    вызывающий отдаёт 404, чтобы чужой отчёт был неотличим от несуществующего.
+    """
+    if can_see_all(user["role"]):
+        return await conn.fetchrow(
+            "SELECT * FROM reports WHERE id=$1 AND org_id=$2", id, user["org_id"]
+        )
+    return await conn.fetchrow(
+        "SELECT * FROM reports WHERE id=$1 AND org_id=$2 AND user_id=$3",
+        id,
+        user["org_id"],
+        user["id"],
+    )
+
+
+async def _load_editable_report(conn, id: int, user: dict):
+    """Доступный отчёт + проверка, что его вообще можно менять.
 
     404 для чужого/несуществующего (неотличимы), 409 с объяснением следующего
     шага для замороженных статусов. Используется обеими ручками состава.
     """
-    rep = await conn.fetchrow(
-        "SELECT * FROM reports WHERE id=$1 AND org_id=$2", id, org_id
-    )
+    rep = await _fetch_report(conn, id, user)
     if not rep:
         raise HTTPException(status_code=404, detail="Not found")
     _ensure_editable(rep["status"])
@@ -134,13 +152,30 @@ async def _load_editable_report(conn, id: int, org_id: int):
 @router.get("/")
 async def get_reports(user: dict = Depends(get_current_user)):
     p = await get_pool()
-    reports = await p.fetch(
-        "SELECT * FROM reports WHERE org_id=$1 ORDER BY created DESC", user["org_id"]
-    )
-    items = await p.fetch(
-        "SELECT ri.* FROM report_items ri JOIN reports r ON r.id = ri.report_id WHERE r.org_id=$1",
-        user["org_id"],
-    )
+    # REP-ACL: сотрудник видит только свои отчёты, бухгалтер/админ — все.
+    if can_see_all(user["role"]):
+        reports = await p.fetch(
+            "SELECT * FROM reports WHERE org_id=$1 ORDER BY created DESC",
+            user["org_id"],
+        )
+        items = await p.fetch(
+            "SELECT ri.* FROM report_items ri JOIN reports r ON r.id = ri.report_id "
+            "WHERE r.org_id=$1",
+            user["org_id"],
+        )
+    else:
+        reports = await p.fetch(
+            "SELECT * FROM reports WHERE org_id=$1 AND user_id=$2 ORDER BY created DESC",
+            user["org_id"],
+            user["id"],
+        )
+        # Состав тянем тем же фильтром: чужие связи не должны даже читаться.
+        items = await p.fetch(
+            "SELECT ri.* FROM report_items ri JOIN reports r ON r.id = ri.report_id "
+            "WHERE r.org_id=$1 AND r.user_id=$2",
+            user["org_id"],
+            user["id"],
+        )
     result = []
     for rep in reports:
         d = dict(rep)
@@ -210,9 +245,7 @@ async def get_report(id: int, user: dict = Depends(get_current_user)):
     чеки, поэтому массив receipts может быть короче receiptIds.
     """
     p = await get_pool()
-    row = await p.fetchrow(
-        "SELECT * FROM reports WHERE id=$1 AND org_id=$2", id, user["org_id"]
-    )
+    row = await _fetch_report(p, id, user)
     # Чужой отчёт неотличим от несуществующего — как в PATCH.
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
@@ -250,9 +283,7 @@ async def delete_report(id: int, user: dict = Depends(get_current_user)):
     на report_id. Сами чеки НЕ трогаем: они просто освобождаются и снова
     доступны для другого отчёта."""
     p = await get_pool()
-    row = await p.fetchrow(
-        "SELECT status FROM reports WHERE id=$1 AND org_id=$2", id, user["org_id"]
-    )
+    row = await _fetch_report(p, id, user)
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
     _ensure_editable(row["status"])
@@ -269,7 +300,7 @@ async def add_receipts(id: int, r: ReceiptsIn, user: dict = Depends(get_current_
     p = await get_pool()
     async with p.acquire() as conn:
         async with conn.transaction():
-            rep = await _load_editable_report(conn, id, user["org_id"])
+            rep = await _load_editable_report(conn, id, user)
             if r.receiptIds:
                 # IDOR: те же правила, что при создании отчёта.
                 owned = await conn.fetch(
@@ -318,7 +349,7 @@ async def remove_receipt(
     p = await get_pool()
     async with p.acquire() as conn:
         async with conn.transaction():
-            await _load_editable_report(conn, id, user["org_id"])
+            await _load_editable_report(conn, id, user)
             # org-scope и на связи: чужой чек не отвяжем даже теоретически.
             await conn.execute(
                 "DELETE FROM report_items WHERE report_id=$1 AND receipt_id=$2 "
@@ -334,12 +365,23 @@ async def remove_receipt(
 @router.patch("/{id}")
 async def update_status(id: int, s: StatusIn, user: dict = Depends(get_current_user)):
     p = await get_pool()
-    row = await p.fetchrow(
-        "UPDATE reports SET status=$1 WHERE id=$2 AND org_id=$3 RETURNING *",
-        s.status,
-        id,
-        user["org_id"],
-    )
+    # REP-ACL: сотрудник меняет статус только своего отчёта; чужой — 404.
+    if can_see_all(user["role"]):
+        row = await p.fetchrow(
+            "UPDATE reports SET status=$1 WHERE id=$2 AND org_id=$3 RETURNING *",
+            s.status,
+            id,
+            user["org_id"],
+        )
+    else:
+        row = await p.fetchrow(
+            "UPDATE reports SET status=$1 WHERE id=$2 AND org_id=$3 AND user_id=$4 "
+            "RETURNING *",
+            s.status,
+            id,
+            user["org_id"],
+            user["id"],
+        )
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
     # Ответ ТОЙ ЖЕ формы, что у GET /api/reports/ — вместе с receiptIds.
