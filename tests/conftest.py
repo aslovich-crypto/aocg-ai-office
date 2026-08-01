@@ -32,6 +32,26 @@ def _norm(q):
     return re.sub(r"\s+", " ", q).strip()
 
 
+def _with_in_report(r, pool):
+    """Строка чека + in_report / report_id / report_title (ЧП4а).
+
+    Зеркалит LEFT JOIN report_items→reports в SELECT списка и деталей чека,
+    а также в развёрнутых чеках деталей отчёта. Связь 1:0..1 держит уникальный
+    индекс uq_report_items_receipt_id — поэтому берём первое совпадение.
+    """
+    d = dict(r)
+    link = next((ri for ri in pool.report_items if ri["receipt_id"] == r["id"]), None)
+    rep = (
+        next((x for x in pool.reports if x["id"] == link["report_id"]), None)
+        if link
+        else None
+    )
+    d["in_report"] = link is not None
+    d["report_id"] = rep["id"] if rep else None
+    d["report_title"] = rep["title"] if rep else None
+    return d
+
+
 def _dup_fakerow(r, pool):
     """Строка для дедуп-веток 2/3 (фаза C): то, что отдаёт расширенный SELECT —
     id/org/amount/date/source/kkt_fn + in_report (EXISTS report_items)."""
@@ -110,19 +130,24 @@ class FakePool:
 
     async def fetch(self, query, *args):
         q = _norm(query)
-        if q.startswith("SELECT * FROM receipts WHERE org_id=$1 ORDER BY date DESC"):
+        # ЧП4а: списки чеков теперь тянут вычисляемый in_report (EXISTS по
+        # report_items), поэтому запрос начинается с «SELECT *, EXISTS(…)».
+        # Различаем ветки по хвосту WHERE — префиксы у них общие.
+        if "WHERE receipts.org_id=$1 ORDER BY receipts.date DESC" in q:
             return sorted(
-                [r for r in self.receipts if r.get("org_id") == args[0]],
+                [
+                    _with_in_report(r, self)
+                    for r in self.receipts
+                    if r.get("org_id") == args[0]
+                ],
                 key=lambda r: str(r["date"]),
                 reverse=True,
             )
-        if q.startswith(
-            "SELECT * FROM receipts WHERE org_id=$1 AND user_id=$2 ORDER BY date DESC"
-        ):
+        if "WHERE receipts.org_id=$1 AND receipts.user_id=$2" in q:
             # A-ACL: employee видит только свои чеки (org_id + автор).
             return sorted(
                 [
-                    r
+                    _with_in_report(r, self)
                     for r in self.receipts
                     if r.get("org_id") == args[0] and r.get("user_id") == args[1]
                 ],
@@ -223,12 +248,12 @@ class FakePool:
             ]
         # REP-CRUD ЧП2: развёрнутые чеки в деталях отчёта. SELECT * — та же
         # форма, что у списка чеков; A-ACL user_id=$3 для employee.
-        if q.startswith("SELECT * FROM receipts WHERE id = ANY($1"):
+        if "WHERE receipts.id = ANY($1" in q:
             ids, org_id = args[0], args[1]
             user_id = args[2] if len(args) > 2 else None
             return sorted(
                 [
-                    dict(r)
+                    _with_in_report(r, self)
                     for r in self.receipts
                     if r["id"] in ids
                     and r.get("org_id") == org_id
@@ -380,14 +405,14 @@ class FakePool:
                 ),
                 None,
             )
-        if q.startswith("SELECT * FROM receipts WHERE id=$1"):
+        if "WHERE receipts.id=$1 AND receipts.org_id=$2" in q:
             # A-ACL: enforce org_id (и user_id для employee), а не только id.
             rid = args[0]
             org_id = args[1] if len(args) > 1 else None
             user_id = args[2] if len(args) > 2 else None
             return next(
                 (
-                    dict(r)
+                    _with_in_report(r, self)
                     for r in self.receipts
                     if r["id"] == rid
                     and (org_id is None or r.get("org_id") == org_id)

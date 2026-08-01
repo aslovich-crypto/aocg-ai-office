@@ -46,13 +46,36 @@ class ReceiptIn(BaseModel):
 async def get_receipts(user: dict = Depends(get_current_user)):
     p = await get_pool()
     # A-ACL: accountant/admin видят все чеки орг; employee — только свои (по автору).
+    # Карточке чека нужно не только «занят ли», но и КУДА идти: чек лежит ровно
+    # в одном отчёте (uq_report_items_receipt_id), отцепить его из карточки
+    # нельзя — без имени отчёта пользователь в тупике.
+    # Тот же уникальный индекс делает LEFT JOIN связью 1:0..1, поэтому строки не
+    # размножаются, а in_report считается из самого джойна — отдельный EXISTS
+    # не нужен. `receipts.*` вместо `*`: при джойне звёздочка вытянула бы ещё и
+    # колонки reports/report_items (id, org_id, user_id… — конфликт имён).
     if can_see_all(user["role"]):
         rows = await p.fetch(
-            "SELECT * FROM receipts WHERE org_id=$1 ORDER BY date DESC", user["org_id"]
+            """SELECT receipts.*,
+                      (ri.receipt_id IS NOT NULL) AS in_report,
+                      rep.id    AS report_id,
+                      rep.title AS report_title
+               FROM receipts
+               LEFT JOIN report_items ri ON ri.receipt_id = receipts.id
+               LEFT JOIN reports rep     ON rep.id = ri.report_id
+               WHERE receipts.org_id=$1 ORDER BY receipts.date DESC""",
+            user["org_id"],
         )
     else:
         rows = await p.fetch(
-            "SELECT * FROM receipts WHERE org_id=$1 AND user_id=$2 ORDER BY date DESC",
+            """SELECT receipts.*,
+                      (ri.receipt_id IS NOT NULL) AS in_report,
+                      rep.id    AS report_id,
+                      rep.title AS report_title
+               FROM receipts
+               LEFT JOIN report_items ri ON ri.receipt_id = receipts.id
+               LEFT JOIN reports rep     ON rep.id = ri.report_id
+               WHERE receipts.org_id=$1 AND receipts.user_id=$2
+               ORDER BY receipts.date DESC""",
             user["org_id"],
             user["id"],
         )
@@ -107,21 +130,49 @@ async def get_receipt_photo(id: int, user: dict = Depends(get_current_user)):
     return Response(content=photo_bytes, media_type="image/jpeg")
 
 
+async def _fetch_receipt(conn, id: int, user: dict):
+    """Один чек в КАНОНИЧЕСКОЙ форме — той же, что отдаёт список: колонки чека
+    + in_report / report_id / report_title.
+
+    Одна точка на GET деталей и на оба выхода PATCH: если какой-то ответ вернёт
+    «урезанный» чек, клиент подставит его в список и потеряет поля — ровно так
+    в отчётах появлялась карточка с «0 чеков». A-ACL: employee — только свой.
+    """
+    if can_see_all(user["role"]):
+        return await conn.fetchrow(
+            """SELECT receipts.*,
+                      (ri.receipt_id IS NOT NULL) AS in_report,
+                      rep.id    AS report_id,
+                      rep.title AS report_title
+               FROM receipts
+               LEFT JOIN report_items ri ON ri.receipt_id = receipts.id
+               LEFT JOIN reports rep     ON rep.id = ri.report_id
+               WHERE receipts.id=$1 AND receipts.org_id=$2""",
+            id,
+            user["org_id"],
+        )
+    return await conn.fetchrow(
+        """SELECT receipts.*,
+                  (ri.receipt_id IS NOT NULL) AS in_report,
+                  rep.id    AS report_id,
+                  rep.title AS report_title
+           FROM receipts
+           LEFT JOIN report_items ri ON ri.receipt_id = receipts.id
+           LEFT JOIN reports rep     ON rep.id = ri.report_id
+           WHERE receipts.id=$1 AND receipts.org_id=$2
+             AND receipts.user_id=$3""",
+        id,
+        user["org_id"],
+        user["id"],
+    )
+
+
 @router.get("/{id}")
 async def get_receipt(id: int, user: dict = Depends(get_current_user)):
     p = await get_pool()
     # A-ACL: employee видит только свой чек; accountant/admin — любой в орг.
-    if can_see_all(user["role"]):
-        row = await p.fetchrow(
-            "SELECT * FROM receipts WHERE id=$1 AND org_id=$2", id, user["org_id"]
-        )
-    else:
-        row = await p.fetchrow(
-            "SELECT * FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3",
-            id,
-            user["org_id"],
-            user["id"],
-        )
+    # Карточку открывают и напрямую — форма чека одинакова независимо от пути.
+    row = await _fetch_receipt(p, id, user)
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
     return dict(row)
@@ -583,17 +634,8 @@ async def patch_receipt(
         values.append(True)
         fields.append(f"category_manual=${len(values)}")
     if not fields:
-        if can_see_all(user["role"]):
-            row = await p.fetchrow(
-                "SELECT * FROM receipts WHERE id=$1 AND org_id=$2", id, user["org_id"]
-            )
-        else:
-            row = await p.fetchrow(
-                "SELECT * FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3",
-                id,
-                user["org_id"],
-                user["id"],
-            )
+        # Нечего менять — отдаём чек в той же канонической форме, что и GET.
+        row = await _fetch_receipt(p, id, user)
         if not row:
             raise HTTPException(status_code=404, detail="Not found")
         return dict(row)
@@ -610,7 +652,10 @@ async def patch_receipt(
     )
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
-    return dict(row)
+    # RETURNING * даёт только колонки таблицы. Перечитываем чек канонической
+    # формой, иначе ответ PATCH окажется беднее элемента списка, и клиент,
+    # подставив его, потеряет in_report / report_title.
+    return dict(await _fetch_receipt(p, id, user) or row)
 
 
 @router.delete("/{id}")

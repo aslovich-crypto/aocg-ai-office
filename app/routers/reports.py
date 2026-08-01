@@ -278,17 +278,35 @@ async def get_report(id: int, user: dict = Depends(get_current_user)):
     ids = [i["receipt_id"] for i in items]
     receipts = []
     if ids:
+        # in_report / report_id / report_title добавлены и здесь — иначе форма
+        # чека в деталях отчёта разошлась бы с формой в списке чеков (её
+        # сторожит контрактный тест). Значения тут предсказуемы: чек лежит
+        # в ЭТОМ отчёте по построению.
         if can_see_all(user["role"]):
             receipts = await p.fetch(
-                "SELECT * FROM receipts WHERE id = ANY($1::int[]) AND org_id=$2 "
-                "ORDER BY date DESC",
+                """SELECT receipts.*,
+                          (ri.receipt_id IS NOT NULL) AS in_report,
+                          rep.id    AS report_id,
+                          rep.title AS report_title
+                   FROM receipts
+                   LEFT JOIN report_items ri ON ri.receipt_id = receipts.id
+                   LEFT JOIN reports rep     ON rep.id = ri.report_id
+                   WHERE receipts.id = ANY($1::int[]) AND receipts.org_id=$2
+                   ORDER BY receipts.date DESC""",
                 ids,
                 user["org_id"],
             )
         else:
             receipts = await p.fetch(
-                "SELECT * FROM receipts WHERE id = ANY($1::int[]) AND org_id=$2 "
-                "AND user_id=$3 ORDER BY date DESC",
+                """SELECT receipts.*,
+                          (ri.receipt_id IS NOT NULL) AS in_report,
+                          rep.id    AS report_id,
+                          rep.title AS report_title
+                   FROM receipts
+                   LEFT JOIN report_items ri ON ri.receipt_id = receipts.id
+                   LEFT JOIN reports rep     ON rep.id = ri.report_id
+                   WHERE receipts.id = ANY($1::int[]) AND receipts.org_id=$2
+                     AND receipts.user_id=$3 ORDER BY receipts.date DESC""",
                 ids,
                 user["org_id"],
                 user["id"],

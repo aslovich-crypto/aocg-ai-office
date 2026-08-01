@@ -1381,6 +1381,85 @@ async def test_report_author_in_all_shapes(client):
         assert "user_id" in body
 
 
+# ─── ЧП4а: флаг in_report у чека ──────────────────────────────────────
+async def test_receipts_list_has_in_report_flag(client, db):
+    # Кнопке «Прикрепить к отчёту» нужно знать, свободен ли чек.
+    _mk(db, 700, user_id=1)  # свободный
+    _mk(db, 701, user_id=1)  # уйдёт в отчёт
+    await client.post("/api/reports/", json={"title": "С чеком", "receiptIds": [701]})
+
+    resp = await client.get("/api/receipts/")
+    assert resp.status_code == 200
+    by_id = {r["id"]: r for r in resp.json()}
+    assert by_id[701]["in_report"] is True
+    assert by_id[700]["in_report"] is False
+
+
+async def test_receipt_detail_has_in_report_flag(client, db):
+    # Карточку открывают и напрямую — форма чека не должна зависеть от пути.
+    _mk(db, 702, user_id=1)
+    free = await client.get("/api/receipts/702")
+    assert free.status_code == 200 and free.json()["in_report"] is False
+
+    await client.post("/api/reports/", json={"title": "Занятый", "receiptIds": [702]})
+    taken = await client.get("/api/receipts/702")
+    assert taken.json()["in_report"] is True
+
+
+async def test_receipt_carries_report_name(client, db):
+    # Карточке нужно не только «занят», но и КУДА идти: чек лежит ровно
+    # в одном отчёте, отцепить его из карточки нельзя.
+    _mk(db, 704, user_id=1)
+    created = await client.post(
+        "/api/reports/", json={"title": "Июль", "receiptIds": [704]}
+    )
+    rid = created.json()["id"]
+
+    detail = await client.get("/api/receipts/704")
+    assert detail.json()["report_id"] == rid
+    assert detail.json()["report_title"] == "Июль"
+
+    listed = await client.get("/api/receipts/")
+    item = next(r for r in listed.json() if r["id"] == 704)
+    assert item["report_title"] == "Июль"
+
+
+async def test_free_receipt_has_no_report_fields(client, db):
+    _mk(db, 705, user_id=1)
+    detail = await client.get("/api/receipts/705")
+    body = detail.json()
+    assert body["in_report"] is False
+    assert body["report_id"] is None and body["report_title"] is None
+
+
+async def test_patch_receipt_keeps_canonical_shape(client, db):
+    # Ответ PATCH подставляется в список на клиенте — форма обязана совпадать,
+    # иначе чек «теряет» in_report/report_title (класс бага «0 чеков»).
+    _mk(db, 706, user_id=1)
+    await client.post("/api/reports/", json={"title": "Август", "receiptIds": [706]})
+
+    listed = await client.get("/api/receipts/")
+    item = next(r for r in listed.json() if r["id"] == 706)
+
+    patched = await client.patch("/api/receipts/706", json={"payment": "Наличные"})
+    assert patched.status_code == 200
+    assert set(patched.json()) == set(item)
+    assert patched.json()["report_title"] == "Август"
+
+    # И на ветке «нечего менять» — тоже канон.
+    untouched = await client.patch("/api/receipts/706", json={})
+    assert set(untouched.json()) == set(item)
+
+
+async def test_receipt_shape_same_in_list_and_detail(client, db):
+    # Контракт формы: одиночный чек = элемент списка (оба SELECT * + in_report).
+    _mk(db, 703, user_id=1)
+    listed = await client.get("/api/receipts/")
+    item = next(r for r in listed.json() if r["id"] == 703)
+    detail = await client.get("/api/receipts/703")
+    assert set(detail.json()) == set(item)
+
+
 # ─── REP-ROLES: кто утверждает отчёт ──────────────────────────────────
 async def test_employee_cannot_approve_own_report(client_employee, db):
     # Сотрудник не утверждает собственный отчёт — это контроль расходов.
