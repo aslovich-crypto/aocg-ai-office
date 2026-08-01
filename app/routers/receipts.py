@@ -480,7 +480,10 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                 "message": "Чек с таким фискальным номером уже зарегистрирован в другой организации",
             },
         )
-    result = dict(row)
+    # Ответ создания — в той же канонической форме, что элемент списка
+    # (RETURNING * не знает про in_report/report_id/report_title). Иначе клиент,
+    # добавив созданный чек в список, получит строку беднее соседних.
+    result = dict(await _fetch_receipt(p, row["id"], user) or row)
     if dup_confidence:
         # duplicates = существующие совпадения (created_at ASC) + только что
         # созданный чек (is_new=true, in_report=false: он ещё ни в одном отчёте).

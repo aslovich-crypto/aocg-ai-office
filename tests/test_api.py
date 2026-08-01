@@ -1055,7 +1055,8 @@ def _mk(db, rid, *, source="manual", kkt_fn=None, org_id=1, amount=100.0, user_i
             id=rid,
             date=date(2026, 5, 20),
             org=f"Org{rid}",
-            category="Прочее",
+            # колонка receipts.category дропнута с прода (канон — category_id):
+            # держать её в фейке нельзя, иначе тестовая строка богаче реальной.
             payment=None,
             amount=amount,
             employee=None,
@@ -1379,6 +1380,118 @@ async def test_report_author_in_all_shapes(client):
     detail = await client.get(f"/api/reports/{rid}")
     for body in (created.json(), patched.json(), item, detail.json()):
         assert "user_id" in body
+
+
+# ─── T7: МАТРИЦА КОНТРАКТА ФОРМ ОТВЕТА ────────────────────────────────
+# Класс багов: мутирующая ручка отдаёт форму БЕДНЕЕ элемента списка, клиент
+# подставляет ответ в список — и на экране пропадают поля. Дважды доходило
+# до прода: PATCH отчёта терял receiptIds («0 чеков»), PATCH чека терял
+# in_report (кнопка «Прикрепить» показывала неверное состояние).
+#
+# Эталон = элемент соответствующего GET-списка. Сравниваем МНОЖЕСТВА КЛЮЧЕЙ:
+# отсутствие поля — всегда провал; лишние поля разрешены только те, что
+# объявлены явно (extra) — так надмножества (детали отчёта = список +
+# receipts) остаются законными, а случайный «довесок» ловится.
+#
+# ЗАЧЕМ МАТРИЦА, а не тест на ручку: точечный тест ловит свой случай и молчит
+# про соседний. Новая ручка = одна строка ниже, а не новый тест.
+#
+# СОЗНАТЕЛЬНО ВНЕ МАТРИЦЫ (не забыты — не отдают объект ресурса):
+#   DELETE /api/reports/{id}          → 204 без тела;
+#   DELETE /api/receipts/{id}         → {"ok": true}, статус операции;
+#   POST   /api/receipts/bulk-delete  → сводка (deleted/blocked_*), не чек;
+#   GET    /api/receipts/{id}/photo   → бинарь/редирект;
+#   GET    /api/receipts/suggest-payment, POST /api/receipts/ocr/ → не ресурс.
+# Ограничение: прогон идёт на FakePool — он зеркалит запросы вручную,
+# поэтому полностью класс закроет только настоящий PostgreSQL в CI (FIN-ТД).
+def _check_shape(name, resp, reference, extra=frozenset()):
+    assert resp.status_code in (200, 201), f"{name}: HTTP {resp.status_code}"
+    keys = set(resp.json())
+    missing = reference - keys
+    unexpected = keys - reference - set(extra)
+    assert not missing, f"{name}: НЕ ХВАТАЕТ полей {sorted(missing)}"
+    assert not unexpected, f"{name}: ЛИШНИЕ поля {sorted(unexpected)}"
+
+
+async def test_shape_contract_receipts(client, db):
+    """T7: каждая ручка чека отдаёт форму элемента GET /api/receipts/.
+
+    Чек создаём через API, а не хелпером _mk: _mk кладёт в фейковое хранилище
+    УРЕЗАННУЮ строку (несколько полей), тогда как в проде `SELECT *` всегда
+    отдаёт все колонки. Эталон из _mk был бы беднее реального и прятал бы
+    расхождения — берём его из полноценной строки.
+    """
+    made = await client.post(
+        "/api/receipts/",
+        json={"date": "2026-08-01", "org": "Матрица", "amount": 5.0},
+    )
+    rid = made.json()["id"]
+    await client.post("/api/reports/", json={"title": "Матрица", "receiptIds": [rid]})
+
+    listed = await client.get("/api/receipts/")
+    reference = set(next(r for r in listed.json() if r["id"] == rid))
+
+    _check_shape(
+        "GET /api/receipts/{id}",
+        await client.get(f"/api/receipts/{rid}"),
+        reference,
+    )
+    _check_shape(
+        "PATCH /api/receipts/{id} (с полями)",
+        await client.patch(f"/api/receipts/{rid}", json={"payment": "Наличные"}),
+        reference,
+    )
+    _check_shape(
+        "PATCH /api/receipts/{id} (без полей)",
+        await client.patch(f"/api/receipts/{rid}", json={}),
+        reference,
+    )
+    _check_shape(
+        "POST /api/receipts/",
+        await client.post(
+            "/api/receipts/",
+            json={"date": "2026-08-02", "org": "Другая", "amount": 7.0},
+        ),
+        reference,
+        # warning — предупреждение о возможном дубле (задача №9), не поле чека.
+        extra={"warning"},
+    )
+
+
+async def test_shape_contract_reports(client, db):
+    """T7: каждая ручка отчёта отдаёт форму элемента GET /api/reports/."""
+    _mk(db, 810, user_id=1)
+    _mk(db, 811, user_id=1)
+    created = await client.post(
+        "/api/reports/", json={"title": "Матрица-отчёт", "receiptIds": [810]}
+    )
+    rid = created.json()["id"]
+    listed = await client.get("/api/reports/")
+    reference = set(next(r for r in listed.json() if r["id"] == rid))
+
+    _check_shape("POST /api/reports/", created, reference)
+    _check_shape(
+        "POST /api/reports/{id}/receipts",
+        await client.post(f"/api/reports/{rid}/receipts", json={"receiptIds": [811]}),
+        reference,
+    )
+    _check_shape(
+        "DELETE /api/reports/{id}/receipts/{rid}",
+        await client.delete(f"/api/reports/{rid}/receipts/811"),
+        reference,
+    )
+    _check_shape(
+        "PATCH /api/reports/{id}",
+        await client.patch(f"/api/reports/{rid}", json={"status": "На проверке"}),
+        reference,
+    )
+    _check_shape(
+        "GET /api/reports/{id}",
+        await client.get(f"/api/reports/{rid}"),
+        reference,
+        # детали — законное надмножество: тот же отчёт + развёрнутые чеки.
+        extra={"receipts"},
+    )
 
 
 # ─── ЧП4а: флаг in_report у чека ──────────────────────────────────────
