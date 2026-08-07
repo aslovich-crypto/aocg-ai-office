@@ -1,7 +1,7 @@
 import os
 import re
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import asyncpg
 import pytest
@@ -92,6 +92,11 @@ class FakePool:
         # S-29: мутации users до 07.08.2026 не покрывались тестами вовсе,
         # поэтому и таблицы здесь не было. Ветки ниже зеркалят SQL роутера.
         self.users = []
+        # S-31: приглашения и отозванные токены — контур выдачи и отзыва
+        # доступа. Не выполнялся в тестах ни разу (замер tests/tools).
+        self.invite_links = []
+        self.revoked_tokens = []
+        self._invid = 0
         self._uid = 0
         self._rid = self._repid = self._cid = self._consid = 0
         self._gid = self._catid = 0
@@ -198,6 +203,23 @@ class FakePool:
             return sorted(
                 [c for c in self.cards if c.get("org_id") == args[0]],
                 key=lambda c: c["id"],
+            )
+        if q.startswith("SELECT * FROM invite_links"):
+            # S-31: список приглашений. ФИЛЬТРЫ БЕРУТСЯ ИЗ ТЕКСТА ЗАПРОСА,
+            # а не зашиты: зашитый org-scope сделал бы тест «не вижу чужие
+            # приглашения» ВЕЧНОЗЕЛЁНЫМ — фильтровал бы FakePool, даже если
+            # из роутера убрать «AND org_id=$1». Проверено мутацией.
+            свой = "org_id=$1" in q
+            живой = "is_active=true" in q
+            return sorted(
+                [
+                    i
+                    for i in self.invite_links
+                    if (not свой or i.get("org_id") == args[0])
+                    and (not живой or i.get("is_active"))
+                ],
+                key=lambda i: str(i["created_at"]),
+                reverse=True,
             )
         if q.startswith("SELECT * FROM users WHERE is_active = true AND org_id=$1"):
             # S-28: GET /api/users/ — до 07.08.2026 ветки не было вовсе,
@@ -699,7 +721,89 @@ class FakePool:
                 ),
                 None,
             )
-        if q.startswith("INSERT INTO users"):
+        # ── S-31: приглашения ───────────────────────────────────────────────
+        if q.startswith("INSERT INTO invite_links (token, org_id, role"):
+            self._invid += 1
+            row = dict(
+                id=self._invid,
+                token=args[0],
+                org_id=args[1],
+                role=args[2],
+                created_by=args[3],
+                expires_at=args[4],
+                max_uses=args[5],
+                uses_count=0,
+                is_active=True,
+                created_at=datetime.now(timezone.utc),
+            )
+            self.invite_links.append(row)
+            return dict(row)
+        if q.startswith("SELECT * FROM invite_links WHERE token=$1"):
+            return next(
+                (dict(i) for i in self.invite_links if i["token"] == args[0]), None
+            )
+        # ── S-31: вход и сессии ─────────────────────────────────────────────
+        if q.startswith("SELECT 1 FROM revoked_tokens WHERE token_hash=$1"):
+            return (
+                {"?column?": 1}
+                if any(t["token_hash"] == args[0] for t in self.revoked_tokens)
+                else None
+            )
+        if q.startswith("SELECT 1 FROM users WHERE id=$1 AND is_active=true"):
+            return (
+                {"?column?": 1}
+                if any(
+                    u["id"] == args[0] and u.get("is_active", True) for u in self.users
+                )
+                else None
+            )
+        if q.startswith("SELECT id FROM users WHERE lower(email)=$1"):
+            # register-by-invite: занят ли email. Регистр сравнивается так же,
+            # как в PostgreSQL — роутер уже привёл ввод к нижнему.
+            return next(
+                (
+                    {"id": u["id"]}
+                    for u in self.users
+                    if (u.get("email") or "").lower() == args[0]
+                ),
+                None,
+            )
+        if q.startswith("SELECT * FROM users WHERE lower(email)=lower($1) OR phone=$1"):
+            # login: вход по email ИЛИ телефону одним параметром.
+            ident = args[0]
+            return next(
+                (
+                    dict(u)
+                    for u in self.users
+                    if (u.get("email") or "").lower() == ident.lower()
+                    or (u.get("phone") and u["phone"] == ident)
+                ),
+                None,
+            )
+        if q.startswith("INSERT INTO users (first_name,last_name,email,phone"):
+            # register-by-invite: роль и орг берутся ИЗ ПРИГЛАШЕНИЯ, не из тела —
+            # это и проверяют тесты. Порядок колонок отличается от POST /api/users/
+            # (там patronymic и нет пароля), поэтому ветки различаются началом
+            # списка колонок, а не общим «INSERT INTO users» — иначе одна
+            # перехватила бы другую (сторож T6).
+            self._uid += 1
+            row = dict(
+                id=self._uid,
+                first_name=args[0],
+                last_name=args[1],
+                email=args[2],
+                phone=args[3],
+                password_hash=args[4],
+                role=args[5],
+                org_id=args[6],
+                is_email_verified=args[7],
+                email_verify_token=args[8],
+                patronymic=None,
+                is_active=True,
+            )
+            self.users.append(row)
+            return dict(row)
+        if q.startswith("INSERT INTO users (first_name, last_name, patronymic"):
             # S-29: POST /api/users/ — только admin, но FakePool про роли не знает,
             # его дело — повторить SQL. Гейт проверяется тестами через 403.
             self._uid += 1
@@ -855,6 +959,45 @@ class FakePool:
                 }
             )
             return "INSERT"
+        # ── S-31: расход и отзыв приглашения ────────────────────────────────
+        if q.startswith("UPDATE invite_links SET uses_count=$1, is_active=$2"):
+            for i in self.invite_links:
+                if i["id"] == args[2]:
+                    i["uses_count"] = args[0]
+                    i["is_active"] = args[1]
+            return "UPDATE 1"
+        if q.startswith("UPDATE invite_links SET is_active=false WHERE token=$1"):
+            # org-scope БЕРЁТСЯ ИЗ ТЕКСТА, а не зашит (см. такую же ветку
+            # в fetch): ручка отвечает ok всегда, поэтому единственный признак
+            # работающего scope — состояние чужого приглашения. Зашей фильтр
+            # здесь — и тест перестал бы уметь краснеть.
+            свой = "AND org_id=$2" in q
+            for i in self.invite_links:
+                if i["token"] == args[0] and (not свой or i.get("org_id") == args[1]):
+                    i["is_active"] = False
+            return "UPDATE 1"
+        if q.startswith("INSERT INTO revoked_tokens (token_hash, expires_at)"):
+            self.revoked_tokens.append(dict(token_hash=args[0], expires_at=args[1]))
+            return "INSERT"
+        # ── S-31: счётчик неудачных попыток входа ───────────────────────────
+        if q.startswith("UPDATE users SET failed_attempts=$1, locked_until=$2"):
+            for u in self.users:
+                if u["id"] == args[2]:
+                    u["failed_attempts"] = args[0]
+                    u["locked_until"] = args[1]
+            return "UPDATE 1"
+        if q.startswith("UPDATE users SET failed_attempts=0, locked_until=NULL"):
+            for u in self.users:
+                if u["id"] == args[0]:
+                    u["failed_attempts"] = 0
+                    u["locked_until"] = None
+                    u["last_login_at"] = datetime.now(timezone.utc)
+            return "UPDATE 1"
+        if q.startswith("UPDATE users SET password_hash=$1 WHERE id=$2"):
+            for u in self.users:
+                if u["id"] == args[1]:
+                    u["password_hash"] = args[0]
+            return "UPDATE 1"
         if q.startswith("UPDATE users SET is_active = false"):
             for u in self.users:
                 if u["id"] == args[0] and u.get("org_id") == args[1]:
@@ -985,6 +1128,8 @@ class _Txn:
     # состояния на входе и восстанавливаем на выходе, если поднялось исключение.
     _LISTS = (
         "users",
+        "invite_links",
+        "revoked_tokens",
         "receipts",
         "receipt_items",
         "reports",
@@ -994,7 +1139,16 @@ class _Txn:
         "category_groups",
         "categories",
     )
-    _COUNTERS = ("_rid", "_repid", "_cid", "_consid", "_gid", "_catid", "_uid")
+    _COUNTERS = (
+        "_rid",
+        "_repid",
+        "_cid",
+        "_consid",
+        "_gid",
+        "_catid",
+        "_uid",
+        "_invid",
+    )
 
     def __init__(self, pool):
         self.pool = pool
@@ -1075,11 +1229,15 @@ def seeded(db):
     return db
 
 
-def _override_user(role, user_id=1):
-    """Подменяет get_current_user фиксированным юзером org_id=1 с заданной ролью."""
+def _override_user(role, user_id=1, org_id=1):
+    """Подменяет get_current_user фиксированным юзером с заданной ролью.
+
+    org_id параметром (S-31): проверка org-scope требует ВТОРОЙ организации —
+    «админ чужой орг не гасит наше приглашение» иначе не выражается.
+    """
     app.dependency_overrides[get_current_user] = lambda: {
         "id": user_id,
-        "org_id": 1,
+        "org_id": org_id,
         "email": "test@aocg.ru",
         "first_name": "Test",
         "last_name": "User",
