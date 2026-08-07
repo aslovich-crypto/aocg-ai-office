@@ -2358,8 +2358,11 @@ async def test_ocr_no_fiscal_fields_requested(client, monkeypatch):
 
 
 # ─── POST /api/consent/ ───────────────────────────────────────────────
+# СТРОКА 9: субъект берётся ИЗ ТОКЕНА, адрес — ИЗ ЗАПРОСА. Клиент не может
+# быть источником доказательства о самом себе, поэтому тела эти поля больше
+# не несут (а если старый фронт их пришлёт — они игнорируются).
 async def test_post_consent_records_row(client, db):
-    resp = await client.post("/api/consent/", json={"user_id": "local_user"})
+    resp = await client.post("/api/consent/", json={})
     assert resp.status_code == 200
     body = resp.json()
     assert body["id"] > 0
@@ -2367,24 +2370,40 @@ async def test_post_consent_records_row(client, db):
     # становится третьей копией того же значения и расходится с ним.
     assert body["policy_version"] == POLICY_VERSION
     assert body["consent_at"] is not None
-    # row landed in the store with the frozen text
     assert len(db.consents) == 1
-    assert db.consents[0]["user_id"] == "local_user"
+    # id=1 — это подменённый get_current_user в фикстуре client.
+    assert db.consents[0]["user_id"] == "1"
     assert "Шукалович" in db.consents[0]["consent_text"]
 
 
-async def test_post_consent_with_ip(client, db):
+async def test_post_consent_ignores_subject_from_body(client, db):
+    """Подсунуть чужой user_id через тело нельзя — иначе запись подделывается.
+
+    Именно так и появились девятнадцать легаси-строк «local_user»: значение
+    приходило от клиента, и журнал не опознаёт по ним никого.
+    """
     resp = await client.post(
-        "/api/consent/", json={"user_id": "u1", "ip_address": "203.0.113.4"}
+        "/api/consent/",
+        json={"user_id": "local_user", "ip_address": "203.0.113.4"},
     )
     assert resp.status_code == 200
-    assert db.consents[0]["ip_address"] == "203.0.113.4"
+    assert db.consents[0]["user_id"] == "1", "субъект обязан приходить из токена"
+    assert db.consents[0]["ip_address"] != "203.0.113.4", (
+        "адрес обязан браться из запроса, а не из тела"
+    )
+
+
+async def test_post_consent_records_client_address(client, db):
+    """Адрес пишется сервером. В тестах соединение локальное — важно, что
+    поле ЗАПОЛНЕНО и взято не из тела."""
+    await client.post("/api/consent/", json={})
+    assert db.consents[0]["ip_address"], "адрес обязан проставиться"
 
 
 async def test_post_consent_appends_on_reagree(client, db):
     """Re-agreement is intentional — we append rather than upsert."""
-    await client.post("/api/consent/", json={"user_id": "u1"})
-    await client.post("/api/consent/", json={"user_id": "u1"})
+    await client.post("/api/consent/", json={})
+    await client.post("/api/consent/", json={})
     assert len(db.consents) == 2
 
 
@@ -2396,9 +2415,9 @@ async def test_get_consent_returns_null_when_none(client):
 
 
 async def test_get_consent_returns_latest(client, db):
-    await client.post("/api/consent/", json={"user_id": "u1"})
-    second = await client.post("/api/consent/", json={"user_id": "u1"})
-    resp = await client.get("/api/consent/u1")
+    await client.post("/api/consent/", json={})
+    second = await client.post("/api/consent/", json={})
+    resp = await client.get("/api/consent/1")
     assert resp.status_code == 200
     body = resp.json()
     # 'latest' = highest id, which the POST returned
@@ -2409,7 +2428,7 @@ async def test_get_consent_returns_latest(client, db):
 
 
 async def test_get_consent_isolates_users(client, db):
-    await client.post("/api/consent/", json={"user_id": "alice"})
+    await client.post("/api/consent/", json={})
     resp = await client.get("/api/consent/bob")
     assert resp.status_code == 200
     assert resp.json() is None

@@ -134,8 +134,10 @@ async def test_gated_endpoints_reject_anonymous(db, метод, путь, тел
 @pytest.mark.asyncio
 async def test_consent_still_works_for_authorized(client, db):
     """Положительная половина: свой пишет и читает согласие как раньше."""
-    записано = await client.post("/api/consent/", json={"user_id": "local_user"})
+    # Строка 9: субъект берётся из токена (в фикстуре client это id=1),
+    # поэтому и читаем по нему, а не по легаси-маркеру.
+    записано = await client.post("/api/consent/", json={})
     assert записано.status_code == 200, записано.text
-    прочитано = await client.get("/api/consent/local_user")
+    прочитано = await client.get("/api/consent/1")
     assert прочитано.status_code == 200, прочитано.text
     assert прочитано.json()["policy_version"] == записано.json()["policy_version"]

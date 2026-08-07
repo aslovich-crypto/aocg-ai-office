@@ -7,11 +7,10 @@ The frozen consent_text is stored alongside so an old agreement can be
 reproduced verbatim even after the policy is updated.
 """
 
-from typing import Optional
-
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
+from aocg_security.middleware import AOCGSecurityMiddleware
 from app.auth import get_current_user
 from app.database import get_pool
 
@@ -63,8 +62,28 @@ CONSENT_TEXT_V1 = CONSENT_TEXT
 
 
 class ConsentRequest(BaseModel):
-    user_id: str
-    ip_address: Optional[str] = None
+    """Тело запроса — ПУСТОЕ по существу (строка 9).
+
+    Раньше здесь были `user_id` и `ip_address`, и оба приходили от клиента.
+    Это неверно дважды: субъекта в юридической записи определяет ТОКЕН,
+    а адрес — сервер, который видит соединение. Клиент не может быть
+    источником доказательства о самом себе.
+
+    Поля намеренно не объявлены: Pydantic отбрасывает лишнее, поэтому
+    старый фронт, который ещё шлёт `{"user_id": "local_user"}`, не сломается —
+    его данные просто не попадут в запись.
+    """
+
+
+def _адрес(request: Request) -> str:
+    """Адрес клиента ОДНИМ способом со всем остальным приложением.
+
+    Намеренно переиспользуется извлекатель ограничителя частоты, а не пишется
+    свой: когда S-35 научит брать адрес с правого конца X-Forwarded-For,
+    почина должна быть одна на оба места. Вторая копия разошлась бы —
+    ровно как разошлись две копии текста согласия (S-34).
+    """
+    return AOCGSecurityMiddleware._client_ip(request)
 
 
 def _serialize(row) -> dict:
@@ -91,17 +110,33 @@ async def get_policy(user: dict = Depends(get_current_user)):
 
 
 @router.post("/")
-async def record_consent(req: ConsentRequest, user: dict = Depends(get_current_user)):
-    """Append a new consent row for `user_id`. Always inserts — re-agreement is intentional."""
+async def record_consent(
+    request: Request,
+    req: ConsentRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Записать согласие ТЕКУЩЕГО пользователя. Всегда INSERT: повторное
+    согласие — новая строка, историю не переписываем.
+
+    СТРОКА 9. Субъект берётся из токена, адрес — из запроса. До 07.08.2026
+    оба приходили из тела, и журнал это показал: девятнадцать записей
+    с `user_id='local_user'` и пустым адресом, то есть из пяти реквизитов
+    152-ФЗ работали два. Восстановить авторство тех записей нельзя (разбор
+    в задаче), поэтому старые не трогаем, а новые пишем правильно.
+
+    Значение `local_user` больше появиться не может: оно нигде не берётся.
+    Тем самым множество легаси-записей замкнуто — отдельная колонка-маркер
+    не нужна.
+    """
     p = await get_pool()
     row = await p.fetchrow(
         """INSERT INTO user_consents (user_id, ip_address, policy_version, consent_text)
            VALUES ($1, $2, $3, $4)
            RETURNING id, consent_at, policy_version""",
-        req.user_id,
-        req.ip_address,
+        str(user["id"]),
+        _адрес(request),
         POLICY_VERSION,
-        CONSENT_TEXT_V1,
+        CONSENT_TEXT,
     )
     return _serialize(row)
 
