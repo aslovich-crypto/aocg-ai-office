@@ -128,3 +128,23 @@ async def test_admin_manages_cards(client, db, seeded):
     assert db.cards[0]["is_default"] is True
     assert (await client.delete("/api/cards/1")).status_code == 200
     assert all(c["id"] != 1 for c in db.cards)
+
+
+# ─────── слепые записи: ответ одинаков, проверять можно только состояние ──────
+
+
+@pytest.mark.asyncio
+async def test_admin_cannot_delete_card_of_other_org(client, db, seeded):
+    """DELETE карты отвечает {"ok": true} ВСЕГДА — даже когда ничего не удалил.
+
+    Найдено замером слепых записей (`tests/tools/blind_writes.py`): ручка
+    не различает «удалил» и «нечего было удалять», поэтому её org-scope
+    ПРИНЦИПИАЛЬНО не проверяется кодом ответа — только состоянием.
+    """
+    db.cards.append(dict(id=42, name="Чужая", org_id=2, created_at=None))
+    r = await client.delete("/api/cards/42")
+    assert r.status_code == 200, r.text
+    assert any(c["id"] == 42 for c in db.cards), (
+        "админ одной орг удалил карту другой — org-scope в WHERE не работает"
+    )
+    assert any(c["id"] == 1 for c in db.cards), "своя карта тоже должна быть цела"
