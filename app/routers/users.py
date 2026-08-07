@@ -23,9 +23,29 @@ UPDATABLE = (
 # Never expose secrets in user payloads.
 _HIDDEN = ("password_hash", "email_verify_token")
 
+# S-28: что видит РЯДОВОЙ сотрудник в списке коллег. Полная строка — это
+# кадровая карточка (email, ИНН, регион, табельный номер, роль, флаги);
+# интерфейсу от неё нужны только подпись автора отчёта и выбор в фильтрах,
+# то есть id и ФИО. Список белый, а не чёрный: новая колонка в users
+# не утечёт сама собой.
+_EMPLOYEE_VISIBLE = ("id", "first_name", "last_name", "patronymic")
+
+# Кому список отдаётся целиком. Роль вне этого набора (в т.ч. неизвестная
+# и будущая manager из Финансов) получает урезанную форму — безопасный
+# умолчательный ответ.
+_FULL_VIEW_ROLES = ("admin", "accountant")
+
 
 def _safe(row) -> dict:
     return {k: v for k, v in dict(row).items() if k not in _HIDDEN}
+
+
+def _by_role(row, viewer_role: Optional[str]) -> dict:
+    """Форма записи о пользователе с оглядкой на роль СМОТРЯЩЕГО (S-28)."""
+    if viewer_role in _FULL_VIEW_ROLES:
+        return _safe(row)
+    d = dict(row)
+    return {k: d.get(k) for k in _EMPLOYEE_VISIBLE}
 
 
 async def _me_payload(p, u: dict) -> dict:
@@ -96,13 +116,17 @@ class UserCreate(BaseModel):
 
 @router.get("/")
 async def get_users(user: dict = Depends(get_current_user)):
-    """Active users of the caller's organization, oldest first."""
+    """Active users of the caller's organization, oldest first.
+
+    S-28: гейта роли здесь нет намеренно — список нужен КАЖДОМУ (подпись
+    автора на своих же отчётах), поэтому режется не доступ, а форма ответа.
+    """
     p = await get_pool()
     rows = await p.fetch(
         "SELECT * FROM users WHERE is_active = true AND org_id=$1 ORDER BY id",
         user["org_id"],
     )
-    return [_safe(r) for r in rows]
+    return [_by_role(r, user.get("role")) for r in rows]
 
 
 # ─── /me (must be declared before /{id}) ───

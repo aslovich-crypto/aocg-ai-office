@@ -199,6 +199,19 @@ class FakePool:
                 [c for c in self.cards if c.get("org_id") == args[0]],
                 key=lambda c: c["id"],
             )
+        if q.startswith("SELECT * FROM users WHERE is_active = true AND org_id=$1"):
+            # S-28: GET /api/users/ — до 07.08.2026 ветки не было вовсе,
+            # то есть ручка не выполнялась в тестах ни разу. Отдаём СЫРУЮ
+            # строку (с email и ролью), урезание — забота роутера: иначе
+            # тест на урезание проверял бы FakePool, а не продакшен-код.
+            return sorted(
+                [
+                    u
+                    for u in self.users
+                    if u.get("org_id") == args[0] and u.get("is_active", True)
+                ],
+                key=lambda u: u["id"],
+            )
         if q.startswith(
             "SELECT id, name, position FROM category_groups WHERE org_id=$1"
         ):
@@ -1074,6 +1087,18 @@ def _override_user(role, user_id=1):
         "is_email_verified": True,
         "password_hash": None,
     }
+
+
+@pytest.fixture
+def as_role():
+    """Сменить роль смотрящего внутри уже поднятого клиента (S-28).
+
+    Нужна там, где проверяется РЕАКЦИЯ НА РОЛЬ, а не отдельный сценарий:
+    заводить по клиенту на каждую роль (включая будущую manager из Финансов)
+    дороже, чем подменить зависимость на месте. Клиентские фикстуры чистят
+    dependency_overrides на выходе, так что подмена не течёт в соседний тест.
+    """
+    return _override_user
 
 
 @pytest_asyncio.fixture
