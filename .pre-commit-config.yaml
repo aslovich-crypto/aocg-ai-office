@@ -7,8 +7,18 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
+      # ЮРИДИЧЕСКИЕ ДОКУМЕНТЫ ИЗ docs/AOCG-LEGAL-* ИСКЛЮЧЕНЫ намеренно.
+      # Это не наш код, а присланные юристом файлы: их текст читается
+      # приложением и замораживается в журнале согласий. 07.08.2026 хук
+      # молча срезал в них markdown-переносы (двойной пробел в конце
+      # строки) — 8 символов в согласии и 45 в политике; сторож версий
+      # тут же покраснел, потому что хеши перестали сходиться. Автоправка
+      # входящего документа недопустима: файл обязан остаться таким, каким
+      # его прислали.
       - id: trailing-whitespace
+        exclude: ^docs/AOCG-LEGAL-.*\.md$
       - id: end-of-file-fixer
+        exclude: ^docs/AOCG-LEGAL-.*\.md$
       - id: check-added-large-files
         args: ['--maxkb=5120']
       - id: check-merge-conflict
