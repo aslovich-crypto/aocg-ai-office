@@ -217,7 +217,13 @@ class FakePool:
             }
             return [ri for ri in self.report_items if ri["report_id"] in own]
         if q.startswith("SELECT ri.* FROM report_items"):
-            return list(self.report_items)
+            # T35: JOIN с reports по org БЕРЁТСЯ ИЗ ТЕКСТА. Раньше ветка
+            # отдавала состав ВСЕХ отчётов всех организаций.
+            свой = "r.org_id=$1" in q
+            свои_отчёты = {
+                r["id"] for r in self.reports if not свой or r.get("org_id") == args[0]
+            }
+            return [ri for ri in self.report_items if ri["report_id"] in свои_отчёты]
         if q.startswith("SELECT receipt_id FROM report_items WHERE report_id=$1"):
             return sorted(
                 [ri for ri in self.report_items if ri["report_id"] == args[0]],
@@ -437,10 +443,16 @@ class FakePool:
                 o["tax_system"] = new_tax
             return dict(o)
         if q.startswith("SELECT payment FROM receipts WHERE org=$1"):
+            # T35: org-scope БЕРЁТСЯ ИЗ ТЕКСТА. Раньше ветка считала подсказку
+            # по чекам ВСЕХ организаций — то есть была позволительнее продакшена
+            # (там `AND org_id=$2` из токена), и тест «подсказка не приходит
+            # из чужой орг» не мог ни пройти честно, ни покраснеть.
+            свой = "AND org_id=$2" in q
             counts = {}
             for r in self.receipts:
                 if (
                     r["org"] == args[0]
+                    and (not свой or r.get("org_id") == args[1])
                     and r["payment"]
                     and r["payment"] != "Не указано"
                 ):
@@ -755,8 +767,12 @@ class FakePool:
                     return dict(r)
             return None
         if q.startswith("UPDATE reports SET status=$1"):
+            # T35: org-scope из текста — раньше статус менялся у отчёта
+            # ЛЮБОЙ организации по одному id. Ветка с author-scope
+            # («AND user_id=$4») стоит ВЫШЕ, эта — общая для org-варианта.
+            свой = "AND org_id=$3" in q
             for r in self.reports:
-                if r["id"] == args[1]:
+                if r["id"] == args[1] and (not свой or r.get("org_id") == args[2]):
                     r["status"] = args[0]
                     return dict(r)
             return None
@@ -966,8 +982,11 @@ class FakePool:
             self.cards.append(row)
             return dict(row)
         if q.startswith("UPDATE cards SET name=$1"):
+            # T35: org-scope из текста — раньше переименовывалась карта
+            # ЛЮБОЙ организации по одному id.
+            свой = "AND org_id=$3" in q
             for c in self.cards:
-                if c["id"] == args[1]:
+                if c["id"] == args[1] and (not свой or c.get("org_id") == args[2]):
                     c["name"] = args[0]
                     return dict(c)
             return None
@@ -1002,8 +1021,20 @@ class FakePool:
                 "policy_version": latest.get("policy_version"),
             }
         if q.startswith("SELECT * FROM users WHERE id=$1"):
-            # S-31: PATCH /me перечитывает свою строку после UPDATE.
-            return next((dict(u) for u in self.users if u["id"] == args[0]), None)
+            # Обслуживает ДВА запроса: `PATCH /me` перечитывает свою строку,
+            # а get_current_user (app/auth.py) добавляет `AND is_active=true`.
+            # T35: флаг БЕРЁТСЯ ИЗ ТЕКСТА. Пока он был зашит «всегда отдавать»,
+            # отключённый пользователь в тестах продолжал ходить с токеном —
+            # то есть ЛЮБАЯ проверка деактивации (включая S-29) была слепа.
+            живой = "AND is_active=true" in q
+            return next(
+                (
+                    dict(u)
+                    for u in self.users
+                    if u["id"] == args[0] and (not живой or u.get("is_active", True))
+                ),
+                None,
+            )
         raise NotImplementedError(f"fetchrow: {q}")
 
     async def execute(self, query, *args):
