@@ -17,8 +17,9 @@ from datetime import datetime
 from typing import Optional
 
 from anthropic import APIError, APITimeoutError, AsyncAnthropic
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
+from app.auth import get_current_user
 from app.categorization import auto_categorize_v2, categorize
 from app.parsers.fns_parser import validate_inn
 
@@ -273,8 +274,18 @@ def _extract_json(text: str) -> Optional[dict]:
 
 
 @router.post("/ocr/")
-async def ocr_receipt(file: UploadFile = File(...)):
-    """Extract structured receipt data from a photo (or PDF) via Claude Vision."""
+async def ocr_receipt(
+    file: UploadFile = File(...), user: dict = Depends(get_current_user)
+):
+    """Extract structured receipt data from a photo (or PDF) via Claude Vision.
+
+    S-33: до 07.08.2026 ручка была ОТКРЫТА. Цена анонимного доступа тройная:
+    чужой человек жжёт наш платный ключ Anthropic, отправляет произвольные
+    изображения ЗА РУБЕЖ (трансграничная передача по 152-ФЗ допустима только
+    при согласии субъекта — у анонима согласия нет по определению), и делает
+    это без следа в журналах. Роль не проверяется: распознавать чек вправе
+    любой сотрудник орг.
+    """
     is_pdf = file.content_type == PDF_MIME
     if not file.content_type or (
         file.content_type not in OCR_ALLOWED_MIME and not is_pdf

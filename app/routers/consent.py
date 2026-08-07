@@ -9,9 +9,10 @@ reproduced verbatim even after the policy is updated.
 
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
+from app.auth import get_current_user
 from app.database import get_pool
 
 router = APIRouter(prefix="/api/consent", tags=["consent"])
@@ -52,7 +53,7 @@ def _serialize(row) -> dict:
 
 
 @router.post("/")
-async def record_consent(req: ConsentRequest):
+async def record_consent(req: ConsentRequest, user: dict = Depends(get_current_user)):
     """Append a new consent row for `user_id`. Always inserts — re-agreement is intentional."""
     p = await get_pool()
     row = await p.fetchrow(
@@ -68,7 +69,7 @@ async def record_consent(req: ConsentRequest):
 
 
 @router.get("/{user_id}")
-async def get_latest_consent(user_id: str):
+async def get_latest_consent(user_id: str, user: dict = Depends(get_current_user)):
     """Most recent consent for the user, or `null` if none recorded."""
     p = await get_pool()
     row = await p.fetchrow(

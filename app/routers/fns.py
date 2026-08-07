@@ -1,10 +1,11 @@
 import asyncio
 import os
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from app.auth import get_current_user
 from app.categorization import categorize
 from aocg_security.masking import mask_log_dict
 
@@ -27,7 +28,7 @@ async def _fetch_check(client: httpx.AsyncClient, token: str, qr_raw: str) -> di
 
 
 @router.post("/check")
-async def check_receipt(req: CheckRequest):
+async def check_receipt(req: CheckRequest, user: dict = Depends(get_current_user)):
     """
     Proxy a QR string to proverkacheka.com and map the outcome to a distinct
     HTTP status so the client can branch precisely:
