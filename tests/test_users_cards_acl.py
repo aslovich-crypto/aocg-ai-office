@@ -148,3 +148,13 @@ async def test_admin_cannot_delete_card_of_other_org(client, db, seeded):
         "админ одной орг удалил карту другой — org-scope в WHERE не работает"
     )
     assert any(c["id"] == 1 for c in db.cards), "своя карта тоже должна быть цела"
+
+
+@pytest.mark.asyncio
+async def test_create_user_with_unknown_role_is_rejected(client, db, seeded):
+    """S-24: вторая дверь к users.role — POST /api/users/ — под тем же списком."""
+    r = await client.post(
+        "/api/users/", json={"first_name": "Пётр", "role": "суперадмин"}
+    )
+    assert r.status_code == 422, r.text
+    assert len(db.users) == 1, "пользователь с чужой ролью не должен создаться"

@@ -3,7 +3,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.auth import get_current_user, hash_password, verify_password
+from app.auth import Role, get_current_user, hash_password, verify_password
 from app.routers.auth import _require_admin
 from app.database import get_pool
 
@@ -111,7 +111,8 @@ class UserCreate(BaseModel):
     last_name: str = ""
     patronymic: str = ""
     email: str = ""
-    role: str = "employee"
+    # S-24: тот же белый список, что у приглашений — вторая дверь к users.role.
+    role: Role = "employee"
 
 
 @router.get("/")

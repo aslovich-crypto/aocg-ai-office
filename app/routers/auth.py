@@ -22,6 +22,9 @@ from slowapi.util import get_remote_address
 
 from app.auth import (
     REFRESH_TOKEN_EXPIRE_DAYS,
+    ROLE_EMPLOYEE,
+    ROLES,
+    Role,
     create_access_token,
     create_refresh_token,
     get_current_user,
@@ -65,7 +68,9 @@ class LogoutIn(BaseModel):
 
 
 class InviteCreateIn(BaseModel):
-    role: str = "employee"
+    # S-24: белый список ролей (Literal) — без него в invite_links попадала
+    # произвольная строка, а из неё в users.role при регистрации по ссылке.
+    role: Role = "employee"
     expires_hours: Optional[int] = None  # None = permanent (no expiry)
     max_uses: int = 1
 
@@ -393,7 +398,12 @@ async def register_by_invite(body: RegisterByInviteIn):
                 email,
                 body.phone,
                 hash_password(body.password),
-                inv["role"],
+                # S-24: белый список действует и НА ПРИЁМЕ. Валидация модели
+                # закрывает только новые приглашения; в базе уже могут лежать
+                # выданные раньше, с произвольной ролью. Неизвестную роль
+                # понижаем до employee — наименьшие права, а не отказ: человек
+                # по ссылке не виноват, что администратор выдал ерунду.
+                inv["role"] if inv["role"] in ROLES else ROLE_EMPLOYEE,
                 inv["org_id"],
                 auto_verify,
                 verify_tok,

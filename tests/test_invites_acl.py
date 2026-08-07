@@ -350,3 +350,42 @@ async def test_validate_and_register_need_no_admin(client, орг):
         },
     )
     assert r.status_code == 200, r.text
+
+
+# ───────────────── S-24: роль из белого списка, а не любая строка ────────────
+
+
+@pytest.mark.asyncio
+async def test_invite_with_unknown_role_is_rejected(client, орг):
+    """Роль приглашения — Literal, а не str: «суперадмин» отвергается формой."""
+    r = await client.post("/api/invite/create", json={"role": "суперадмин"})
+    assert r.status_code == 422, r.text
+    assert орг.invite_links == [], "приглашение с чужой ролью не должно создаться"
+
+
+@pytest.mark.asyncio
+async def test_invite_roles_from_whitelist_still_work(client, орг):
+    """Положительная половина: все три настоящие роли выдаются как раньше."""
+    for роль in ("employee", "accountant", "admin"):
+        r = await client.post("/api/invite/create", json={"role": роль})
+        assert r.status_code == 200, r.text
+        assert r.json()["role"] == роль
+    assert [i["role"] for i in орг.invite_links] == ["employee", "accountant", "admin"]
+
+
+@pytest.mark.asyncio
+async def test_old_invite_with_bad_role_downgrades_to_employee(client, орг):
+    """Приглашение, выданное ДО белого списка, не даёт неизвестных прав.
+
+    Валидация модели закрывает только новые ссылки; в базе могут лежать
+    старые. Неизвестная роль понижается до employee — наименьшие права,
+    а не отказ: человек по ссылке не виноват, что ему выдали ерунду.
+    """
+    _приглашение(орг, token="старая", role="суперадмин")
+    r = await client.post(
+        "/api/auth/register-by-invite",
+        json={"token": "старая", "email": "z@example.com", "password": "парольдлинный"},
+    )
+    assert r.status_code == 200, r.text
+    (новый,) = [u for u in орг.users if u["email"] == "z@example.com"]
+    assert новый["role"] == "employee", "неизвестная роль обязана понижаться"

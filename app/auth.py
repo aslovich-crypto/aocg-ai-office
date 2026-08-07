@@ -8,7 +8,7 @@ default), so production can never accidentally sign tokens with a known key.
 
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -38,6 +38,17 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=Fals
 ROLE_ADMIN = "admin"
 ROLE_ACCOUNTANT = "accountant"
 ROLE_EMPLOYEE = "employee"
+
+# S-24: ЕДИНСТВЕННЫЙ белый список ролей Примы. Всё, что заводит человека
+# (приглашение, создание пользователя), обязано валидироваться по нему,
+# иначе в users.role приезжает произвольная строка: гейты сравнивают роль
+# по равенству, поэтому «Admin» с большой буквы или «суперадмин» тихо
+# получают права РЯДОВОГО сотрудника — то есть роль есть, а прав нет,
+# и разбираться с этим будут на живом человеке.
+# Роль `manager` (РП) из приложения «Финансы» сюда НЕ входит намеренно:
+# в Приме её никто не понимает. Добавлять — вместе с FIN-01.
+ROLES = (ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_EMPLOYEE)
+Role = Literal["admin", "accountant", "employee"]
 
 
 def can_see_all(role: str) -> bool:
