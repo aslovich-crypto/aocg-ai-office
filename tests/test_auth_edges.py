@@ -181,7 +181,7 @@ async def test_dedupe_cleanup_keeps_the_oldest_and_spares_other_orgs(client, db)
     ОГОВОРКА ЧЕСТНАЯ: группировка дублей эмулируется в FakePool вручную,
     поэтому тест доказывает логику ХЕНДЛЕРА (что удаляется всё, кроме
     самого раннего, и что счётчики сходятся), а не правильность GROUP BY
-    в SQL. Настоящий PostgreSQL — задача T15.
+    в SQL. Настоящий PostgreSQL — задача T36.
     """
     _чек(db, 1, org_id=1)
     _чек(db, 2, org_id=1)  # дубль первого
