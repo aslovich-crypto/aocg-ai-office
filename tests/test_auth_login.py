@@ -275,3 +275,28 @@ async def test_patch_me_touches_only_whitelisted_columns(client, я_сотруд
     assert я_сотрудник["role"] == "employee", "роль через /me не меняется"
     assert я_сотрудник["email"] == "ivan@example.com", "почта через /me не меняется"
     assert я_сотрудник.get("inn") != "000000000000", "ИНН через /me не меняется"
+
+
+@pytest.mark.asyncio
+async def test_get_me_returns_profile_without_secrets(client, db, я_сотрудник):
+    """Свой профиль: то, что нужно интерфейсу, и ничего лишнего.
+
+    Ручка отдаёт не строку таблицы, а собранный ответ (_me_payload),
+    поэтому проверяется и наличие нужных полей, и отсутствие секретов —
+    пустой словарь прошёл бы половину проверок.
+    """
+    db.consents.append(
+        dict(
+            id=1,
+            user_id=str(я_сотрудник["id"]),
+            consent_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            policy_version="1.0",
+        )
+    )
+    r = await client.get("/api/users/me")
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["id"] == я_сотрудник["id"] and d["email"] == "ivan@example.com"
+    assert d["role"] == "employee"
+    assert d["consent"]["policy_version"] == "1.0", "согласие 152-ФЗ подтягивается"
+    assert "password_hash" not in d and "email_verify_token" not in d
