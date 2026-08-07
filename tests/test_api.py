@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta
 
 
 from app.categories_seed import seed_default_categories
+from app.routers.consent import POLICY_VERSION
 
 
 # ─── GET /api/receipts/ ───────────────────────────────────────────────
@@ -2362,7 +2363,9 @@ async def test_post_consent_records_row(client, db):
     assert resp.status_code == 200
     body = resp.json()
     assert body["id"] > 0
-    assert body["policy_version"] == "1.0"
+    # S-34: версия берётся из ИСТОЧНИКА, а не литералом — иначе тест
+    # становится третьей копией того же значения и расходится с ним.
+    assert body["policy_version"] == POLICY_VERSION
     assert body["consent_at"] is not None
     # row landed in the store with the frozen text
     assert len(db.consents) == 1
@@ -2400,7 +2403,9 @@ async def test_get_consent_returns_latest(client, db):
     body = resp.json()
     # 'latest' = highest id, which the POST returned
     assert body["id"] == second.json()["id"]
-    assert body["policy_version"] == "1.0"
+    # S-34: версия берётся из ИСТОЧНИКА, а не литералом — иначе тест
+    # становится третьей копией того же значения и расходится с ним.
+    assert body["policy_version"] == POLICY_VERSION
 
 
 async def test_get_consent_isolates_users(client, db):

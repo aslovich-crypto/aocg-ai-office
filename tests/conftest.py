@@ -1008,9 +1008,13 @@ class FakePool:
                 return None
             latest = max(matches, key=lambda c: c["consent_at"])
             return dict(latest)
-        if q.startswith("SELECT consent_at, policy_version FROM user_consents"):
+        if q.startswith(
+            "SELECT consent_at, policy_version, consent_text FROM user_consents"
+        ):
             # S-31: профиль (_me_payload) ищет согласие по user_id ИЛИ email,
             # плюс легаси 'local_user' — три значения в IN.
+            # S-34: отдаём и ЗАМОРОЖЕННЫЙ ТЕКСТ записи — Настройки показывают
+            # то, на что человек соглашался, а не текущую редакцию.
             ключи = {str(args[0]), str(args[1]), "local_user"}
             matches = [c for c in self.consents if str(c["user_id"]) in ключи]
             if not matches:
@@ -1019,6 +1023,7 @@ class FakePool:
             return {
                 "consent_at": latest["consent_at"],
                 "policy_version": latest.get("policy_version"),
+                "consent_text": latest.get("consent_text"),
             }
         if q.startswith("SELECT * FROM users WHERE id=$1"):
             # Обслуживает ДВА запроса: `PATCH /me` перечитывает свою строку,

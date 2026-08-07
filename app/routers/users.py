@@ -55,8 +55,11 @@ async def _me_payload(p, u: dict) -> dict:
     # на JWT выполнить миграцию:
     #   SELECT consent → match by email → UPDATE user_id → DELETE legacy.
     # 152-ФЗ требует чёткой привязки согласия к user_id.
+    # S-34: тянем и САМ ТЕКСТ. Настройки показывали текущую редакцию под
+    # старую запись — то есть снова «не то, на что соглашались». Запись
+    # обязана воспроизводиться дословно, для этого текст и заморожен.
     consent_row = await p.fetchrow(
-        """SELECT consent_at, policy_version FROM user_consents
+        """SELECT consent_at, policy_version, consent_text FROM user_consents
            WHERE user_id IN ($1, $2, 'local_user')
            ORDER BY consent_at DESC LIMIT 1""",
         str(u["id"]),
@@ -69,6 +72,7 @@ async def _me_payload(p, u: dict) -> dict:
             if consent_row["consent_at"]
             else None,
             "policy_version": consent_row["policy_version"],
+            "text": consent_row["consent_text"],
         }
     return {
         "id": u["id"],
