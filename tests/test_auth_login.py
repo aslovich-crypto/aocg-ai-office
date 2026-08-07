@@ -300,3 +300,35 @@ async def test_get_me_returns_profile_without_secrets(client, db, я_сотру�
     assert d["role"] == "employee"
     assert d["consent"]["policy_version"] == "1.0", "согласие 152-ФЗ подтягивается"
     assert "password_hash" not in d and "email_verify_token" not in d
+
+
+@pytest.mark.asyncio
+async def test_login_rate_limit_cuts_off_the_eleventh(client, сотрудник):
+    """Ограничитель частоты входа: 10 в минуту с одного адреса.
+
+    СЧЁТЧИК ИЗОЛИРУЕТСЯ, а не обходится: slowapi держит его в памяти
+    процесса и умеет `reset()`, поэтому тест включает ограничитель,
+    обнуляет счётчик до и после — и порядок тестов перестаёт что-либо
+    значить. Именно из-за общего счётчика в остальных тестах модуля
+    ограничитель выключен (см. шапку).
+
+    Логин берётся НЕСУЩЕСТВУЮЩИЙ: у живого аккаунта пятая неудача даёт
+    свой 429 (блокировка), и два разных 429 стали бы неразличимы —
+    тест доказывал бы не то.
+    """
+    auth_router.limiter.enabled = True
+    auth_router.limiter.reset()
+    try:
+        коды = [
+            (await _вход(client, "мимо", логин="nikogo@example.com")).status_code
+            for _ in range(11)
+        ]
+    finally:
+        auth_router.limiter.reset()
+        auth_router.limiter.enabled = False
+
+    assert коды[:10] == [401] * 10, f"первые десять попыток должны доходить: {коды}"
+    assert коды[10] == 429, f"одиннадцатую обязан срезать ограничитель: {коды}"
+    assert сотрудник["failed_attempts"] == 0, (
+        "перебор чужого логина не должен трогать счётчик живого аккаунта"
+    )

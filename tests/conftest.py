@@ -228,6 +228,31 @@ class FakePool:
                 [c for c in self.cards if c.get("org_id") == args[0]],
                 key=lambda c: c["id"],
             )
+        if q.startswith(
+            "SELECT MIN(id) AS keep_id, date, amount, org, COUNT(*) AS cnt"
+        ):
+            # S-31: группировка дублей для dedupe-cleanup. АГРЕГАТ ЭМУЛИРУЕТСЯ
+            # ВРУЧНУЮ — тест на этой ветке доказывает логику ХЕНДЛЕРА (цикл,
+            # счётчики, org-scope в удалении), а не то, что GROUP BY в SQL
+            # написан верно. Настоящий PostgreSQL — задача T15.
+            свой = "org_id=$1" in q
+            группы = {}
+            for r in self.receipts:
+                if свой and r.get("org_id") != args[0]:
+                    continue
+                ключ = (r["date"], r["amount"], r["org"])
+                группы.setdefault(ключ, []).append(r["id"])
+            return [
+                {
+                    "keep_id": min(ids),
+                    "date": k[0],
+                    "amount": k[1],
+                    "org": k[2],
+                    "cnt": len(ids),
+                }
+                for k, ids in группы.items()
+                if len(ids) > 1
+            ]
         if q.startswith("SELECT * FROM invite_links"):
             # S-31: список приглашений. ФИЛЬТРЫ БЕРУТСЯ ИЗ ТЕКСТА ЗАПРОСА,
             # а не зашиты: зашитый org-scope сделал бы тест «не вижу чужие
@@ -792,6 +817,12 @@ class FakePool:
                 ),
                 None,
             )
+        if q.startswith("SELECT * FROM users WHERE email_verify_token=$1"):
+            # S-31: подтверждение почты по ссылке из письма.
+            return next(
+                (dict(u) for u in self.users if u.get("email_verify_token") == args[0]),
+                None,
+            )
         if q.startswith("SELECT * FROM users WHERE lower(email)=lower($1) OR phone=$1"):
             # login: вход по email ИЛИ телефону одним параметром.
             ident = args[0]
@@ -918,19 +949,13 @@ class FakePool:
             or "INSERT INTO cards (name) SELECT" in q
         ):
             return "OK"
-        if q.startswith("DELETE FROM receipts WHERE date=$1"):
-            d, a, o, keep = args
-            self.receipts = [
-                r
-                for r in self.receipts
-                if not (
-                    r["date"] == d
-                    and r["amount"] == a
-                    and r["org"] == o
-                    and r["id"] != keep
-                )
-            ]
-            return "DELETE"
+        # ЗДЕСЬ БЫЛА МЁРТВАЯ ВЕТКА «DELETE FROM receipts WHERE date=$1»:
+        # она распаковывала ЧЕТЫРЕ аргумента, а роутер давно шлёт ПЯТЬ
+        # (в запрос добавили org_id) — то есть при первом же выполнении она
+        # упала бы с ValueError. Не падала ровно потому, что ручка чистки
+        # дублей ни разу не выполнялась в тестах: замер покрытия показывал
+        # у неё «только 403». Рабочая ветка — ниже, рядом с остальными
+        # запросами чистки, и org-scope в ней берётся из текста запроса.
         if q.startswith(
             "DELETE FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3"
         ):
@@ -1015,6 +1040,21 @@ class FakePool:
                 if i["token"] == args[0] and (not свой or i.get("org_id") == args[1]):
                     i["is_active"] = False
             return "UPDATE 1"
+        if q.startswith("DELETE FROM receipts WHERE date=$1 AND amount=$2 AND org=$3"):
+            # S-31: чистка дублей — оставляем keep_id. org-scope из текста.
+            свой = "AND org_id=$4" in q
+            self.receipts = [
+                r
+                for r in self.receipts
+                if not (
+                    r["date"] == args[0]
+                    and r["amount"] == args[1]
+                    and r["org"] == args[2]
+                    and (not свой or r.get("org_id") == args[3])
+                    and r["id"] != args[4]
+                )
+            ]
+            return "DELETE"
         if q.startswith("INSERT INTO revoked_tokens (token_hash, expires_at)"):
             self.revoked_tokens.append(dict(token_hash=args[0], expires_at=args[1]))
             return "INSERT"
@@ -1031,6 +1071,14 @@ class FakePool:
                     u["failed_attempts"] = 0
                     u["locked_until"] = None
                     u["last_login_at"] = datetime.now(timezone.utc)
+            return "UPDATE 1"
+        if q.startswith(
+            "UPDATE users SET is_email_verified=true, email_verify_token=NULL"
+        ):
+            for u in self.users:
+                if u["id"] == args[0]:
+                    u["is_email_verified"] = True
+                    u["email_verify_token"] = None
             return "UPDATE 1"
         if q.startswith("UPDATE users SET password_hash=$1 WHERE id=$2"):
             for u in self.users:
