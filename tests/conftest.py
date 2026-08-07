@@ -89,6 +89,10 @@ class FakePool:
         self.category_groups = []  # Фикс №1 фаза A: справочник категорий (per-org)
         self.categories = []
         self.organizations = []  # Задача #1: профиль организации
+        # S-29: мутации users до 07.08.2026 не покрывались тестами вовсе,
+        # поэтому и таблицы здесь не было. Ветки ниже зеркалят SQL роутера.
+        self.users = []
+        self._uid = 0
         self._rid = self._repid = self._cid = self._consid = 0
         self._gid = self._catid = 0
 
@@ -672,6 +676,47 @@ class FakePool:
                     r["status"] = args[0]
                     return dict(r)
             return None
+        if q.startswith("SELECT id FROM cards WHERE id=$1 AND org_id=$2"):
+            # PATCH /api/cards/{id}/default сначала убеждается, что карта своя.
+            return next(
+                (
+                    {"id": c["id"]}
+                    for c in self.cards
+                    if c["id"] == args[0] and c.get("org_id") == args[1]
+                ),
+                None,
+            )
+        if q.startswith("INSERT INTO users"):
+            # S-29: POST /api/users/ — только admin, но FakePool про роли не знает,
+            # его дело — повторить SQL. Гейт проверяется тестами через 403.
+            self._uid += 1
+            row = dict(
+                id=self._uid,
+                first_name=args[0],
+                last_name=args[1],
+                patronymic=args[2],
+                email=args[3],
+                role=args[4],
+                org_id=args[5],
+                is_active=True,
+                password_hash=None,
+            )
+            self.users.append(row)
+            return dict(row)
+        if q.startswith("UPDATE users SET") and "RETURNING *" in q:
+            # Набор колонок динамический (UPDATABLE), значения идут по порядку,
+            # последними — id и org_id.
+            cols = [
+                c.strip().split(" = ")[0]
+                for c in q.split("SET ", 1)[1].split(" WHERE ")[0].split(",")
+            ]
+            uid, org = args[-2], args[-1]
+            for u in self.users:
+                if u["id"] == uid and u.get("org_id") == org:
+                    for i, c in enumerate(cols):
+                        u[c] = args[i]
+                    return dict(u)
+            return None
         if q.startswith("INSERT INTO cards"):
             self._cid += 1
             row = dict(
@@ -797,6 +842,16 @@ class FakePool:
                 }
             )
             return "INSERT"
+        if q.startswith("UPDATE users SET is_active = false"):
+            for u in self.users:
+                if u["id"] == args[0] and u.get("org_id") == args[1]:
+                    u["is_active"] = False
+            return "UPDATE 1"
+        if q.startswith("UPDATE cards SET is_default = (id = $1)"):
+            for c in self.cards:
+                if c.get("org_id") == args[1]:
+                    c["is_default"] = c["id"] == args[0]
+            return "UPDATE 1"
         if q.startswith("DELETE FROM cards WHERE id=$1"):
             self.cards = [c for c in self.cards if c["id"] != args[0]]
             return "DELETE"
@@ -916,6 +971,7 @@ class _Txn:
     # этого не делал — тесты на rollback были слепы (S-15). Снимаем снапшот
     # состояния на входе и восстанавливаем на выходе, если поднялось исключение.
     _LISTS = (
+        "users",
         "receipts",
         "receipt_items",
         "reports",
@@ -925,7 +981,7 @@ class _Txn:
         "category_groups",
         "categories",
     )
-    _COUNTERS = ("_rid", "_repid", "_cid", "_consid", "_gid", "_catid")
+    _COUNTERS = ("_rid", "_repid", "_cid", "_consid", "_gid", "_catid", "_uid")
 
     def __init__(self, pool):
         self.pool = pool
@@ -975,6 +1031,20 @@ def seeded(db):
         )
     )
     db._rid = 1
+    db.users.append(
+        dict(
+            id=2,
+            first_name="Иван",
+            last_name="Петров",
+            patronymic=None,
+            email="ivan@example.com",
+            role="employee",
+            org_id=1,
+            is_active=True,
+            password_hash=None,
+        )
+    )
+    db._uid = 2
     db.cards.append(dict(id=1, name="Корп.карта", org_id=1, created_at=now))
     db._cid = 1
     db.reports.append(

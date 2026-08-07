@@ -112,18 +112,37 @@ def test_fakepool_branch_coverage(method, minimum):
     )
 
 
+def _branches(method):
+    """Ветки метода как [(строка, [литералы условия])] в порядке появления."""
+    out = {}
+    for line, _kind, pat in BRANCHES[method]:
+        out.setdefault(line, []).append(pat)
+    return sorted(out.items())
+
+
 @pytest.mark.parametrize("method", sorted(_branches_by_method()))
 def test_fakepool_no_branch_interception(method):
-    """Источник 1: ранний шаблон не покрывает поздний."""
-    pats = BRANCHES[method]
+    """Источник 1: ранняя ветка не покрывает позднюю.
+
+    СРАВНИВАЕМ ВЕТКУ ЦЕЛИКОМ, А НЕ ЛИТЕРАЛЫ ПООДИНОЧКЕ. Ветка A перехватывает
+    ветку B, если КАЖДЫЙ литерал условия A входит в какой-то литерал B — тогда
+    A истинна всегда, когда истинна B. Литерал-в-литерал давал ложную тревогу
+    на составных условиях: `startswith("INSERT INTO categories") and
+    "RETURNING" in q` объявлял мёртвой более позднюю ветку с «RETURNING *»,
+    хотя INSERT и UPDATE не совпадут никогда. Поймано 07.08.2026 на первой же
+    настоящей правке FakePool — сторож сработал, но не на том.
+    """
+    br = _branches(method)
     problems = []
-    for i, (line_a, kind_a, pat_a) in enumerate(pats):
-        for line_b, kind_b, pat_b in pats[i + 1 :]:
-            if pat_a != pat_b and pat_a in pat_b:
+    for i, (line_a, lits_a) in enumerate(br):
+        for line_b, lits_b in br[i + 1 :]:
+            if set(lits_a) == set(lits_b):
+                continue
+            if all(any(a in b for b in lits_b) for a in lits_a):
                 problems.append(
                     f"\n  строка {line_a} перехватывает строку {line_b}:"
-                    f"\n    ранняя  ({kind_a}): «{pat_a}»"
-                    f"\n    поздняя ({kind_b}): «{pat_b}»"
+                    f"\n    ранняя:  {' + '.join('«' + a + '»' for a in lits_a)}"
+                    f"\n    поздняя: {' + '.join('«' + b + '»' for b in lits_b)}"
                 )
     assert not problems, (
         f"FakePool.{method}: более общая ветка стоит выше специфичной, "

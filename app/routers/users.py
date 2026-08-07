@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.auth import get_current_user, hash_password, verify_password
+from app.routers.auth import _require_admin
 from app.database import get_pool
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -152,7 +153,10 @@ async def change_password(body: PasswordChange, user: dict = Depends(get_current
 
 @router.post("/")
 async def create_user(u: UserCreate, user: dict = Depends(get_current_user)):
-    """Add an employee directly into the caller's organization."""
+    """Add an employee directly into the caller's organization (ТОЛЬКО admin)."""
+    # S-29: создание пользователя = выдача доступа к данным организации, и роль
+    # приходит ИЗ ТЕЛА запроса — без гейта любой сотрудник заводил себе админа.
+    _require_admin(user)
     p = await get_pool()
     row = await p.fetchrow(
         """INSERT INTO users (first_name, last_name, patronymic, email, role, org_id)
@@ -169,6 +173,10 @@ async def create_user(u: UserCreate, user: dict = Depends(get_current_user)):
 
 @router.patch("/{id}")
 async def update_user(id: int, u: UserUpdate, user: dict = Depends(get_current_user)):
+    # S-29: правит ФИО, email, ИНН, регион и табельный номер КОЛЛЕГИ — это
+    # чужие персональные данные, а не собственный профиль (для себя есть
+    # PATCH /me без гейта).
+    _require_admin(user)
     fields = {
         k: v for k, v in u.model_dump(exclude_unset=True).items() if k in UPDATABLE
     }
@@ -190,7 +198,12 @@ async def update_user(id: int, u: UserUpdate, user: dict = Depends(get_current_u
 
 @router.delete("/{id}")
 async def deactivate_user(id: int, user: dict = Depends(get_current_user)):
-    """Soft-delete within the caller's org: keep the row, flip is_active off."""
+    """Soft-delete within the caller's org: keep the row, flip is_active off.
+
+    ТОЛЬКО admin (S-29): без гейта рядовой сотрудник отключал кого угодно,
+    включая администратора — то есть отбирал доступ у владельца.
+    """
+    _require_admin(user)
     p = await get_pool()
     await p.execute(
         "UPDATE users SET is_active = false WHERE id = $1 AND org_id=$2",
