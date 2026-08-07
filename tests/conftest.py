@@ -868,6 +868,21 @@ class FakePool:
                 return None
             latest = max(matches, key=lambda c: c["consent_at"])
             return dict(latest)
+        if q.startswith("SELECT consent_at, policy_version FROM user_consents"):
+            # S-31: профиль (_me_payload) ищет согласие по user_id ИЛИ email,
+            # плюс легаси 'local_user' — три значения в IN.
+            ключи = {str(args[0]), str(args[1]), "local_user"}
+            matches = [c for c in self.consents if str(c["user_id"]) in ключи]
+            if not matches:
+                return None
+            latest = max(matches, key=lambda c: c["consent_at"])
+            return {
+                "consent_at": latest["consent_at"],
+                "policy_version": latest.get("policy_version"),
+            }
+        if q.startswith("SELECT * FROM users WHERE id=$1"):
+            # S-31: PATCH /me перечитывает свою строку после UPDATE.
+            return next((dict(u) for u in self.users if u["id"] == args[0]), None)
         raise NotImplementedError(f"fetchrow: {q}")
 
     async def execute(self, query, *args):
@@ -1002,6 +1017,25 @@ class FakePool:
             for u in self.users:
                 if u["id"] == args[0] and u.get("org_id") == args[1]:
                     u["is_active"] = False
+            return "UPDATE 1"
+        # ВНИЗУ НАМЕРЕННО: шаблон общий («UPDATE users SET»), и выше него
+        # стоят все специфичные ветки users. Поставил её сначала выше —
+        # сторож T6 показал перехват строкой и строкой, за что и заведён.
+        if q.startswith("UPDATE users SET") and q.endswith(
+            "WHERE id = $" + str(len(args))
+        ):
+            # S-31: PATCH /me — набор колонок динамический, но СОБИРАЕТСЯ
+            # ИЗ БЕЛОГО СПИСКА в роутере. Ветка повторяет SQL как есть: если
+            # белый список расширят, сюда прилетит лишняя колонка и тест
+            # «роль через /me не меняется» покраснеет.
+            cols = [
+                c.strip().split(" = ")[0]
+                for c in q.split("SET ", 1)[1].split(" WHERE ")[0].split(",")
+            ]
+            for u in self.users:
+                if u["id"] == args[-1]:
+                    for i, c in enumerate(cols):
+                        u[c] = args[i]
             return "UPDATE 1"
         if q.startswith("UPDATE cards SET is_default = (id = $1)"):
             for c in self.cards:
