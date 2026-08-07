@@ -817,6 +817,49 @@ class FakePool:
                 ),
                 None,
             )
+        if q.startswith("SELECT * FROM users WHERE lower(email)=$1"):
+            # S-31: регистрация смотрит, занят ли email. Отличается от ветки
+            # register-by-invite («SELECT id …») тем, что нужна ВСЯ строка:
+            # аккаунт без пароля можно «подхватить», а не отвергнуть.
+            return next(
+                (
+                    dict(u)
+                    for u in self.users
+                    if (u.get("email") or "").lower() == args[0]
+                ),
+                None,
+            )
+        if q.startswith("INSERT INTO organizations (name, inn, type)"):
+            # S-31: регистрация создаёт организацию. owner_id проставляется
+            # отдельным UPDATE ниже — он в той же транзакции.
+            self._orgid = max([o["id"] for o in self.organizations] + [0]) + 1
+            self.organizations.append(
+                dict(
+                    id=self._orgid,
+                    name=args[0],
+                    inn=args[1],
+                    type=args[2],
+                    owner_id=None,
+                    created_at=datetime.now(timezone.utc),
+                    tax_system=None,
+                )
+            )
+            return {"id": self._orgid}
+        if q.startswith("UPDATE users SET password_hash=$1, phone=COALESCE($2, phone)"):
+            # S-31: «подхват» засеянного аккаунта без пароля — организация
+            # и данные остаются его, новая НЕ создаётся. Ветка стоит ВЫШЕ
+            # общей «UPDATE users SET … RETURNING *»: та разбирает колонки
+            # позиционно и ждёт (id, org_id) в хвосте, а здесь хвост — один id.
+            for u in self.users:
+                if u["id"] == args[6]:
+                    u["password_hash"] = args[0]
+                    u["phone"] = args[1] if args[1] is not None else u.get("phone")
+                    u["first_name"] = args[2] or u.get("first_name")
+                    u["last_name"] = args[3] or u.get("last_name")
+                    u["is_email_verified"] = args[4]
+                    u["email_verify_token"] = args[5]
+                    return dict(u)
+            return None
         if q.startswith("SELECT * FROM users WHERE email_verify_token=$1"):
             # S-31: подтверждение почты по ссылке из письма.
             return next(
@@ -835,6 +878,29 @@ class FakePool:
                 ),
                 None,
             )
+        if "VALUES ($1,$2,$3,$4,$5,'admin'" in q:
+            # S-31: РЕГИСТРАЦИЯ. Роль здесь ЛИТЕРАЛ 'admin' в SQL, поэтому
+            # аргументов восемь, а не девять, как у регистрации по ссылке.
+            # Ветки различаются именно этим: общий префикс колонок у них
+            # одинаковый, и одна молча разбирала бы аргументы другой
+            # (поймано первым же прогоном — IndexError).
+            self._uid += 1
+            row = dict(
+                id=self._uid,
+                first_name=args[0],
+                last_name=args[1],
+                email=args[2],
+                phone=args[3],
+                password_hash=args[4],
+                role="admin",
+                org_id=args[5],
+                is_email_verified=args[6],
+                email_verify_token=args[7],
+                patronymic=None,
+                is_active=True,
+            )
+            self.users.append(row)
+            return dict(row)
         if q.startswith("INSERT INTO users (first_name,last_name,email,phone"):
             # register-by-invite: роль и орг берутся ИЗ ПРИГЛАШЕНИЯ, не из тела —
             # это и проверяют тесты. Порядок колонок отличается от POST /api/users/
@@ -1055,6 +1121,12 @@ class FakePool:
                 )
             ]
             return "DELETE"
+        if q.startswith("UPDATE organizations SET owner_id=$1 WHERE id=$2"):
+            # S-31: владелец новой орг — тот, кто её зарегистрировал.
+            for o in self.organizations:
+                if o["id"] == args[1]:
+                    o["owner_id"] = args[0]
+            return "UPDATE 1"
         if q.startswith("INSERT INTO revoked_tokens (token_hash, expires_at)"):
             self.revoked_tokens.append(dict(token_hash=args[0], expires_at=args[1]))
             return "INSERT"
