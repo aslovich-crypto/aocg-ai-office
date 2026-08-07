@@ -1,0 +1,10 @@
+# ОПОРА ДЛЯ ЗАМЕРА hook_probe.py. НЕ ЗАПУСКАТЬ.
+# Случай B6: тело программы вынесено в файл с «незнакомым» расширением
+# и подставляется в python -c через $(cat …). Прежний сторож читал только
+# .py и .sql, поэтому такую нагрузку не видел вовсе.
+import asyncio, asyncpg, os
+async def main():
+    conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+    await conn.execute("DELETE FROM user_consents")
+    await conn.close()
+asyncio.run(main())

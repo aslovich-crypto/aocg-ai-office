@@ -1,33 +1,28 @@
 #!/usr/bin/env bash
-# PreToolUse(Bash) guard: блокирует ИСПОЛНЕНИЕ деструктивного SQL против боевой БД.
+# ТОНКАЯ ОБЁРТКА. Вся логика — в block_prod_db.py рядом.
 #
-# Гейт инспекции: если команда ничего не исполняет — нет интерпретатора
-# (python/psql/dropdb) и нет пайпа в sh|bash — это чистое чтение
-# (git show/diff/log/blame, grep, cat, head, tail, less), пропускаем, даже если
-# читаемый файл полон SQL. Иначе сканируем команду + содержимое запускаемых
-# .py/.sql и блокируем деструктив, если он подключён к проду
-# (railway / asyncpg / DATABASE_URL / psql / up.railway.app).
-set -euo pipefail
+# Почему обёртка вообще есть: регистрация хука в .claude/settings.json
+# указывает на ЭТОТ файл, и менять её ради смены языка не нужно. Заодно
+# здесь живёт правило «при невозможности проверить — ПРОПУСКАЕМ громко»:
+# сторож, падающий в «запрещено всё», снимают в тот же день (S-39).
+#
+# Почему логика уехала в python: решение принимается по РАЗБОРУ команды
+# с учётом кавычек (shlex), а bash+grep именно на кавычках и ошибался —
+# он не отличал `python` как команду от `python` внутри сообщения коммита.
+#
+# Имена переменных здесь только латиницей — bash не принимает кириллические
+# идентификаторы и молча оставляет переменную пустой; на этом 07.08.2026
+# сорвалась самопроверка замера (T26, случай 13).
+set -uo pipefail
 
-cmd=$(jq -r '.tool_input.command // ""')
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+root=$(cd "$here/../.." && pwd)
 
-# Гейт: есть ли в команде исполнитель кода/SQL? Нет → чистая инспекция → пропуск.
-# Ловит: python / python3 / psql / dropdb где угодно (вкл. `| python`, `| psql`,
-# `./venv/bin/python`), и пайп в шелл `| sh` / `| bash`.
-if ! printf '%s' "$cmd" | grep -iqE 'python[0-9]?|psql|dropdb|\|[[:space:]]*(sh|bash)\b'; then
-  exit 0
-fi
-
-# Команда что-то исполняет — собираем текст для проверки: сама команда +
-# содержимое запускаемых .py/.sql (SQL часто лежит внутри скрипта).
-scan="$cmd"
-for f in $(printf '%s' "$cmd" | grep -oE "[^[:space:]\"']+\.(py|sql)" | sort -u); do
-  [ -f "$f" ] && scan="$scan
-$(cat "$f" 2>/dev/null)"
+for candidate in "$root/venv/bin/python" "$(command -v python3 || true)" "$(command -v python || true)"; do
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    exec "$candidate" "$here/block_prod_db.py"
+  fi
 done
 
-if printf '%s' "$scan" | grep -iqE 'DROP[[:space:]]+(TABLE|INDEX|DATABASE)|DELETE[[:space:]]+FROM|TRUNCATE|dropdb' \
-   && printf '%s' "$scan" | grep -iqE 'railway|DATABASE_PUBLIC_URL|DATABASE_URL|asyncpg|psql|up\.railway\.app'; then
-  printf '%s' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Блокировано хук-защитой прод-БД: исполнение деструктивного SQL (DROP/DELETE/TRUNCATE) против боевой базы. Если миграция действительно нужна — выполни её осознанно, временно отключив этот хук."}}'
-fi
+echo "block-prod-db: интерпретатор не найден — ПРОПУСКАЮ, проверь команду глазами" >&2
 exit 0
