@@ -9,13 +9,19 @@ Status values: active | in_progress | not_connected | not_configured
 
 import os
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from app.auth import get_current_user
 
 router = APIRouter(prefix="/api/services", tags=["services"])
 
 
 @router.get("/")
-async def get_services():
+async def get_services(user: dict = Depends(get_current_user)):
+    # S-32: до 07.08.2026 ручка была единственной без проверки авторизации —
+    # любой прохожий видел состав интеграций и то, настроен ли ключ OCR.
+    # ПД тут нет, но наружу светило внутреннее состояние конфигурации.
+    # Роль не проверяется намеренно: вкладка «Сервисы» доступна всем своим.
     anthropic_ready = bool(os.getenv("ANTHROPIC_API_KEY"))
     return [
         {
