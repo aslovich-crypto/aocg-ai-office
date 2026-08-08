@@ -12,11 +12,16 @@ from pydantic import BaseModel
 from app.auth import can_delete_any, can_see_all, get_current_user
 from app.categorization import DEFAULT_FALLBACK, categorize
 from app.database import get_pool
+from app.sql_builder import собрать_set
 from app.parsers.fns_parser import parse_fns_response
 from app.parsers.items_parser import parse_fns_items, parse_ocr_items
 from app.parsers.ocr_parser import parse_ocr_response
 
 logger = logging.getLogger(__name__)
+
+# Что PATCH /receipts/{id} вправе менять. Имя колонки в SQL берётся ТОЛЬКО
+# отсюда: пользовательская строка идентификатором не станет (T38).
+ПОЛЯ_ЧЕКА = ("payment", "org", "category_id", "category_manual")
 
 router = APIRouter(prefix="/api/receipts", tags=["receipts"])
 
@@ -622,26 +627,24 @@ async def patch_receipt(
 ):
     p = await get_pool()
     org_id = user["org_id"]
-    fields, values = [], []
+    поля: dict = {}
     for k, v in [("payment", r.payment), ("org", r.org)]:
         if v is not None:
-            values.append(v)
-            fields.append(f"{k}=${len(values)}")
+            поля[k] = v
     # Ручная смена категории: строку category в колонку НЕ пишем (вариант B), только
     # резолвим category_id server-side (per-org, НЕ из тела — IDOR-защита) и ставим
     # category_manual=TRUE — будущий батч-пересчёт (Фикс №4) такой чек не тронет.
     # Триггер — любой непустой r.category в патче (явный выбор имени фронтом).
     if r.category:
-        values.append(await resolve_category_id(p, org_id, r.category))
-        fields.append(f"category_id=${len(values)}")
-        values.append(True)
-        fields.append(f"category_manual=${len(values)}")
-    if not fields:
+        поля["category_id"] = await resolve_category_id(p, org_id, r.category)
+        поля["category_manual"] = True
+    if not поля:
         # Нечего менять — отдаём чек в той же канонической форме, что и GET.
         row = await _fetch_receipt(p, id, user)
         if not row:
             raise HTTPException(status_code=404, detail="Not found")
         return dict(row)
+    sets, values = собрать_set(поля, ПОЛЯ_ЧЕКА)
     values.append(id)
     values.append(user["org_id"])
     where = f"WHERE id=${len(values) - 1} AND org_id=${len(values)}"
@@ -650,7 +653,7 @@ async def patch_receipt(
         values.append(user["id"])
         where += f" AND user_id=${len(values)}"
     row = await p.fetchrow(
-        f"UPDATE receipts SET {', '.join(fields)} {where} RETURNING *",
+        f"UPDATE receipts SET {sets} {where} RETURNING *",
         *values,
     )
     if not row:

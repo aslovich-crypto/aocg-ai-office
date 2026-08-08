@@ -6,8 +6,13 @@ from pydantic import BaseModel
 from app.auth import Role, get_current_user, hash_password, verify_password
 from app.routers.auth import _require_admin
 from app.database import get_pool
+from app.sql_builder import собрать_set
 
 router = APIRouter(prefix="/api/users", tags=["users"])
+
+# Что человек правит В СВОЁМ профиле (PATCH /me). Отдельно от UPDATABLE:
+# у себя можно менять телефон и табельный, но не ИНН и не роль.
+СВОЙ_ПРОФИЛЬ = ("first_name", "last_name", "phone", "employee_number")
 
 # Columns the admin PATCH /{id} (employee management) may touch.
 UPDATABLE = (
@@ -146,17 +151,14 @@ async def get_me(user: dict = Depends(get_current_user)):
 async def update_me(u: MeUpdate, user: dict = Depends(get_current_user)):
     """Self-service profile edit. Only first_name/last_name/phone/employee_number."""
     fields = {
-        k: v
-        for k, v in u.model_dump(exclude_unset=True).items()
-        if k in ("first_name", "last_name", "phone", "employee_number")
+        k: v for k, v in u.model_dump(exclude_unset=True).items() if k in СВОЙ_ПРОФИЛЬ
     }
     p = await get_pool()
     if fields:
-        cols = list(fields.keys())
-        sets = ", ".join(f"{c} = ${i + 1}" for i, c in enumerate(cols))
+        sets, values = собрать_set(fields, СВОЙ_ПРОФИЛЬ)
         await p.execute(
-            f"UPDATE users SET {sets} WHERE id = ${len(cols) + 1}",
-            *[fields[c] for c in cols],
+            f"UPDATE users SET {sets} WHERE id = ${len(values) + 1}",
+            *values,
             user["id"],
         )
     fresh = await p.fetchrow("SELECT * FROM users WHERE id=$1", user["id"])
@@ -211,12 +213,12 @@ async def update_user(id: int, u: UserUpdate, user: dict = Depends(get_current_u
     }
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
-    cols = list(fields.keys())
-    sets = ", ".join(f"{c} = ${i + 1}" for i, c in enumerate(cols))
+    sets, values = собрать_set(fields, UPDATABLE)
     p = await get_pool()
     row = await p.fetchrow(
-        f"UPDATE users SET {sets} WHERE id = ${len(cols) + 1} AND org_id = ${len(cols) + 2} RETURNING *",
-        *[fields[c] for c in cols],
+        f"UPDATE users SET {sets} WHERE id = ${len(values) + 1} "
+        f"AND org_id = ${len(values) + 2} RETURNING *",
+        *values,
         id,
         user["org_id"],
     )

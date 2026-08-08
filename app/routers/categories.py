@@ -20,8 +20,12 @@ from pydantic import BaseModel
 from app.auth import get_current_user
 from app.categories_seed import TAX_KINDS
 from app.database import get_pool
+from app.sql_builder import собрать_set
 
 router = APIRouter(prefix="/api/categories", tags=["categories"])
+
+# Что PATCH категории вправе менять. Имя колонки в SQL — только отсюда (T38).
+ПОЛЯ_КАТЕГОРИИ = ("name", "tax_kind")
 
 # Дефолтный вид расхода при создании статьи без явного tax_kind (Q4).
 DEFAULT_TAX_KIND = "Прочие расходы"
@@ -170,12 +174,12 @@ async def update_category(
         fields["tax_kind"] = c.tax_kind
     if not fields:
         raise HTTPException(status_code=400, detail="Нет полей для изменения")
-    cols = list(fields.keys())
-    sets = ", ".join(f"{col}=${i + 1}" for i, col in enumerate(cols))
+    sets, values = собрать_set(fields, ПОЛЯ_КАТЕГОРИИ)
     try:
         row = await p.fetchrow(
-            f"UPDATE categories SET {sets} WHERE id=${len(cols) + 1} AND org_id=${len(cols) + 2} RETURNING *",
-            *[fields[col] for col in cols],
+            f"UPDATE categories SET {sets} WHERE id=${len(values) + 1} "
+            f"AND org_id=${len(values) + 2} RETURNING *",
+            *values,
             id,
             user["org_id"],
         )
