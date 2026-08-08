@@ -22,6 +22,36 @@ async def get_pool():
     return pool
 
 
+async def _засеять_первого_администратора(conn) -> None:
+    """Первый администратор на ПУСТОЙ базе — из окружения, не из исходника (S-23).
+
+    Раньше ФИО и почта живого человека стояли строкой в DDL внутри `init_db()`,
+    то есть персональные данные лежали в репозитории и уезжали в каждую его
+    копию — включая форки, архивы и чужие машины. Здесь их нет: имена берутся
+    из переменных окружения и подставляются ПАРАМЕТРАМИ.
+
+    Переменных нет — засев ПРОПУСКАЕТСЯ, и это осознанный выбор. Придумывать
+    администратора «по умолчанию» хуже пустой базы: учётная запись с чужим или
+    выдуманным адресом выглядит настоящей и переживает не одну миграцию.
+    На рабочей базе строка давно есть, поэтому пропуск ничего не меняет;
+    на новой — администратор заводится штатной регистрацией.
+    """
+    почта = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "").strip()
+    if not почта:
+        return
+    await conn.execute(
+        """
+        INSERT INTO users (first_name, last_name, patronymic, email, role)
+        SELECT $1, $2, $3, $4, 'admin'
+        WHERE NOT EXISTS (SELECT 1 FROM users)
+        """,
+        os.getenv("BOOTSTRAP_ADMIN_FIRST_NAME", "").strip() or None,
+        os.getenv("BOOTSTRAP_ADMIN_LAST_NAME", "").strip() or None,
+        os.getenv("BOOTSTRAP_ADMIN_PATRONYMIC", "").strip() or None,
+        почта,
+    )
+
+
 async def init_db():
     p = await get_pool()
     async with p.acquire() as conn:
@@ -106,9 +136,10 @@ async def init_db():
                 is_active     BOOLEAN DEFAULT true,
                 created_at    TIMESTAMPTZ DEFAULT NOW()
             );
-            INSERT INTO users (first_name, last_name, patronymic, email, role)
-            SELECT 'Алексей', 'Шукалович', 'Иванович', 'a.slovich@gmail.com', 'admin'
-            WHERE NOT EXISTS (SELECT 1 FROM users);
+            -- Первый администратор здесь БОЛЬШЕ НЕ ЗАСЕВАЕТСЯ (S-23): его ФИО
+            -- и почта были вписаны в исходник прямо в этот INSERT. Засев уехал
+            -- в _засеять_первого_администратора() ниже — читает окружение
+            -- и работает параметризованным запросом.
 
             -- ─── AUTH & ORGANIZATIONS (feat/auth-system) ───
             CREATE TABLE IF NOT EXISTS organizations (
@@ -311,6 +342,8 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_categories_org_id      ON categories(org_id);
             CREATE INDEX IF NOT EXISTS idx_category_groups_org_id ON category_groups(org_id);
         """)
+
+        await _засеять_первого_администратора(conn)
 
         # ── Фикс №1 фаза A: seed дефолтных категорий + бэкфилл category_id ──
         # DDL выше идемпотентен; seed/бэкфилл — на Python (нужны id созданных групп).
