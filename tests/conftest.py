@@ -1171,6 +1171,40 @@ class FakePool:
         if q.startswith("INSERT INTO revoked_tokens (token_hash, expires_at)"):
             self.revoked_tokens.append(dict(token_hash=args[0], expires_at=args[1]))
             return "INSERT"
+        # S-16: чистка просроченных отзывов. Двойник УДАЛЯЕТ ПО-НАСТОЯЩЕМУ,
+        # а не отвечает «ок»: иначе тест «после чистки список короче» прошёл бы
+        # и при неработающем DELETE — ровно тот класс, из-за которого заведён
+        # T35 (двойник позволительнее продакшена).
+        if q.startswith("DELETE FROM revoked_tokens WHERE expires_at <"):
+            было = len(self.revoked_tokens)
+            сейчас = datetime.now(timezone.utc)
+
+            def _жив(t):
+                срок = t.get("expires_at")
+                if срок is None:
+                    return True
+                # Наивную дату приводим к UTC: настоящий PostgreSQL хранит
+                # TIMESTAMPTZ и сравнивает всегда, а падение двойника
+                # по TypeError было бы поломкой теста, а не находкой.
+                if срок.tzinfo is None:
+                    срок = срок.replace(tzinfo=timezone.utc)
+                return срок >= сейчас
+
+            self.revoked_tokens = [t for t in self.revoked_tokens if _жив(t)]
+            return f"DELETE {было - len(self.revoked_tokens)}"
+        # S-16: смена пароля ставит отметку отзыва тем же запросом.
+        if q.startswith("UPDATE users SET password_hash=$1, tokens_valid_from=$2"):
+            for u in self.users:
+                if u["id"] == args[2]:
+                    u["password_hash"] = args[0]
+                    u["tokens_valid_from"] = args[1]
+            return "UPDATE 1"
+        # S-16: «выйти на всех устройствах».
+        if q.startswith("UPDATE users SET tokens_valid_from=$1 WHERE id=$2"):
+            for u in self.users:
+                if u["id"] == args[1]:
+                    u["tokens_valid_from"] = args[0]
+            return "UPDATE 1"
         # ── S-31: счётчик неудачных попыток входа ───────────────────────────
         if q.startswith("UPDATE users SET failed_attempts=$1, locked_until=$2"):
             for u in self.users:

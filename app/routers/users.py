@@ -1,9 +1,17 @@
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.auth import Role, get_current_user, hash_password, verify_password
+from app.auth import (
+    Role,
+    create_access_token,
+    create_refresh_token,
+    get_current_user,
+    hash_password,
+    verify_password,
+)
 from app.routers.auth import _require_admin
 from app.database import get_pool
 from app.sql_builder import собрать_set
@@ -174,12 +182,30 @@ async def change_password(body: PasswordChange, user: dict = Depends(get_current
             status_code=400, detail="Новый пароль должен быть не менее 8 символов"
         )
     p = await get_pool()
+    # СМЕНА ПАРОЛЯ ГАСИТ ВСЕ ПРЕЖНИЕ ТОКЕНЫ (S-16). До 10.08.2026 здесь
+    # обновлялся только хеш, и это была дыра ровно в том случае, ради
+    # которого пароль и меняют: «зашли из чужого места» — а у зашедшего
+    # access жил ещё час, refresh — тридцать дней, и в чёрный список
+    # не попадал никогда.
+    #
+    # Момент берём из ПРИЛОЖЕНИЯ, а не `NOW()` базы, и ставим ДО выдачи
+    # новых токенов: подпись делают часы приложения, и при расхождении
+    # часов свежий токен оказался бы «старше» отметки и отвергался сразу.
+    момент = datetime.now(timezone.utc)
     await p.execute(
-        "UPDATE users SET password_hash=$1 WHERE id=$2",
+        "UPDATE users SET password_hash=$1, tokens_valid_from=$2 WHERE id=$3",
         hash_password(body.new_password),
+        момент,
         user["id"],
     )
-    return {"ok": True}
+    # Вызывающему сразу отдаём НОВУЮ пару: иначе человек, сменивший пароль,
+    # вылетал бы из системы в тот же миг. Фронт, который их не сохранит,
+    # просто попросит войти заново — направление безопасное.
+    return {
+        "ok": True,
+        "access_token": create_access_token(user["id"]),
+        "refresh_token": create_refresh_token(user["id"]),
+    }
 
 
 @router.post("/")

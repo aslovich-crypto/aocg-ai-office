@@ -163,6 +163,15 @@ async def init_db():
             ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS employee_number VARCHAR(20);
+            -- Отзыв токенов без чёрного списка (S-16): токен, выданный РАНЬШЕ
+            -- этой отметки, недействителен. Ставится при смене пароля и по
+            -- «выйти на всех устройствах». Проверка живёт в get_current_user
+            -- и не стоит лишнего запроса — строка пользователя и так читается
+            -- на каждом вызове API.
+            -- NULL = «никого не выгоняли»; это состояние по умолчанию после
+            -- выкатки, иначе разлогинило бы всех разом без нужды.
+            -- Откат: ALTER TABLE users DROP COLUMN tokens_valid_from;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS tokens_valid_from TIMESTAMPTZ;
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS org_id INTEGER;
             ALTER TABLE reports  ADD COLUMN IF NOT EXISTS org_id INTEGER;
             ALTER TABLE cards    ADD COLUMN IF NOT EXISTS org_id INTEGER;

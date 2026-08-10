@@ -91,13 +91,41 @@ def create_refresh_token(user_id: int) -> str:
 
 
 def verify_token(token: str, expected_type: str = "access") -> Optional[int]:
+    """Идентификатор владельца токена или None. Обёртка над разбором ниже —
+    оставлена, потому что на неё смотрят вызывающие, которым время выдачи
+    не нужно."""
+    разобранный = разобрать_токен(token, expected_type)
+    return разобранный[0] if разобранный else None
+
+
+def разобрать_токен(
+    token: str, expected_type: str = "access"
+) -> Optional[tuple[int, Optional[datetime]]]:
+    """(идентификатор, время выдачи) — время нужно для отзыва (S-16).
+
+    Отзыв у нас сделан не чёрным списком, а отметкой `users.tokens_valid_from`:
+    токен, выданный ДО отметки, недействителен. Поэтому здесь возвращается
+    ещё и `iat`, а не только `sub`.
+
+    `iat` в токенах есть с самого начала (`_create_token`), но у выданных
+    ранее он может отсутствовать — в этом случае возвращаем None, и решение
+    «что делать со старым токеном» принимает вызывающий, а не разбор.
+    """
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         if payload.get("type") != expected_type:
             return None
         sub = payload.get("sub")
-        return int(sub) if sub is not None else None
-    except (JWTError, ValueError):
+        if sub is None:
+            return None
+        iat = payload.get("iat")
+        выдан = (
+            datetime.fromtimestamp(iat, tz=timezone.utc)
+            if isinstance(iat, (int, float))
+            else None
+        )
+        return int(sub), выдан
+    except (JWTError, ValueError, OSError, OverflowError):
         return None
 
 
@@ -110,13 +138,45 @@ async def get_current_user(token: Optional[str] = Depends(oauth2_scheme)) -> dic
     )
     if not token:
         raise cred_exc
-    user_id = verify_token(token, "access")
-    if user_id is None:
+    разобранный = разобрать_токен(token, "access")
+    if разобранный is None:
         raise cred_exc
+    user_id, выдан = разобранный
     p = await get_pool()
     row = await p.fetchrow(
         "SELECT * FROM users WHERE id=$1 AND is_active=true", user_id
     )
     if not row:
         raise cred_exc
+
+    # ОТЗЫВ ТОКЕНОВ БЕЗ ЧЁРНОГО СПИСКА (S-16). Отметка `tokens_valid_from`
+    # приезжает в ТОЙ ЖЕ строке, которую мы и так читаем на каждом запросе,
+    # поэтому проверка не стоит ни одного дополнительного обращения к базе.
+    # Чёрный список стоил бы второго запроса на КАЖДЫЙ вызов API плюс роста
+    # таблицы и чистки — при том, что гасить по одному токену нам нужно
+    # только refresh (это уже умеет `revoked_tokens`).
+    #
+    # Что гасится отметкой: все токены пользователя разом — при смене пароля
+    # и по «выйти на всех устройствах».
+    #
+    # NULL = «никого не выгоняли», и это состояние ПО УМОЛЧАНИЮ после
+    # выкатки: ставить отметку всем сразу значило бы разлогинить всех
+    # без нужды. Защита начинает действовать с первого отзыва.
+    отметка = row["tokens_valid_from"] if "tokens_valid_from" in row else None
+    if отметка is not None:
+        # СЕКУНДЫ, А НЕ МИКРОСЕКУНДЫ. `iat` в JWT — целое число секунд
+        # (так устроен стандарт), а отметка приходит из базы с микросекундами.
+        # Без округления токен, выданный В ТУ ЖЕ СЕКУНДУ, что и отзыв,
+        # оказывался бы «старше» отметки и умирал сразу после выдачи —
+        # поймано тестом «токен, выданный после отзыва, работает», который
+        # падал на свежей паре из смены пароля.
+        # Цена округления: токен, выданный в ту же секунду ДО отзыва, ещё
+        # секунду проживёт. Для «выйти везде» это ничто, а альтернатива —
+        # мёртвые токены сразу после выдачи.
+        отметка = отметка.replace(microsecond=0)
+        # Токен без `iat` (выдан до появления поля) при действующей отметке
+        # доверия не заслуживает: доказать, что он новее отзыва, нечем.
+        if выдан is None or выдан < отметка:
+            raise cred_exc
+
     return dict(row)
