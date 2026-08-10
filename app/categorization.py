@@ -11,7 +11,11 @@ TRIGGERS: {имя статьи: [подстроки-триггеры]}. Поря
 
 from typing import Optional
 
-DEFAULT_FALLBACK = "Прочие хозрасходы"
+# Фолбэк переехал в ЕДИНЫЙ ИСТОЧНИК словаря (T39): по этому имени ветвится ещё
+# и фронт (`src/App.jsx`), то есть это межъязыковой контракт, а не локальная
+# константа. Ре-экспорт намеренный — на `DEFAULT_FALLBACK` отсюда уже ссылаются
+# тесты и `app/routers/receipts.py`.
+from app.dictionaries import DEFAULT_FALLBACK
 
 TRIGGERS = {
     # === Группа 1: Материалы и расходники ===

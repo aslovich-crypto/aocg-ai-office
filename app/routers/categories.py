@@ -28,7 +28,9 @@ router = APIRouter(prefix="/api/categories", tags=["categories"])
 ПОЛЯ_КАТЕГОРИИ = ("name", "tax_kind")
 
 # Дефолтный вид расхода при создании статьи без явного tax_kind (Q4).
-DEFAULT_TAX_KIND = "Прочие расходы"
+# Вид по умолчанию — из единого источника словаря (T39): его же
+# подставляет фронт при создании статьи.
+from app.dictionaries import DEFAULT_TAX_KIND  # noqa: E402
 
 
 def _require_category_manager(user: dict):
