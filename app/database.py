@@ -1,8 +1,11 @@
 import asyncpg
 import json
+import logging
 import os
 
 from app.categories_seed import seed_default_categories
+
+logger = logging.getLogger(__name__)
 
 pool = None
 
@@ -20,6 +23,54 @@ async def get_pool():
             os.environ.get("DATABASE_URL"), init=_init_conn
         )
     return pool
+
+
+async def _снять_колонки_ставок_ндс(conn) -> None:
+    """NDS-CLEANUP ③: убрать `vat_20`/`vat_10` — но ТОЛЬКО если ничего не теряем.
+
+    Почему дроп с проверкой, а не строкой DDL в общем скрипте: удаление
+    колонки необратимо, а «ничего не потеряем» — это утверждение о ДАННЫХ,
+    и проверять его надо в момент действия, а не по вчерашнему замеру.
+    Замер, сделанный за день до выкатки, к моменту старта контейнера
+    может устареть; здесь он выполняется прямо перед `DROP`.
+
+    Что считается потерей: чек, у которого НДС есть ТОЛЬКО в этих колонках —
+    ни в разбивке, ни в `vat_total`. На 10.08.2026 таких ноль, и появиться
+    новым неоткуда: запись в колонки прекращена шагом ②. Но если такой чек
+    всё же найдётся, колонки ОСТАЮТСЯ, а в журнал уходит предупреждение:
+    молча удалять чужой НДС нельзя, а падать на старте — значит уронить
+    приложение целиком из-за уборки.
+
+    Идемпотентно: колонок нет — выходим сразу.
+    Откат (если колонки понадобятся снова, ДАННЫЕ НЕ ВЕРНУТСЯ):
+        ALTER TABLE receipts ADD COLUMN vat_20 NUMERIC(15,2);
+        ALTER TABLE receipts ADD COLUMN vat_10 NUMERIC(15,2);
+    """
+    есть = await conn.fetchval(
+        """SELECT count(*) FROM information_schema.columns
+           WHERE table_name='receipts' AND column_name IN ('vat_20','vat_10')"""
+    )
+    if not есть:
+        return
+
+    рискуют = await conn.fetchval(
+        """SELECT count(*) FROM receipts
+           WHERE (COALESCE(vat_20,0) <> 0 OR COALESCE(vat_10,0) <> 0)
+             AND (vat_breakdown IS NULL OR vat_breakdown = '{}'::jsonb)
+             AND COALESCE(vat_total,0) = 0"""
+    )
+    if рискуют:
+        logger.warning(
+            "NDS-CLEANUP ③ ОТМЕНЁН: у %s чеков НДС есть ТОЛЬКО в vat_20/vat_10 "
+            "(ни разбивки, ни vat_total). Колонки НЕ удалены — сначала перенести "
+            "эти суммы, иначе НДС исчезнет без следа.",
+            рискуют,
+        )
+        return
+
+    await conn.execute("ALTER TABLE receipts DROP COLUMN IF EXISTS vat_20")
+    await conn.execute("ALTER TABLE receipts DROP COLUMN IF EXISTS vat_10")
+    logger.info("NDS-CLEANUP ③: колонки vat_20/vat_10 удалены, потерь нет")
 
 
 async def _засеять_первого_администратора(conn) -> None:
@@ -263,8 +314,11 @@ async def init_db():
             -- Желательные (5):
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS tax_system     VARCHAR(30);
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS address        TEXT;
-            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS vat_20         NUMERIC(15,2);
-            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS vat_10         NUMERIC(15,2);
+            -- vat_20/vat_10 ЗДЕСЬ БОЛЬШЕ НЕ СОЗДАЮТСЯ (NDS-CLEANUP ③).
+            -- Их снимает _снять_колонки_ставок_ндс() ниже — с проверкой, что
+            -- ничего не теряется. Строки ADD COLUMN убраны намеренно: оставь
+            -- их рядом с дропом, и колонки создавались бы заново на каждом
+            -- старте контейнера, а дроп их тут же сносил.
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS vat_0          NUMERIC(15,2);
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS vat_breakdown  JSONB;
             -- NDS-CLEANUP ②: «НДС есть, ставка не распознана» — для фото-чеков.
@@ -358,6 +412,7 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_category_groups_org_id ON category_groups(org_id);
         """)
 
+        await _снять_колонки_ставок_ндс(conn)
         await _засеять_первого_администратора(conn)
 
         # ── Фикс №1 фаза A: seed дефолтных категорий + бэкфилл category_id ──
