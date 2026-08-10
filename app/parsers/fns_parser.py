@@ -177,6 +177,30 @@ def _vat_breakdown(items) -> Optional[dict]:
     return {k: round(v / 100, 2) for k, v in acc.items()} or None
 
 
+def _breakdown_из_верхних(g) -> Optional[dict]:
+    """Разбивка из ВЕРХНЕУРОВНЕВЫХ полей ФНС, когда позиций с кодами ставок нет.
+
+    ЗАЧЕМ. `_vat_breakdown` считает по `items[].nds`, но ФНС присылает и
+    верхнеуровневые `nds20`/`nds18`/`nds10` — и бывают ответы, где позиции
+    без кодов, а суммы наверху есть. До NDS-CLEANUP ② это не мешало: суммы
+    ложились в колонки `vat_20`/`vat_10`. После того как колонки убраны,
+    такой чек остался бы БЕЗ НДС вовсе — молча, потому что «пустая разбивка»
+    и «НДС нет» выглядят одинаково.
+
+    Ловушку назвал владелец до реализации; она оказалась не гипотетической —
+    ровно такой ответ лежит в фикстуре `tests/test_fns_parser.py`.
+
+    `nds18` — legacy-ставка 18%, ФНС отдаёт её в старых чеках; кладём как 20,
+    как и делал прежний код (`vat_20` брал nds18 при отсутствии nds20).
+    """
+    из_верхних = {}
+    for поле, ставка in (("nds20", "20"), ("nds18", "20"), ("nds10", "10")):
+        сумма = _kopecks(g(поле))
+        if сумма:
+            из_верхних[ставка] = round(из_верхних.get(ставка, 0) + сумма, 2)
+    return из_верхних or None
+
+
 def parse_fns_response(raw_data: dict) -> dict:
     """Map an FNS receipt json into the typed receipts columns. Returns {} for a
     non-dict input. `kkt_fn` is returned for reference, but the INSERT writes the
@@ -188,7 +212,8 @@ def parse_fns_response(raw_data: dict) -> dict:
     inn = g("userInn")
     org_inn = str(inn).strip() if validate_inn(inn) else None  # invalid INN → drop
 
-    nds20 = g("nds20")
+    # nds20/nds18/nds10 читает теперь _breakdown_из_верхних — отдельные
+    # переменные под них не нужны (NDS-CLEANUP ②).
     nds_zero = g("ndsNo")
     return {
         "datetime": _parse_datetime(g("dateTime")),
@@ -202,10 +227,19 @@ def parse_fns_response(raw_data: dict) -> dict:
         "card_last4": _card_last4(raw_data),
         "tax_system": _taxation_type(raw_data),
         "address": _str_or_none(g("retailPlaceAddress")),
-        "vat_20": _kopecks(nds20 if nds20 is not None else g("nds18")),
-        "vat_10": _kopecks(g("nds10")),
         "vat_0": _kopecks(nds_zero if nds_zero is not None else g("nds0")),
-        "vat_breakdown": _vat_breakdown(g("items")),
+        # Сначала по позициям (полная, по тегу 1199), при пустом результате —
+        # из верхнеуровневых полей. НДС не должен исчезать оттого, что
+        # в позициях не оказалось кодов ставок.
+        "vat_breakdown": _vat_breakdown(g("items")) or _breakdown_из_верхних(g),
+        # NDS-CLEANUP ②: vat_20/vat_10 больше не отдаются — они были списком
+        # из двух ставок, и на ставке 22% этот список занизил входящий НДС
+        # на 70,5% (NDS-VAT22). У ФНС разбивка полная, по тегу 1199.
+        # vat_total — «НДС есть, ставка не распознана» — нужен ТОЛЬКО
+        # фото-пути; здесь None, и ключ присутствует ради контракта
+        # keys_match: один INSERT обслуживает оба парсера, и разъехавшиеся
+        # множества ключей записали бы в базу NULL молча.
+        "vat_total": None,
         "kkt_fn": _str_or_none(g("fiscalDriveNumber")),
         "kkt_serial": _str_or_none(g("kktNumber")),  # ЗН (заводской); часто отсутствует
         "kkt_rn": _str_or_none(g("kktRegId")),  # РН (регистрационный)

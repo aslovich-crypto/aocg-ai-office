@@ -661,9 +661,13 @@ class FakePool:
         if q.startswith("INSERT INTO receipts"):
             # 32-arg insert (org_id, date, … , category_id, user_id, vat_breakdown).
             # Зеркалит порядок колонок в receipts.py. card_id не вставляется → None.
-            args = list(args) + [None] * (32 - len(args))
+            # NDS-CLEANUP ②: колонок стало 31 (ушли vat_20/vat_10, пришёл
+            # vat_total), поэтому и добивка, и позиция fd_num сдвинулись.
+            # Забыть здесь — значит уронить проверку дублей по причине,
+            # не имеющей к дублям отношения: тест 409 падал на 200.
+            args = list(args) + [None] * (31 - len(args))
             kkt_fn_val = args[6]
-            fd_num_val = args[26]
+            fd_num_val = args[25]
             # Mirror the GLOBAL partial-unique index receipts_kkt_fn_fd_unique:
             # a (kkt_fn, fd_num) pair (both non-NULL) already present (in ANY org)
             # → UniqueViolationError. ФН в одиночку больше дубль НЕ образует.
@@ -702,17 +706,20 @@ class FakePool:
                 card_last4=args[18],
                 tax_system=args[19],
                 address=args[20],
-                vat_20=args[21],
-                vat_10=args[22],
-                vat_0=args[23],
-                kkt_serial=args[24],
-                kkt_rn=args[25],
-                fd_num=args[26],
-                fpd=args[27],
-                cashier=args[28],
-                category_id=args[29],
-                user_id=args[30],
-                vat_breakdown=args[31],
+                # NDS-CLEANUP ②: vat_20/vat_10 из INSERT убраны, на их месте
+                # vat_0 и vat_total. Позиции сдвинулись — зеркало правится
+                # вместе с продакшеном, иначе тесты падают не там, где причина
+                # (сегодня так и вышло: 33 красных теста в шести файлах).
+                vat_0=args[21],
+                vat_total=args[22],
+                kkt_serial=args[23],
+                kkt_rn=args[24],
+                fd_num=args[25],
+                fpd=args[26],
+                cashier=args[27],
+                category_id=args[28],
+                user_id=args[29],
+                vat_breakdown=args[30],
                 card_id=None,
                 created_at=datetime.utcnow(),
             )

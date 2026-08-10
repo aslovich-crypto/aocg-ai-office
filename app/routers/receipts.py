@@ -401,13 +401,13 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                         kkt_fn, raw_data, source, photo_url,
                         datetime, currency, operation_type, org_legal, org_brand,
                         org_inn, payment_form, payment_detail, card_last4,
-                        tax_system, address, vat_20, vat_10, vat_0,
+                        tax_system, address, vat_0, vat_total,
                         kkt_serial, kkt_rn, fd_num, fpd, cashier, category_id, user_id,
                         vat_breakdown
                     ) VALUES (
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
-                        $12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,
-                        $24,$25,$26,$27,$28,$29,$30,$31,$32
+                        $12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
+                        $23,$24,$25,$26,$27,$28,$29,$30,$31
                     ) RETURNING *""",
                     user["org_id"],
                     r.date,
@@ -430,9 +430,8 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                     parsed.get("card_last4"),
                     parsed.get("tax_system"),
                     parsed.get("address"),
-                    parsed.get("vat_20"),
-                    parsed.get("vat_10"),
                     parsed.get("vat_0"),
+                    parsed.get("vat_total"),
                     parsed.get("kkt_serial"),
                     parsed.get("kkt_rn"),
                     parsed.get("fd_num"),

@@ -835,7 +835,9 @@ async def test_qr_scan_parses_raw_data_into_columns_and_items(client, db):
     assert body["tax_system"] == "usn_income"
     assert body["org_brand"] == "Аптека №1"
     assert body["address"] == "Москва, ул. Ленина, 1"
-    assert body["vat_20"] == 492.50
+    # NDS-CLEANUP ②: у чека ФНС НДС живёт в разбивке, отдельных колонок ставок нет
+    assert body["vat_breakdown"] == {"20": 492.50}
+    assert body["vat_total"] is None  # ФНС: сумма не нужна, есть разбивка
     assert body["kkt_rn"] == "0001234567012345"
     assert body["cashier"] == "Иванова И.И."
     assert body["payment_form"] == "card"
@@ -904,7 +906,9 @@ async def test_photo_ocr_parses_raw_data_into_columns_and_items(client, db):
     assert body["payment_form"] == "card"
     assert body["tax_system"] == "osno"
     assert body["cashier"] == "Ботина Анастасия"
-    assert body["vat_20"] == 1110.00  # rubles — not /100
+    # NDS-CLEANUP ②: у фото НДС одной суммой — ставку распознавание не даёт
+    assert body["vat_total"] == 1110.00  # rubles — not /100
+    assert body["vat_breakdown"] is None
     assert str(body["datetime"]).startswith("2026-05-26T12:41")
     assert body["kkt_fn"] is None  # Вариант A — OCR fn never stored
 

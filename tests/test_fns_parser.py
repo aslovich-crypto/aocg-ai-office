@@ -47,8 +47,10 @@ def test_parse_fns_response_full():
     assert p["operation_type"] == "purchase"
     assert p["payment_form"] == "card"  # ecashTotalSum > 0
     assert p["tax_system"] == "usn_income"  # appliedTaxationType == 2
-    assert p["vat_20"] == 492.50  # 49250 kopecks
-    assert p["vat_10"] == 0.0
+    # NDS-CLEANUP ②: колонок ставок больше нет — НДС в разбивке по тегу 1199
+    assert p["vat_breakdown"] == {"20": 492.50}
+    assert "vat_20" not in p and "vat_10" not in p
+    assert p["vat_total"] is None  # у ФНС общая сумма не нужна: есть разбивка
     assert p["kkt_fn"] == "7380440700123456"  # fiscalDriveNumber
     assert p["kkt_rn"] == "0001234567012345"  # kktRegId (РН)
     assert p["kkt_serial"] is None  # no kktNumber → ЗН unknown
@@ -65,7 +67,7 @@ def test_parse_fns_response_missing_fields():
     assert p["org_inn"] is None
     assert p["address"] is None
     assert p["datetime"] is None
-    assert p["vat_20"] is None
+    assert p["vat_breakdown"] is None and p["vat_total"] is None
     assert p["kkt_fn"] is None
     assert p["cashier"] is None
 
@@ -140,3 +142,65 @@ def test_parse_payment_form():
     assert pf({"prepaidSum": 500}) == "prepaid"
     assert pf({"creditSum": 500}) == "credit"
     assert pf({"cashTotalSum": 0, "ecashTotalSum": 0}) is None
+
+
+# ─── J. НДС НЕ ИСЧЕЗАЕТ (NDS-CLEANUP ②) ───────────────────────────────
+# Ловушка названа владельцем ДО реализации и оказалась не гипотетической:
+# ровно такой ответ (суммы наверху, позиции без кодов ставок) лежал в фикстуре
+# этого файла. После того как колонки vat_20/vat_10 убраны, такой чек остался
+# бы без НДС вовсе — молча, потому что «пустая разбивка» и «НДС нет» выглядят
+# одинаково.
+def test_ндс_из_верхних_полей_когда_позиции_без_кодов():
+    p = parse_fns_response(
+        {
+            "user": "ООО Тест",
+            "totalSum": 100000,
+            "nds20": 49250,  # копейки
+            "nds10": 1000,
+            "items": [{"name": "товар", "sum": 100000}],  # кодов ставок НЕТ
+        }
+    )
+    assert p["vat_breakdown"] == {"20": 492.50, "10": 10.0}
+
+
+def test_ндс_из_позиций_имеет_приоритет_над_верхними():
+    """Позиции полнее: там ВСЕ ставки, включая 22%, которой наверху нет."""
+    p = parse_fns_response(
+        {
+            "user": "ООО Тест",
+            "nds20": 49250,
+            "items": [
+                {"name": "а", "nds": 11, "ndsSum": 22000},  # код 11 = 22%
+                {"name": "б", "nds": 2, "ndsSum": 1000},  # код 2 = 10%
+            ],
+        }
+    )
+    assert p["vat_breakdown"] == {"22": 220.0, "10": 10.0}
+
+
+def test_ндс_не_исчезает_ни_при_каком_виде_ответа():
+    """ИНВАРИАНТ: если в ответе есть НДС, он обязан оказаться в разбивке.
+
+    Проверяется не одна форма, а НАБОР форм — именно потому, что дефект
+    возникает на форме, которую не предусмотрели.
+    """
+    формы = [
+        {"nds20": 12000},
+        {"nds18": 12000},  # legacy 18% → кладём как 20
+        {"nds10": 5000},
+        {"items": [{"nds": 1, "ndsSum": 12000}]},
+        {"items": [{"nds": 11, "ndsSum": 12000}]},  # 22%
+        {"nds20": 12000, "items": [{"name": "без кода", "sum": 1}]},
+    ]
+    for форма in формы:
+        p = parse_fns_response({"user": "X", "totalSum": 1, **форма})
+        сумма = sum((p["vat_breakdown"] or {}).values()) + (p["vat_total"] or 0)
+        assert сумма > 0, f"НДС потерялся на форме {форма}"
+
+
+def test_без_ндс_остаётся_без_ндс():
+    """Обратная половина: там, где НДС нет, он не должен появляться."""
+    p = parse_fns_response({"user": "X", "totalSum": 1, "ndsNo": 10000})
+    assert p["vat_breakdown"] is None
+    assert p["vat_total"] is None
+    assert p["vat_0"] == 100.0  # «без НДС» — отдельное поле, в сумму не входит

@@ -73,8 +73,9 @@ def test_parse_ocr_response_full():
     assert p["payment_form"] == "card"
     assert p["tax_system"] == "osno"
     assert p["cashier"] == "Ботина Анастасия"
-    assert p["vat_20"] == 1110.00  # rubles preserved
-    assert p["vat_10"] == 222.00
+    # NDS-CLEANUP ②: у фото одна сумма — ставку распознавание не даёт
+    assert p["vat_total"] == 1332.00  # 1110 + 222, РУБЛИ, не /100
+    assert "vat_20" not in p and "vat_10" not in p
     # OCR never trusts fiscal data — all None (Вариант A)
     assert p["kkt_fn"] is None
     assert p["kkt_serial"] is None and p["kkt_rn"] is None
@@ -100,7 +101,7 @@ def test_parse_ocr_response_missing_optional():
     assert p["org_inn"] is None
     assert p["address"] is None
     assert p["datetime"] is None
-    assert p["vat_20"] is None and p["vat_10"] is None and p["vat_0"] is None
+    assert p["vat_total"] is None and p["vat_0"] is None
     assert p["tax_system"] is None
     assert p["cashier"] is None
 
@@ -130,8 +131,7 @@ def test_parse_ocr_response_kkt_fn_always_none():
 # ─── E. header amounts stay in RUBLES (not divided by 100) ────────────
 def test_parse_ocr_response_amounts_in_rubles():
     p = parse_ocr_response({"vat_20": 1110.00, "vat_10": 55.50})
-    assert p["vat_20"] == 1110.00  # NOT 11.10
-    assert p["vat_10"] == 55.50  # NOT 0.555
+    assert p["vat_total"] == 1165.50  # 1110 + 55.50 — NOT 11.10 / 0.555
 
 
 # ─── K. key set matches parse_fns_response → shared INSERT is safe ────
@@ -193,3 +193,20 @@ def test_parse_ocr_items_empty():
     assert parse_ocr_items({}) == []
     assert parse_ocr_items({"items": None}) == []
     assert parse_ocr_items(None) == []
+
+
+# ─── L. «без НДС» НЕ входит в сумму НДС (NDS-CLEANUP ②) ───────────────
+# Случай добавлен после того, как мутация «убрать исключение vat_0 из суммы»
+# НЕ покраснела: защита была, а проверки на неё не было. Это ровно тот случай,
+# ради которого мутации и гоняют — они показывают дыры в покрытии, а не только
+# поломки кода.
+def test_без_ндс_не_попадает_в_сумму_ндс():
+    p = parse_ocr_response({"vat_20": 100.0, "vat_0": 500.0})
+    assert p["vat_total"] == 100.0, "vat_0 — это «без НДС», налога в нём нет"
+    assert p["vat_0"] == 500.0, "само поле при этом сохраняется"
+
+
+def test_новая_ставка_от_распознавания_попадает_в_сумму():
+    """Список ставок не заводим и здесь: модель однажды вернёт vat_22."""
+    p = parse_ocr_response({"vat_20": 100.0, "vat_22": 50.0})
+    assert p["vat_total"] == 150.0

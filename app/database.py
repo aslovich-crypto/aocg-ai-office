@@ -267,6 +267,12 @@ async def init_db():
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS vat_10         NUMERIC(15,2);
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS vat_0          NUMERIC(15,2);
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS vat_breakdown  JSONB;
+            -- NDS-CLEANUP ②: «НДС есть, ставка не распознана» — для фото-чеков.
+            -- Распознавание видит суммы, а не коды ставок ФНС, поэтому раскладка
+            -- по ставкам была домыслом; vat_20/vat_10 для этого пути больше
+            -- не пишутся. У чеков ФНС здесь NULL: у них есть полная разбивка.
+            -- Откат: ALTER TABLE receipts DROP COLUMN vat_total;
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS vat_total      NUMERIC(15,2);
             -- Фискальные (5 — fn уже есть, переименуем в Чекпойнте C):
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS kkt_serial     VARCHAR(20);
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS kkt_rn         VARCHAR(20);
