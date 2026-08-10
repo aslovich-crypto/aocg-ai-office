@@ -1,0 +1,19 @@
+{
+ "пояснение": "Отпечаток состава страницы для сравнения ДО/ПОСЛЕ (T43).",
+ "состав": {
+  "origins": [
+   "aocg-ai-office-production.up.railway.app",
+   "aocgaiofficeweb.up.railway.app",
+   "fonts.googleapis.com",
+   "fonts.gstatic.com"
+  ],
+  "preconnect": [
+   "fonts.googleapis.com",
+   "fonts.gstatic.com"
+  ],
+  "ассеты": [
+   "/assets/index-BK3N-O5I.js",
+   "/assets/index-DcilV8s7.css"
+  ]
+ }
+}
