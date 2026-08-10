@@ -70,7 +70,13 @@ async def _снять_колонки_ставок_ндс(conn) -> None:
 
     await conn.execute("ALTER TABLE receipts DROP COLUMN IF EXISTS vat_20")
     await conn.execute("ALTER TABLE receipts DROP COLUMN IF EXISTS vat_10")
-    logger.info("NDS-CLEANUP ③: колонки vat_20/vat_10 удалены, потерь нет")
+    # УРОВЕНЬ ВЫБРАН НАМЕРЕННО, И ЭТО НЕ ОПЕЧАТКА. Успех разовой миграции
+    # печатается так же заметно, как отказ: раньше здесь стоял `info`, при
+    # корневом уровне WARNING он был отброшен, и «сделано» в логах выглядело
+    # ровно как «не выполнялось». Настройку журнала мы починили (app/main.py),
+    # но исход НЕОБРАТИМОЙ операции не должен зависеть от того, настроен ли
+    # журнал вообще: `warning` доходит даже через logging.lastResort.
+    logger.warning("NDS-CLEANUP ③: колонки vat_20/vat_10 удалены, потерь нет")
 
 
 async def _засеять_первого_администратора(conn) -> None:
