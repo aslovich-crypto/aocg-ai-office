@@ -111,7 +111,7 @@ flowchart TB
         INF_FE["сервис: frontend (server.js)"]
         INF_PG["сервис: PostgreSQL"]
         INF_CI["GitHub Actions · pytest + ruff на push"]
-        INF_Yandex["Yandex Object Storage<br/>резидентность фото в РФ · план S-06"]
+        INF_Yandex["S3 Timeweb Cloud<br/>резидентность фото в РФ · план S-06"]
     end
 
     INF_BE -. "host" .-> BE_MW
@@ -268,7 +268,7 @@ erDiagram
   `GET /api/receipts/{id}/photo` (декод в JPEG).
 - Поле `receipts.photo_url` под внешний URL заведено, но **upload не
   реализован** (задача S-06). В коде остался комментарий «Cloudflare R2 etc.» —
-  ⚠️ R2 запрещён по 152-ФЗ; целевое хранилище — **Yandex Object Storage** (РФ).
+  ⚠️ R2 запрещён по 152-ФЗ; целевое хранилище — **S3 Timeweb Cloud** (РФ, `s3.timeweb.com`).
 
 ---
 
@@ -379,7 +379,9 @@ cards → ocr → consent → users → services → categories → organization
   `PROVERKACHEKA_TOKEN`, `RESEND_API_KEY`, `SENTRY_DSN`, `CORS_ORIGINS`, …).
   `.env` локально пуст, есть `.env.example`.
 - **Резидентность (152-ФЗ):** сейчас БД и фото — на Railway (вне РФ, переходно).
-  Целевое — Yandex Cloud (PostgreSQL + Object Storage, РФ), задача **S-06**.
+  Целевое — Timeweb Cloud (управляемый PostgreSQL + S3, РФ), задача **S-06**
+  (площадка выбрана владельцем 11.08.2026 по сравнению трёх,
+  `docs/AOCG-INFRA-001-Sravnenie_ploshchadok_RF.md`).
   Cloudflare R2 и иные зарубежные хранилища ПД — запрещены.
 
 ---
@@ -390,7 +392,7 @@ cards → ocr → consent → users → services → categories → organization
   Реально работает только приложение **«Финансы»** с разделами
   **Чеки, Сводка, Отчёты, Главная**.
 - **Модули Финансов ДДС / ОПУ / Бюджет** — только подпись в меню переключателя.
-- **Загрузка фото в объектное хранилище** (Yandex Object Storage) — не написана;
+- **Загрузка фото в объектное хранилище** (S3 Timeweb Cloud) — не написана;
   фото живут как base64 в `receipts.raw_data` (S-06).
 - **ЮКасса / платежи** — интеграции нет.
 - Приложения «Документы» и «Инструменты» в переключателе — заглушки `soon`.
