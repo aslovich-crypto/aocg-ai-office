@@ -143,12 +143,23 @@ async def get_receipt_photo(id: int, user: dict = Depends(get_current_user)):
             # Ключ есть, а хранилище не настроено — это расхождение настроек,
             # а не отсутствие фото. Молчать нельзя: 404 читался бы как «снимка нет».
             raise HTTPException(status_code=503, detail="Storage is not configured")
-        url = s3.presign_get_url(
-            cfg, row["photo_key"], expires_in=PHOTO_URL_TTL_SECONDS
-        )
-        # no-store: подписанная ссылка живёт минуты, её нельзя оставлять в кэше.
-        return RedirectResponse(
-            url=url, status_code=302, headers={"Cache-Control": "no-store"}
+        try:
+            content, content_type = await s3.get_object(cfg, row["photo_key"])
+        except s3.ObjectNotFound:
+            # Ключ в базе есть, объекта в бакете нет — рассинхрон, но для
+            # пользователя это именно «фото нет».
+            logger.warning("Фото по ключу отсутствует в хранилище, чек id=%s", id)
+            raise HTTPException(status_code=404, detail="No photo for this receipt")
+        except s3.StorageError:
+            # 152-ФЗ: наружу не отдаём ни ключ, ни адрес, ни ответ поставщика.
+            logger.warning("Хранилище не отдало фото, чек id=%s", id)
+            raise HTTPException(status_code=502, detail="Storage is unavailable")
+        # no-store: фото — персональные данные, в кэше промежуточных узлов
+        # им не место.
+        return Response(
+            content=content,
+            media_type=content_type,
+            headers={"Cache-Control": "no-store"},
         )
     if row["photo_url"]:
         return RedirectResponse(url=row["photo_url"], status_code=302)
@@ -575,6 +586,56 @@ class BulkDeleteIn(BaseModel):
     force: bool = False  # пробивает ТОЛЬКО ФНС-защиту, НЕ in_report (Q2)
 
 
+async def _drop_photo_objects(p, ids: list, user: dict) -> list:
+    """Убрать снимки удаляемых чеков ИЗ ХРАНИЛИЩА. Возвращает id, где не вышло.
+
+    ПОЧЕМУ ЭТО ДЕЛАЕТСЯ ДО УДАЛЕНИЯ СТРОКИ, А НЕ ПОСЛЕ. До задачи №3 снимок
+    лежал внутри чека (`raw_data.photo_base64`) и исчезал вместе со строкой.
+    Вынеся его в бакет, мы СОЗДАЛИ бы состояние «пользователь удалил, а данные
+    целы»: объект остался бы в хранилище навсегда и невидимым ни в одном
+    интерфейсе. Для 152-ФЗ это прямая проблема, а не неопрятность.
+
+    Порядок «сначала объект, потом строка» выбран сознательно: если хранилище
+    недоступно, чек НЕ удаляется и пользователь может повторить. Обратный
+    порядок оставлял бы сироту молча — то есть ровно ту дыру, которую строка
+    S-48 и закрывает. Отсутствие объекта в бакете считается успехом
+    (`delete_object` идемпотентен): повтор удаления обязан заканчиваться тем же
+    состоянием.
+    """
+    if not ids:
+        return []
+    if can_delete_any(user["role"]):
+        rows = await p.fetch(
+            "SELECT id, photo_key FROM receipts WHERE id = ANY($1::int[]) AND org_id = $2",
+            ids,
+            user["org_id"],
+        )
+    else:
+        rows = await p.fetch(
+            "SELECT id, photo_key FROM receipts WHERE id = ANY($1::int[]) AND org_id = $2 AND user_id = $3",
+            ids,
+            user["org_id"],
+            user["id"],
+        )
+    with_photo = [(r["id"], r["photo_key"]) for r in rows if r["photo_key"]]
+    if not with_photo:
+        return []
+    cfg = s3.S3Config.from_env()
+    if cfg is None:
+        # Ключи есть, а хранилище не настроено — удалять нечем. Молча
+        # продолжить значило бы оставить ПД в бакете, о котором мы «не знаем».
+        logger.warning("Удаление чеков: есть ключи фото, но хранилище не настроено")
+        return [rid for rid, _ in with_photo]
+    failed = []
+    for rid, key in with_photo:
+        try:
+            await s3.delete_object(cfg, key)
+        except s3.StorageError:
+            logger.warning("Не удалось убрать фото из хранилища, чек id=%s", rid)
+            failed.append(rid)
+    return failed
+
+
 @router.post("/bulk-delete")
 async def bulk_delete_receipts(
     body: BulkDeleteIn, user: dict = Depends(get_current_user)
@@ -591,6 +652,7 @@ async def bulk_delete_receipts(
             "deleted": deleted,
             "blocked_fns": blocked_fns,
             "blocked_in_report": blocked_in_report,
+            "blocked_storage": [],
         }
     p = await get_pool()
     # Кандидаты — только чеки текущей орг; чужие id в выборку не попадают (изоляция).
@@ -620,6 +682,11 @@ async def bulk_delete_receipts(
             blocked_fns.append(row["id"])  # ФНС-защита, пробивается force
         else:
             deleted.append(row["id"])
+    # Снимки убираем ДО строк: не удалили фото — не удаляем и чек, иначе
+    # в бакете останутся ПД без единой ссылки на них (S-48).
+    blocked_storage = await _drop_photo_objects(p, deleted, user)
+    if blocked_storage:
+        deleted = [rid for rid in deleted if rid not in blocked_storage]
     if deleted:
         async with p.acquire() as conn:
             async with conn.transaction():
@@ -640,6 +707,10 @@ async def bulk_delete_receipts(
         "deleted": deleted,
         "blocked_fns": blocked_fns,
         "blocked_in_report": blocked_in_report,
+        # Новая полоса ответа: чек не удалён, потому что не удалось убрать его
+        # снимок из хранилища. Молчать нельзя — «удалено» без фото в бакете
+        # и «не удалено вовсе» для пользователя разные вещи.
+        "blocked_storage": blocked_storage,
     }
 
 
@@ -696,6 +767,11 @@ async def patch_receipt(
 async def delete_receipt(id: int, user: dict = Depends(get_current_user)):
     p = await get_pool()
     org_id = user["org_id"]
+    # Снимок убираем ДО строки. Не вышло — чек НЕ удаляем и говорим об этом:
+    # иначе в бакете останутся персональные данные, на которые больше ничто
+    # не ссылается (S-48). Пользователь может повторить.
+    if await _drop_photo_objects(p, [id], user):
+        raise HTTPException(status_code=503, detail="Storage is unavailable")
     async with p.acquire() as conn:
         async with conn.transaction():
             # org-безопасная чистка связей (защита от IDOR P1, аналог bulk-delete):

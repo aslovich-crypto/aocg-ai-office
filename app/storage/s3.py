@@ -223,6 +223,14 @@ def presign_get_url(
 ) -> str:
     """Временная ссылка на ЧТЕНИЕ объекта.
 
+    ⚠️ ПРИЛОЖЕНИЕ ЭТИМ НЕ ПОЛЬЗУЕТСЯ ДЛЯ ПОКАЗА ФОТО — и это осознанно.
+    Фото отдаётся через `get_object`, то есть читается сервером и уходит
+    пользователю уже проверенным по правам (разбор — в docstring get_object).
+    Функция оставлена, потому что она понадобится там, где ссылку получает
+    не браузер, а сам владелец данных: выгрузка, передача во внешнюю систему.
+    Если решите вернуть редирект — сначала прочитайте строку трекера про
+    ответ Timeweb на протухшую ссылку.
+
     expires_in по умолчанию 5 минут: ссылка нужна ровно на время открытия
     картинки. Долгий срок жизни превращает приватный бакет в публичный
     для всякого, кому ссылка попалась на глаза.
@@ -273,6 +281,52 @@ def build_object_key(org_id: int, suffix: str = ".jpg") -> str:
     return "receipts/%d/%s%s" % (org_id, uuid.uuid4().hex, suffix)
 
 
+class StorageError(RuntimeError):
+    """Хранилище не выполнило операцию. Причина в тексте, наружу не уходит."""
+
+
+class ObjectNotFound(StorageError):
+    """Объекта нет. Отдельный класс: «нет» и «сломалось» — разные ответы."""
+
+
+async def _signed_request(
+    cfg: S3Config,
+    method: str,
+    key: str,
+    *,
+    data: bytes = b"",
+    content_type: Optional[str] = None,
+    timeout: float = 15.0,
+):
+    """Один подписанный запрос к объекту. Общий низ для put/get/delete.
+
+    Вынесен, чтобы подпись собиралась В ОДНОМ месте: три копии одного
+    канонического запроса разъедутся молча — ровно тот класс, ради которого
+    написаны контрольные примеры.
+    """
+    import httpx
+
+    now = datetime.now(timezone.utc)
+    amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+    date_stamp = now.strftime("%Y%m%d")
+    payload_hash = sha256_hex(data)
+    headers = {
+        "host": cfg.host,
+        "x-amz-content-sha256": payload_hash,
+        "x-amz-date": amz_date,
+    }
+    if content_type:
+        headers["content-type"] = content_type
+    headers["authorization"] = authorization_header(
+        cfg, method, key, headers, payload_hash, date_stamp, amz_date
+    )
+    url = cfg.endpoint + canonical_uri(object_path(cfg.bucket, key))
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        return await client.request(
+            method, url, content=data if data else None, headers=headers
+        )
+
+
 async def put_object(
     cfg: S3Config,
     key: str,
@@ -286,27 +340,46 @@ async def put_object(
     всегда, фото вторично (см. №3). Молча проглатывать здесь нельзя —
     пользователю говорят честно, что снимок не приложен.
     """
-    import httpx
-
-    now = datetime.now(timezone.utc)
-    amz_date = now.strftime("%Y%m%dT%H%M%SZ")
-    date_stamp = now.strftime("%Y%m%d")
-    payload_hash = sha256_hex(data)
-    headers = {
-        "host": cfg.host,
-        "x-amz-content-sha256": payload_hash,
-        "x-amz-date": amz_date,
-        "content-type": content_type,
-    }
-    headers["authorization"] = authorization_header(
-        cfg, "PUT", key, headers, payload_hash, date_stamp, amz_date
+    resp = await _signed_request(
+        cfg, "PUT", key, data=data, content_type=content_type, timeout=timeout
     )
-    url = cfg.endpoint + canonical_uri(object_path(cfg.bucket, key))
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.put(url, content=data, headers=headers)
     if resp.status_code >= 300:
-        raise RuntimeError("хранилище отклонило запись: HTTP %d" % resp.status_code)
+        raise StorageError("хранилище отклонило запись: HTTP %d" % resp.status_code)
     return key
+
+
+async def get_object(cfg: S3Config, key: str, timeout: float = 15.0):
+    """Забрать объект. Возвращает (байты, тип содержимого).
+
+    ПОЧЕМУ ПРИЛОЖЕНИЕ ЧИТАЕТ ФАЙЛ САМО, А НЕ ОТПРАВЛЯЕТ БРАУЗЕР ПО ПОДПИСАННОЙ
+    ССЫЛКЕ (решение владельца 12.08.2026). Подписанная ссылка — это КЛЮЧ
+    ОТ ФАЙЛА: ушла в браузер, значит попала в историю, в журналы, в закладки,
+    в пересланное сообщение. Пять минут — окно, в которое чужой чек
+    открывается вообще без входа в приложение, а мы везде остальное
+    фильтруем по org_id. При чтении через себя права проверяются НА КАЖДЫЙ
+    запрос, и особенность Timeweb (протухшая ссылка отдаёт 500 UnknownError
+    вместо 403) пользователю не показывается.
+    """
+    resp = await _signed_request(cfg, "GET", key, timeout=timeout)
+    if resp.status_code == 404:
+        raise ObjectNotFound(key)
+    if resp.status_code >= 300:
+        raise StorageError("хранилище отклонило чтение: HTTP %d" % resp.status_code)
+    return resp.content, resp.headers.get("content-type") or "image/jpeg"
+
+
+async def delete_object(cfg: S3Config, key: str, timeout: float = 15.0) -> None:
+    """Убрать объект. Отсутствие объекта — УСПЕХ, а не ошибка.
+
+    Идемпотентность здесь не удобство, а требование: удаление чека может
+    повторяться (повтор запроса, вторая попытка после сбоя), и второй заход
+    обязан заканчиваться тем же состоянием — объекта нет.
+    """
+    resp = await _signed_request(cfg, "DELETE", key, timeout=timeout)
+    if resp.status_code == 404:
+        return
+    if resp.status_code >= 300:
+        raise StorageError("хранилище отклонило удаление: HTTP %d" % resp.status_code)
 
 
 def authorization_header(

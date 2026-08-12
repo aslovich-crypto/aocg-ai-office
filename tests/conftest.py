@@ -330,6 +330,21 @@ class FakePool:
                 for ri in self.report_items
                 if ri["receipt_id"] in ids
             ]
+        if q.startswith("SELECT id, photo_key FROM receipts WHERE id = ANY($1"):
+            # S-48: какие из удаляемых чеков несут снимок в хранилище.
+            # A-ACL зеркалим целиком: org_id всегда, user_id — когда он есть
+            # в запросе (не-admin). Пропустить эти условия здесь значит дать
+            # тесту зелёный на НЕработающей изоляции — ровно случай T6.
+            ids = args[0]
+            org_id = args[1] if len(args) > 1 else None
+            user_id = args[2] if len(args) > 2 else None
+            return [
+                {"id": r["id"], "photo_key": r.get("photo_key")}
+                for r in self.receipts
+                if r["id"] in ids
+                and (org_id is None or r.get("org_id") == org_id)
+                and (user_id is None or r.get("user_id") == user_id)
+            ]
         if q.startswith("SELECT id, user_id FROM receipts WHERE id = ANY($1"):
             # S-15 IDOR-проверка создания отчёта: какие из запрошенных id реально
             # принадлежат орг пользователя (чужие/несуществующие сюда не попадут).

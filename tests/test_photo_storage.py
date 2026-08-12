@@ -63,20 +63,73 @@ async def _create(client, **extra):
 # ─────────────────────── порядок источников ───────────────────────
 
 
-async def test_photo_key_alone_redirects_to_signed_url(client, storage_env):
+STORAGE_BYTES = b"\x89PNG-from-storage"
+
+
+def _fake_storage(monkeypatch, content=STORAGE_BYTES, content_type="image/png"):
+    """Хранилище отдаёт байты. Запоминаем, по какому ключу его спросили."""
+    asked = {}
+
+    async def fake_get(cfg, key, timeout=15.0):
+        asked["key"] = key
+        return content, content_type
+
+    monkeypatch.setattr(s3, "get_object", fake_get)
+    return asked
+
+
+async def test_photo_key_is_proxied_and_signed_url_never_reaches_browser(
+    client, storage_env, monkeypatch
+):
+    """Фото читает СЕРВЕР и отдаёт байтами. Ссылка наружу не уходит.
+
+    Решение владельца 12.08.2026, довод дословно: подписанная ссылка — это
+    КЛЮЧ ОТ ФАЙЛА. Ушла в браузер — попала в историю, журналы, закладки,
+    пересланное сообщение, и пять минут чужой чек открывается вообще без
+    входа в приложение. Мы везде остальное фильтруем по org_id — здесь
+    нельзя иначе.
+    """
+    asked = _fake_storage(monkeypatch)
     created = await _create(client, photo_key="receipts/1/abc.jpg")
     assert created["photo_key"] == "receipts/1/abc.jpg"
     resp = await client.get(
         f"/api/receipts/{created['id']}/photo", follow_redirects=False
     )
-    assert resp.status_code == 302
-    location = resp.headers["location"]
-    assert location.startswith(
-        "https://s3.example.ru/aocg-receipts/receipts/1/abc.jpg?"
-    )
-    assert "X-Amz-Signature=" in location and "X-Amz-Expires=300" in location
-    # Подписанная ссылка живёт минуты — в кэше ей не место.
+    assert resp.status_code == 200
+    assert resp.content == STORAGE_BYTES
+    assert resp.headers["content-type"].startswith("image/png")
     assert resp.headers.get("cache-control") == "no-store"
+    assert asked["key"] == "receipts/1/abc.jpg"
+    # Ни редиректа, ни адреса хранилища, ни подписи в ответе
+    assert "location" not in resp.headers
+    assert b"X-Amz-Signature" not in resp.content
+    assert b"s3." not in resp.content
+
+
+async def test_photo_missing_in_storage_is_404(client, storage_env, monkeypatch):
+    async def not_found(cfg, key, timeout=15.0):
+        raise s3.ObjectNotFound(key)
+
+    monkeypatch.setattr(s3, "get_object", not_found)
+    created = await _create(client, photo_key="receipts/1/gone.jpg")
+    resp = await client.get(f"/api/receipts/{created['id']}/photo")
+    assert resp.status_code == 404
+
+
+async def test_storage_failure_is_502_and_leaks_nothing(
+    client, storage_env, monkeypatch
+):
+    async def boom(cfg, key, timeout=15.0):
+        raise s3.StorageError("хранилище отклонило чтение: HTTP 500 UnknownError")
+
+    monkeypatch.setattr(s3, "get_object", boom)
+    created = await _create(client, photo_key="receipts/1/abc.jpg")
+    resp = await client.get(f"/api/receipts/{created['id']}/photo")
+    assert resp.status_code == 502
+    # 152-ФЗ: наружу не уходит ни ключ, ни адрес, ни ответ поставщика
+    body = resp.text
+    assert "receipts/1/abc.jpg" not in body
+    assert "UnknownError" not in body and "s3." not in body
 
 
 async def test_photo_url_alone_still_works(client, storage_env):
@@ -97,7 +150,8 @@ async def test_base64_alone_still_works(client, storage_env):
     assert resp.content == _PNG_BYTES
 
 
-async def test_photo_key_wins_over_url_and_base64(client, storage_env):
+async def test_photo_key_wins_over_url_and_base64(client, storage_env, monkeypatch):
+    asked = _fake_storage(monkeypatch)
     created = await _create(
         client,
         photo_key="receipts/1/new.jpg",
@@ -107,10 +161,12 @@ async def test_photo_key_wins_over_url_and_base64(client, storage_env):
     resp = await client.get(
         f"/api/receipts/{created['id']}/photo", follow_redirects=False
     )
-    assert resp.status_code == 302
-    location = resp.headers["location"]
-    assert "receipts/1/new.jpg" in location, "ключ обязан побеждать внешний адрес"
-    assert "r2.example" not in location
+    assert resp.status_code == 200
+    # Байты РАЗНЫЕ у трёх источников — поэтому видно, который победил
+    assert resp.content == STORAGE_BYTES, "ключ обязан побеждать адрес и base64"
+    assert resp.content != _PNG_BYTES
+    assert asked["key"] == "receipts/1/new.jpg"
+    assert "location" not in resp.headers
 
 
 async def test_photo_url_wins_over_base64_when_no_key(client, storage_env):
@@ -241,3 +297,106 @@ def test_object_key_carries_no_personal_data_and_is_unique():
     # В ключе нет ни даты покупки, ни ФИО, ни ИНН: он попадает в адрес
     # подписанной ссылки, а тот — в журналы и историю браузера.
     assert len(a.split("/")) == 3
+
+
+# ─────────── S-48: удалённый чек не оставляет фото в хранилище ───────────
+
+
+def _fake_delete(monkeypatch, fail=False):
+    """Подмена удаления объекта. Копит ключи, по которым его звали."""
+    calls = []
+
+    async def fake(cfg, key, timeout=15.0):
+        calls.append(key)
+        if fail:
+            raise s3.StorageError("хранилище отклонило удаление: HTTP 500")
+
+    monkeypatch.setattr(s3, "delete_object", fake)
+    return calls
+
+
+async def test_deleting_receipt_removes_its_photo_from_storage(
+    client, db, storage_env, monkeypatch
+):
+    """ЧЕК УДАЛЁН → ОБЪЕКТА В ХРАНИЛИЩЕ НЕТ.
+
+    До №3 снимок лежал внутри чека и исчезал вместе со строкой. Вынеся его
+    в бакет, мы САМИ создали бы состояние «пользователь удалил, а данные целы».
+    Проверяется СОСТОЯНИЕМ: чека в базе нет И удаление объекта было вызвано
+    ровно с его ключом.
+    """
+    calls = _fake_delete(monkeypatch)
+    created = await _create(client, photo_key="receipts/1/dead.jpg")
+    before = len(db.receipts)
+
+    resp = await client.delete(f"/api/receipts/{created['id']}")
+    assert resp.status_code == 200
+
+    assert calls == ["receipts/1/dead.jpg"], "снимок обязан быть убран из хранилища"
+    assert len(db.receipts) == before - 1
+    assert all(r["id"] != created["id"] for r in db.receipts)
+
+
+async def test_receipt_survives_when_storage_refuses_to_delete_photo(
+    client, db, storage_env, monkeypatch
+):
+    """Хранилище не отдало снимок — ЧЕК НЕ УДАЛЯЕТСЯ.
+
+    Обратный порядок оставлял бы в бакете персональные данные, на которые
+    больше ничто не ссылается: невидимо ни в одном интерфейсе и не удалить.
+    Лучше честный отказ и повтор.
+    """
+    _fake_delete(monkeypatch, fail=True)
+    created = await _create(client, photo_key="receipts/1/stuck.jpg")
+    before = len(db.receipts)
+
+    resp = await client.delete(f"/api/receipts/{created['id']}")
+    assert resp.status_code == 503
+
+    assert len(db.receipts) == before, "чек обязан остаться, раз фото не убрано"
+    assert any(r["id"] == created["id"] for r in db.receipts)
+
+
+async def test_receipt_without_photo_deletes_without_touching_storage(
+    client, db, storage_env, monkeypatch
+):
+    calls = _fake_delete(monkeypatch)
+    created = await _create(client)
+    resp = await client.delete(f"/api/receipts/{created['id']}")
+    assert resp.status_code == 200
+    assert calls == [], "без снимка хранилище дёргать незачем"
+
+
+async def test_bulk_delete_removes_photos_and_reports_storage_blocks(
+    client, db, storage_env, monkeypatch
+):
+    calls = _fake_delete(monkeypatch)
+    a = await _create(client, photo_key="receipts/1/a.jpg", amount=111.0, org="Лента")
+    b = await _create(client, amount=222.0, org="Ашан")
+    body = {"ids": [a["id"], b["id"]]}
+
+    resp = await client.post("/api/receipts/bulk-delete", json=body)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert set(data["deleted"]) == {a["id"], b["id"]}
+    assert data["blocked_storage"] == []
+    assert calls == ["receipts/1/a.jpg"]
+    assert all(r["id"] not in (a["id"], b["id"]) for r in db.receipts)
+
+
+async def test_bulk_delete_keeps_receipt_whose_photo_could_not_be_removed(
+    client, db, storage_env, monkeypatch
+):
+    _fake_delete(monkeypatch, fail=True)
+    a = await _create(client, photo_key="receipts/1/a.jpg", amount=333.0, org="Лента")
+    b = await _create(client, amount=444.0, org="Ашан")
+
+    resp = await client.post(
+        "/api/receipts/bulk-delete", json={"ids": [a["id"], b["id"]]}
+    )
+    data = resp.json()
+    assert data["blocked_storage"] == [a["id"]]
+    assert data["deleted"] == [b["id"]], "чек без фото удаляется как обычно"
+    # СОСТОЯНИЕ: чек со снимком остался, чек без снимка ушёл
+    ids = [r["id"] for r in db.receipts]
+    assert a["id"] in ids and b["id"] not in ids
