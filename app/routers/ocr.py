@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from app.auth import get_current_user
 from app.categorization import auto_categorize_v2, categorize
 from app.parsers.fns_parser import validate_inn
+from app.storage import s3
 
 logger = logging.getLogger(__name__)
 
@@ -367,10 +368,36 @@ async def ocr_receipt(
         return _fallback()
 
     result = _finalize(parsed)
-    # Echo the original photo back as base64 so the client can include it in
-    # the eventual POST /api/receipts/ body (it lands in raw_data.photo_base64
-    # and is served back via GET /api/receipts/{id}/photo). Temporary path
-    # before Cloudflare R2 is wired in — once R2 exists this becomes a URL
-    # via the receipts.photo_url column.
-    result["photo_base64"] = image_b64
+    return await _attach_photo(result, image_b64, user)
+
+
+async def _attach_photo(result: dict, image_b64: str, user: dict) -> dict:
+    """Приложить снимок к разбору: в хранилище, если оно настроено.
+
+    ТРИ ИСХОДА, И ВСЕ ТРИ ЯВНЫЕ (решение владельца, задача №3):
+      * хранилище настроено и приняло снимок → в ответе `photo_key`,
+        base64 НЕ возвращается. Круг «снимок в браузер и обратно» исчезает:
+        раньше фотография ехала к клиенту в base64 и оттуда же уезжала
+        обратно в raw_data, то есть через браузер ДВАЖДЫ;
+      * хранилище настроено и НЕ приняло → чек всё равно отдаётся, но
+        `photo_saved=False`. Запасного пути через base64 здесь НЕТ намеренно:
+        он вернул бы снимки в базу — ровно то, ради чего задача и затеяна;
+      * хранилище не настроено (переходный период до заведения бакета) →
+        старое поведение, base64, чтобы ничего не сломалось на проде.
+    """
+    cfg = s3.S3Config.from_env()
+    if cfg is None:
+        result["photo_base64"] = image_b64
+        return result
+    try:
+        key = await s3.put_object(
+            cfg, s3.build_object_key(user["org_id"]), base64.b64decode(image_b64)
+        )
+    except Exception as e:  # noqa: BLE001 — причина не важна, важно не потерять чек
+        # 152-ФЗ: пишем только тип ошибки, без адресов и ключей.
+        logger.warning("OCR: снимок не сохранён в хранилище: %s", type(e).__name__)
+        result["photo_saved"] = False
+        return result
+    result["photo_key"] = key
+    result["photo_saved"] = True
     return result

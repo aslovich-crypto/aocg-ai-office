@@ -16,6 +16,12 @@ from app.sql_builder import собрать_set
 from app.parsers.fns_parser import parse_fns_response
 from app.parsers.items_parser import parse_fns_items, parse_ocr_items
 from app.parsers.ocr_parser import parse_ocr_response
+from app.storage import s3
+
+# Срок жизни подписанной ссылки на фото. Пять минут — столько нужно браузеру,
+# чтобы открыть картинку. Длинный срок превращает приватный бакет в публичный
+# для всякого, кому ссылка попалась на глаза (журналы, история браузера).
+PHOTO_URL_TTL_SECONDS = 300
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +51,7 @@ class ReceiptIn(BaseModel):
     raw_data: Optional[dict] = None
     source: Optional[str] = None  # 'manual' | 'qr_scan' | 'photo_ocr' | 'fns'
     photo_url: Optional[str] = None  # external URL (Cloudflare R2 etc.) when set
+    photo_key: Optional[str] = None  # ключ объекта в приватном бакете (№3)
 
 
 @router.get("/")
@@ -104,24 +111,45 @@ async def suggest_payment(org: str, user: dict = Depends(get_current_user)):
 
 @router.get("/{id}/photo")
 async def get_receipt_photo(id: int, user: dict = Depends(get_current_user)):
-    """Return the receipt's photo (photo_url redirect, or inline raw_data.photo_base64)."""
+    """Фото чека. ТРИ ИСТОЧНИКА, ПОРЯДОК ЗНАЧИМ И ЗАКРЕПЛЁН ТЕСТАМИ.
+
+    photo_key (приватный бакет) → photo_url (внешний адрес) → base64 внутри
+    raw_data. Порядок именно такой, потому что до конца S-40 старые и новые
+    чеки живут ОДНОВРЕМЕННО: у старых снимок в базе, у новых — в хранилище.
+    Это стык, на котором ломается тихо: перевернётся порядок — часть чеков
+    начнёт отдавать устаревший источник, и снаружи это выглядит как «фото
+    просто другое», а не как ошибка.
+    """
     p = await get_pool()
     # A-ACL: employee видит фото только своего чека; accountant/admin — любого в орг.
     if can_see_all(user["role"]):
         row = await p.fetchrow(
-            "SELECT photo_url, raw_data FROM receipts WHERE id=$1 AND org_id=$2",
+            "SELECT photo_key, photo_url, raw_data FROM receipts WHERE id=$1 AND org_id=$2",
             id,
             user["org_id"],
         )
     else:
         row = await p.fetchrow(
-            "SELECT photo_url, raw_data FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3",
+            "SELECT photo_key, photo_url, raw_data FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3",
             id,
             user["org_id"],
             user["id"],
         )
     if not row:
         raise HTTPException(status_code=404, detail="Receipt not found")
+    if row["photo_key"]:
+        cfg = s3.S3Config.from_env()
+        if cfg is None:
+            # Ключ есть, а хранилище не настроено — это расхождение настроек,
+            # а не отсутствие фото. Молчать нельзя: 404 читался бы как «снимка нет».
+            raise HTTPException(status_code=503, detail="Storage is not configured")
+        url = s3.presign_get_url(
+            cfg, row["photo_key"], expires_in=PHOTO_URL_TTL_SECONDS
+        )
+        # no-store: подписанная ссылка живёт минуты, её нельзя оставлять в кэше.
+        return RedirectResponse(
+            url=url, status_code=302, headers={"Cache-Control": "no-store"}
+        )
     if row["photo_url"]:
         return RedirectResponse(url=row["photo_url"], status_code=302)
     raw = row["raw_data"] if isinstance(row["raw_data"], dict) else {}
@@ -403,11 +431,11 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                         org_inn, payment_form, payment_detail, card_last4,
                         tax_system, address, vat_0, vat_total,
                         kkt_serial, kkt_rn, fd_num, fpd, cashier, category_id, user_id,
-                        vat_breakdown
+                        vat_breakdown, photo_key
                     ) VALUES (
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
                         $12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
-                        $23,$24,$25,$26,$27,$28,$29,$30,$31
+                        $23,$24,$25,$26,$27,$28,$29,$30,$31,$32
                     ) RETURNING *""",
                     user["org_id"],
                     r.date,
@@ -440,6 +468,7 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                     category_id,
                     user["id"],
                     parsed.get("vat_breakdown"),
+                    r.photo_key,
                 )
                 # Позиции — best-effort: вложенная транзакция (SAVEPOINT), чтобы
                 # сбой вставки/парсинга позиций откатывал ТОЛЬКО их, а чек оставался.

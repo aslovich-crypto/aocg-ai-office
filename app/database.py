@@ -161,6 +161,17 @@ async def init_db():
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS raw_data JSONB;
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual';
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS photo_url TEXT;
+            -- photo_key — КЛЮЧ ОБЪЕКТА в приватном бакете (задача №3), а не адрес.
+            -- Почему отдельная колонка, а не photo_url: у приватного бакета
+            -- постоянного адреса нет, ссылка подписывается на 5 минут в момент
+            -- запроса. Смешать в одной колонке ключ и готовый URL — это «одно
+            -- название, разное содержимое», и оно уже закреплено пятью тестами
+            -- на photo_url. Обратный DDL (точка отката):
+            --     ALTER TABLE receipts DROP COLUMN photo_key;
+            -- Проверено на проде 12.08.2026 внутри BEGIN/ROLLBACK: колонка
+            -- создаётся, повторный прогон идемпотентен, запись читается,
+            -- после отката колонки нет.
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS photo_key TEXT;
             CREATE TABLE IF NOT EXISTS cards (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(100) NOT NULL,

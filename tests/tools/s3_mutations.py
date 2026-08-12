@@ -26,15 +26,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 S3 = ROOT / "app" / "storage" / "s3.py"
-PYTEST = [
-    str(ROOT / "venv" / "bin" / "python"),
-    "-m",
-    "pytest",
-    "tests/test_s3_signing.py",
-    "-q",
-]
+RECEIPTS = ROOT / "app" / "routers" / "receipts.py"
+OCR = ROOT / "app" / "routers" / "ocr.py"
+CONFTEST = ROOT / "tests" / "conftest.py"
 
-# (имя, файл, что заменить, на что, какой текст ОБЯЗАН появиться в выводе)
+SIGN_TESTS = "tests/test_s3_signing.py"
+PHOTO_TESTS = "tests/test_photo_storage.py"
+
+
+def pytest_cmd(target: str):
+    return [str(ROOT / "venv" / "bin" / "python"), "-m", "pytest", target, "-q"]
+
+
+# (имя, файл, что заменить, на что, какой текст ОБЯЗАН появиться в выводе, какие тесты гонять)
 MUTATIONS = [
     (
         "M1 порядок полей канонического запроса",
@@ -42,6 +46,7 @@ MUTATIONS = [
         "            canonical_uri(path),\n            canonical_query(query),",
         "            canonical_query(query),\n            canonical_uri(path),",
         "test_canonical_request_matches_aws_fixture",
+        SIGN_TESTS,
     ),
     (
         "M2 сортировка параметров запроса",
@@ -49,6 +54,7 @@ MUTATIONS = [
         "    encoded = sorted((uri_encode(k), uri_encode(v)) for k, v in items)",
         "    encoded = [(uri_encode(k), uri_encode(v)) for k, v in items]",
         "get-vanilla-query-order-key-case",
+        SIGN_TESTS,
     ),
     (
         "M3 схлопывание пробелов в значении заголовка",
@@ -56,6 +62,7 @@ MUTATIONS = [
         '        k.lower().strip(): _WS_RUN.sub(" ", v.strip()) for k, v in headers.items()',
         "        k.lower().strip(): v.strip() for k, v in headers.items()",
         "get-header-value-trim",
+        SIGN_TESTS,
     ),
     (
         "M4 набор незарезервированных символов при кодировании",
@@ -63,6 +70,7 @@ MUTATIONS = [
         r'_UNRESERVED = re.compile(r"[^A-Za-z0-9\-._~]")',
         r'_UNRESERVED = re.compile(r"[^A-Za-z0-9\-._]")',
         "get-unreserved",
+        SIGN_TESTS,
     ),
     (
         "M5 вывод ключа подписи (последний шаг)",
@@ -70,6 +78,7 @@ MUTATIONS = [
         '    return _hmac_sha256(k_service, "aws4_request")',
         '    return _hmac_sha256(k_service, "aws4_Request")',
         "test_signature_matches_aws_fixture",
+        SIGN_TESTS,
     ),
     (
         "M6 Content-Type попал в подписанную ссылку",
@@ -77,12 +86,63 @@ MUTATIONS = [
         '        ("X-Amz-SignedHeaders", "host"),',
         '        ("X-Amz-SignedHeaders", "host"),\n        ("Content-Type", "image/jpeg"),',
         "test_presigned_url_has_required_parts_and_no_content_type",
+        SIGN_TESTS,
+    ),
+    # ── стык трёх источников фото: то, что ломается ТИХО (шаг 3) ──
+    (
+        "M7 порядок источников перевёрнут: адрес побеждает ключ",
+        RECEIPTS,
+        '    if row["photo_key"]:\n        cfg = s3.S3Config.from_env()',
+        '    if row["photo_url"]:\n        return RedirectResponse(url=row["photo_url"], status_code=302)\n'
+        '    if row["photo_key"]:\n        cfg = s3.S3Config.from_env()',
+        "test_photo_key_wins_over_url_and_base64",
+        PHOTO_TESTS,
+    ),
+    (
+        "M8 подписанная ссылка попадает в кэш (снят no-store)",
+        RECEIPTS,
+        '            url=url, status_code=302, headers={"Cache-Control": "no-store"}',
+        "            url=url, status_code=302",
+        "test_photo_key_alone_redirects_to_signed_url",
+        PHOTO_TESTS,
+    ),
+    (
+        "M9 при отказе хранилища втихую вернулись к base64",
+        OCR,
+        '        result["photo_saved"] = False\n        return result',
+        '        result["photo_saved"] = False\n        result["photo_base64"] = image_b64\n        return result',
+        "test_ocr_survives_storage_failure_and_says_so",
+        PHOTO_TESTS,
+    ),
+    (
+        "M10 ключ без настроенного хранилища отдаёт 404 вместо 503",
+        RECEIPTS,
+        'raise HTTPException(status_code=503, detail="Storage is not configured")',
+        'raise HTTPException(status_code=404, detail="No photo for this receipt")',
+        "test_photo_key_without_configured_storage_is_503_not_404",
+        PHOTO_TESTS,
+    ),
+    (
+        "M11 снимок продолжает ездить в браузер вместе с ключом",
+        OCR,
+        '    result["photo_key"] = key\n    result["photo_saved"] = True',
+        '    result["photo_key"] = key\n    result["photo_base64"] = image_b64\n    result["photo_saved"] = True',
+        "test_ocr_puts_photo_into_storage_and_stops_echoing_base64",
+        PHOTO_TESTS,
+    ),
+    (
+        "M12 зеркало FakePool не видит photo_key (ворота данных)",
+        CONFTEST,
+        '                    photo_key=r.get("photo_key"),',
+        "                    photo_key=None,",
+        "test_photo_key_alone_redirects_to_signed_url",
+        PHOTO_TESTS,
     ),
 ]
 
 
-def run_tests() -> tuple[int, str]:
-    proc = subprocess.run(PYTEST, cwd=ROOT, capture_output=True, text=True)
+def run_tests(target: str = SIGN_TESTS) -> tuple[int, str]:
+    proc = subprocess.run(pytest_cmd(target), cwd=ROOT, capture_output=True, text=True)
     return proc.returncode, proc.stdout + proc.stderr
 
 
@@ -97,7 +157,7 @@ def main() -> int:
     print("исходный прогон зелёный, начинаем ломать\n")
 
     failures = []
-    for name, path, old, new, expected_text in MUTATIONS:
+    for name, path, old, new, expected_text, target in MUTATIONS:
         original = path.read_text(encoding="utf-8")
         count = original.count(old)
         if count != 1:
@@ -114,7 +174,7 @@ def main() -> int:
             continue
         path.write_text(mutated, encoding="utf-8")
         try:
-            code, out = run_tests()
+            code, out = run_tests(target)
         finally:
             path.write_text(original, encoding="utf-8")
 

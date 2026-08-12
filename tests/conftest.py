@@ -520,7 +520,9 @@ class FakePool:
                 ),
                 None,
             )
-        if q.startswith("SELECT photo_url, raw_data FROM receipts WHERE id=$1"):
+        if q.startswith(
+            "SELECT photo_key, photo_url, raw_data FROM receipts WHERE id=$1"
+        ):
             # A-ACL: enforce org_id (и user_id для employee).
             rid = args[0]
             org_id = args[1] if len(args) > 1 else None
@@ -536,7 +538,11 @@ class FakePool:
                 None,
             )
             return (
-                dict(photo_url=r.get("photo_url"), raw_data=r.get("raw_data"))
+                dict(
+                    photo_key=r.get("photo_key"),
+                    photo_url=r.get("photo_url"),
+                    raw_data=r.get("raw_data"),
+                )
                 if r
                 else None
             )
@@ -720,6 +726,10 @@ class FakePool:
                 category_id=args[28],
                 user_id=args[29],
                 vat_breakdown=args[30],
+                # photo_key добавлен ПОСЛЕДНИМ параметром намеренно: так позиции
+                # остальных не сдвинулись, и зеркало не пришлось перенумеровывать
+                # целиком (на этом уже горели — см. комментарий про NDS-CLEANUP выше).
+                photo_key=args[31],
                 card_id=None,
                 created_at=datetime.utcnow(),
             )

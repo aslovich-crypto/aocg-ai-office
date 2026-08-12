@@ -260,6 +260,55 @@ def presign_get_url(
     )
 
 
+def build_object_key(org_id: int, suffix: str = ".jpg") -> str:
+    """Ключ объекта: receipts/{org_id}/{uuid}{suffix}.
+
+    В ключе НЕТ ни ФИО, ни ИНН, ни даты покупки: ключ попадает в адрес
+    подписанной ссылки, а адрес — в журналы и в историю браузера. Он не
+    должен рассказывать о содержимом. uuid4 заодно делает ключ
+    неугадываемым.
+    """
+    import uuid
+
+    return "receipts/%d/%s%s" % (org_id, uuid.uuid4().hex, suffix)
+
+
+async def put_object(
+    cfg: S3Config,
+    key: str,
+    data: bytes,
+    content_type: str = "image/jpeg",
+    timeout: float = 15.0,
+):
+    """Положить объект в бакет. Бросает исключение при любой неудаче.
+
+    Вызывающая сторона ОБЯЗАНА поймать: по решению владельца чек сохраняется
+    всегда, фото вторично (см. №3). Молча проглатывать здесь нельзя —
+    пользователю говорят честно, что снимок не приложен.
+    """
+    import httpx
+
+    now = datetime.now(timezone.utc)
+    amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+    date_stamp = now.strftime("%Y%m%d")
+    payload_hash = sha256_hex(data)
+    headers = {
+        "host": cfg.host,
+        "x-amz-content-sha256": payload_hash,
+        "x-amz-date": amz_date,
+        "content-type": content_type,
+    }
+    headers["authorization"] = authorization_header(
+        cfg, "PUT", key, headers, payload_hash, date_stamp, amz_date
+    )
+    url = cfg.endpoint + canonical_uri(object_path(cfg.bucket, key))
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.put(url, content=data, headers=headers)
+    if resp.status_code >= 300:
+        raise RuntimeError("хранилище отклонило запись: HTTP %d" % resp.status_code)
+    return key
+
+
 def authorization_header(
     cfg: S3Config,
     method: str,
