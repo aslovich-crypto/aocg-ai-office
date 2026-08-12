@@ -2634,3 +2634,46 @@ async def test_create_report_nonexistent_receipt_403(client, db):
     assert resp.status_code == 403
     assert db.reports == []
     assert db.report_items == []
+
+
+# ─── строка 24: неправдоподобная дата попадает в warnings ручки OCR ───
+async def test_ocr_warns_about_implausible_date(client, monkeypatch):
+    """Ровно случай 12.08.2026: модель вернула 2024 год на сегодняшний чек.
+
+    Проверяем, что предупреждение доезжает ДО КЛИЕНТА, а не остаётся
+    в чистой функции: честный признак, которого никто не видит, — то же
+    самое, что его отсутствие.
+    """
+    import json as _json
+
+    payload = {
+        "org_brand": "Ресторан",
+        "amount": 3500,
+        "datetime": "2024-12-26T15:15:00",
+        "confidence": "high",
+    }
+    _install_fake(monkeypatch, lambda kw: _Response(_json.dumps(payload)))
+    files = {"file": ("r.png", io.BytesIO(_PNG_1x1), "image/png")}
+    body = (await client.post("/api/receipts/ocr/", files=files)).json()
+
+    assert body["date"] == "2024-12-26", "дата модели сохраняется как есть"
+    assert any("26.12.2024" in w for w in body["warnings"]), (
+        "неправдоподобная дата обязана попасть в warnings ответа"
+    )
+
+
+async def test_ocr_does_not_warn_about_normal_date(client, monkeypatch):
+    # Ложная тревога учит не смотреть на предупреждения — проверяем обе стороны.
+    import json as _json
+    from datetime import date
+
+    payload = {
+        "org_brand": "Ресторан",
+        "amount": 3500,
+        "datetime": date.today().strftime("%Y-%m-%dT12:00:00"),
+        "confidence": "high",
+    }
+    _install_fake(monkeypatch, lambda kw: _Response(_json.dumps(payload)))
+    files = {"file": ("r.png", io.BytesIO(_PNG_1x1), "image/png")}
+    body = (await client.post("/api/receipts/ocr/", files=files)).json()
+    assert body["warnings"] == []

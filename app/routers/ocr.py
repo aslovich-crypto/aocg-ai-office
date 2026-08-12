@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from app.auth import get_current_user
 from app.categorization import auto_categorize_v2, categorize
+from app.date_check import date_warning
 from app.parsers.fns_parser import validate_inn
 from app.storage import s3
 
@@ -205,6 +206,19 @@ def _finalize(parsed: dict) -> dict:
     out["datetime"] = iso
     if iso and "T" in iso:
         out["date"], out["time"] = iso.split("T", 1)
+
+    # Правдоподобность даты (строка 24). НЕ блокируем — предупреждаем: чек
+    # может быть и правда старым, решает человек. Проверка стоит здесь,
+    # а не в роутере чеков, потому что ловит она ошибку РАСПОЗНАВАНИЯ,
+    # а не ошибку пользователя: 12.08.2026 модель вернула 2024-12-26
+    # на сегодняшний чек, и он сохранился молча.
+    if out["date"]:
+        try:
+            warning = date_warning(datetime.strptime(out["date"], "%Y-%m-%d").date())
+        except ValueError:
+            warning = None
+        if warning:
+            out["warnings"].append(warning)
 
     # INN checksum: drop an invalid OCR-read INN and warn (don't store garbage)
     inn = out["org_inn"]
