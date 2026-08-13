@@ -47,6 +47,24 @@ class AOCGSecurityMiddleware(BaseHTTPMiddleware):
     # register-by-invite/verify-email/logout — строгие. См. S-27.
     STRICT_AUTH_EXEMPT = frozenset({"/api/auth/refresh", "/api/auth/me"})
 
+    # Ручка состояния: её дёргает МОНИТОР площадки, а не пользователь.
+    # На Timeweb App Platform проверка идёт по петле (127.0.0.1) и всегда
+    # по http — заголовка `x-forwarded-proto` там нет вовсе, поэтому
+    # принуждение HTTPS отдавало ей 403, площадка считала приложение
+    # больным и убивала контейнер по кругу (S-06 шаг 3, 13.08.2026).
+    #
+    # Исключение ШИРЕ, чем только HTTPS, и это намеренно: монитор ходит
+    # с ОДНОГО адреса раз в несколько секунд, а общий лимит — 60 запросов
+    # в минуту с адреса. При интервале в секунду это ровно на границе,
+    # а после ban_threshold превышений сработал бы автобан на 5 минут —
+    # то есть та же смерть контейнера, только позже и через 429.
+    #
+    # Что при этом НЕ теряется: ручка не отдаёт данных, не трогает БД
+    # и всегда возвращает 200 (см. app/main.py). Заголовки безопасности
+    # на неё по-прежнему навешиваются. Снаружи HTTP по-прежнему закрыт —
+    # обратный прокси площадки отвечает на порт 80 редиректом 308 на HTTPS.
+    LIVENESS_EXEMPT = frozenset({"/health"})
+
     def __init__(
         self,
         app,
@@ -103,6 +121,10 @@ class AOCGSecurityMiddleware(BaseHTTPMiddleware):
         return path.startswith("/api/auth/") and path not in self.STRICT_AUTH_EXEMPT
 
     async def dispatch(self, request: Request, call_next):
+        # 0. Проверка состояния — мимо всех ограничений (см. LIVENESS_EXEMPT).
+        if request.url.path in self.LIVENESS_EXEMPT:
+            return self._apply_headers(await call_next(request))
+
         now = time.time()
         ip = self._client_ip(request)
 

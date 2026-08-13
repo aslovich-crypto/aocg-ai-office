@@ -74,3 +74,47 @@ def test_is_strict_auth_classification():
     assert mw._is_strict_auth("/api/auth/refresh") is False
     assert mw._is_strict_auth("/api/auth/me") is False
     assert mw._is_strict_auth("/api/receipts/") is False
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# S-06 шаг 3: проверка состояния площадки идёт по петле и всегда по http.
+# Пока /health не был исключён, принуждение HTTPS отдавало ей 403, Timeweb
+# App Platform считал приложение больным и убивал контейнер по кругу.
+# Три теста: исключение работает · исключение НЕ шире, чем надо · монитор
+# не выжигает общий лимит (иначе та же смерть, но через 429 и автобан).
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def _standalone_health(**cfg):
+    async def ok(request):
+        return PlainTextResponse("ok")
+
+    app = Starlette(routes=[Route("/health", ok), Route("/ping", ok)])
+    app.add_middleware(AOCGSecurityMiddleware, **cfg)
+    return TestClient(app)
+
+
+def test_health_passes_over_plain_http_when_https_enforced():
+    # Как ходит монитор Timeweb: http, без x-forwarded-proto.
+    c = _standalone_health(enforce_https=True, rate_limit=100, auth_rate_limit=100)
+    resp = c.get("http://testserver/health")
+    assert resp.status_code == 200, "проверка состояния должна проходить по http"
+    # Заголовки безопасности при этом НЕ отваливаются.
+    assert resp.headers["x-content-type-options"] == "nosniff"
+
+
+def test_enforce_https_still_blocks_other_paths():
+    # Вторая половина: исключение не должно снять принуждение со всего app.
+    c = _standalone_health(enforce_https=True, rate_limit=100, auth_rate_limit=100)
+    resp = c.get("http://testserver/ping")
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "HTTPS required"
+
+
+def test_health_does_not_consume_general_rate_limit():
+    # Монитор ходит с одного адреса чаще, чем лимит: он не должен ни сам
+    # получить 429, ни съесть бюджет обычных запросов с того же адреса.
+    c = _standalone_health(enforce_https=False, rate_limit=3, auth_rate_limit=3)
+    for _ in range(10):
+        assert c.get("/health").status_code == 200
+    assert c.get("/ping").status_code == 200, "монитор выжег общий лимит"
