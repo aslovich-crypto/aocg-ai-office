@@ -77,6 +77,8 @@ OCR_PROMPT = """Это фотография БУМАЖНОГО кассовог�
 # PLUS the backward-compat aliases the current frontend reads (org/date/time/
 # payment_type/inn/nds), so the client never needs separate branches.
 OCR_FALLBACK: dict = {
+    # Причина пустого разбора; на успешном ответе — None (S-54).
+    "reason": None,
     # rich fields (new data standard)
     "org_legal": None,
     "org_brand": None,
@@ -139,9 +141,25 @@ def _get_anthropic_client() -> AsyncAnthropic:
     return _anthropic_client
 
 
-def _fallback() -> dict:
-    """Fresh copy of OCR_FALLBACK with category filled in for an unknown org."""
-    return {**OCR_FALLBACK, "category": auto_categorize_v2(""), "warnings": []}
+def _fallback(reason: str) -> dict:
+    """Пустой разбор + ПРИЧИНА, по которой он пуст (S-54).
+
+    `reason` ОБЯЗАТЕЛЕН намеренно: раньше все шесть путей отказа
+    возвращали одинаковый пустой словарь, и фронт не мог их различить —
+    человек с бумажным чеком видел «Данные ФНС не загрузились» и не
+    понимал, переснимать ему, ждать или вводить руками. Обязательный
+    параметр означает, что новый путь отказа НЕ СМОЖЕТ появиться молча.
+
+    Значения:
+      ocr_unavailable — распознавание отключено (нет ключа поставщика);
+      ocr_failed      — снимок получен, но разобрать не удалось.
+    """
+    return {
+        **OCR_FALLBACK,
+        "category": auto_categorize_v2(""),
+        "warnings": [],
+        "reason": reason,
+    }
 
 
 def _normalize_datetime(value) -> Optional[str]:
@@ -331,11 +349,11 @@ async def ocr_receipt(
             media_type = "image/jpeg"
         except Exception as e:  # noqa: BLE001 — bad/empty/encrypted PDF → manual fallback
             logger.warning("OCR PDF conversion failed: %s", type(e).__name__)
-            return _fallback()
+            return _fallback("ocr_failed")
 
     if not os.getenv("ANTHROPIC_API_KEY"):
         logger.warning("OCR: ANTHROPIC_API_KEY not set — returning low confidence")
-        return _fallback()
+        return _fallback("ocr_unavailable")
 
     image_b64 = base64.standard_b64encode(data).decode("utf-8")
     client = _get_anthropic_client().with_options(
@@ -366,20 +384,20 @@ async def ocr_receipt(
         )
     except APITimeoutError:
         logger.warning("OCR Claude API timeout")
-        return _fallback()
+        return _fallback("ocr_failed")
     except APIError as e:
         logger.warning("OCR Claude API error: %s", type(e).__name__)
-        return _fallback()
+        return _fallback("ocr_failed")
     except Exception as e:  # noqa: BLE001  — last-resort guard; never 500 to the client
         logger.warning("OCR unexpected error: %s", type(e).__name__)
-        return _fallback()
+        return _fallback("ocr_failed")
 
     text = next((block.text for block in response.content if block.type == "text"), "")
     parsed = _extract_json(text)
     if parsed is None:
         # 152-ФЗ: НЕ логируем содержимое ответа Claude — там могут быть ИНН/суммы.
         logger.warning("OCR returned non-JSON, length=%d", len(text))
-        return _fallback()
+        return _fallback("ocr_failed")
 
     result = _finalize(parsed)
     return await _attach_photo(result, image_b64, user)
