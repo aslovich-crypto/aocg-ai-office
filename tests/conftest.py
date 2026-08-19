@@ -1238,6 +1238,11 @@ class FakePool:
                     u["tokens_valid_from"] = args[0]
             return "UPDATE 1"
         # ── S-31: счётчик неудачных попыток входа ───────────────────────────
+        if q.startswith("UPDATE users SET last_login_at=NOW() WHERE id=$1"):
+            for u in self.users:
+                if u["id"] == args[0]:
+                    u["last_login_at"] = datetime.now(timezone.utc)
+            return "UPDATE 1"
         if q.startswith("UPDATE users SET failed_attempts=$1, locked_until=$2"):
             for u in self.users:
                 if u["id"] == args[2]:
@@ -1249,7 +1254,12 @@ class FakePool:
                 if u["id"] == args[0]:
                     u["failed_attempts"] = 0
                     u["locked_until"] = None
-                    u["last_login_at"] = datetime.now(timezone.utc)
+                    # last_login_at ставится ТОЛЬКО если он есть в запросе:
+                    # с S-59 появился сброс счётчика БЕЗ отметки о входе
+                    # (по истечении блокировки и перед воротами почты).
+                    # Безусловная простановка расходилась бы с PostgreSQL.
+                    if "last_login_at" in q:
+                        u["last_login_at"] = datetime.now(timezone.utc)
             return "UPDATE 1"
         if q.startswith(
             "UPDATE users SET is_email_verified=true, email_verify_token=NULL"

@@ -153,6 +153,57 @@ async def test_unverified_email_cannot_log_in(client, сотрудник):
 
 
 @pytest.mark.asyncio
+async def test_expired_lock_forgives_the_counter(client, сотрудник):
+    """ГЛАВНЫЙ сценарий S-59, которого не было в матрице до 20.08.2026.
+
+    Отсидел 15 минут — прощён. До правки время снимало ЗАПРЕТ, но не ВИНУ:
+    счётчик оставался на 5, и ОДНА следующая опечатка снова давала
+    attempts >= 5 → мгновенные новые 15 минут. Человек без пароля
+    и без восстановления (S-56) оставался в петле навсегда.
+    Живой случай 18.08.2026: 10 накопленных попыток, вход невозможен часами.
+    """
+    for _ in range(4):
+        assert (await _вход(client, "мимо")).status_code == 401
+    assert (await _вход(client, "мимо")).status_code == 429
+    assert сотрудник["failed_attempts"] == 5
+
+    # время вышло
+    сотрудник["locked_until"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    ответ = await _вход(client, "мимо")
+    assert ответ.status_code == 401, (
+        "после истёкшей блокировки ОДНА ошибка обязана дать 401, а не 429: "
+        f"получили {ответ.status_code}"
+    )
+    assert сотрудник["failed_attempts"] == 1, (
+        "счётчик обязан начаться заново, а не продолжиться с пятого"
+    )
+    assert сотрудник["locked_until"] is None
+
+
+@pytest.mark.asyncio
+async def test_correct_password_resets_counter_even_if_email_unverified(
+    client, сотрудник
+):
+    """Счётчик защищает от ПОДБОРА, а верный пароль доказывает, что подбора нет.
+
+    До правки 403 «Подтвердите email» вылетал РАНЬШЕ сброса, и человек
+    с неподтверждённой почтой копил попытки при каждом верном вводе —
+    то есть блокировался, вводя правильный пароль.
+    """
+    сотрудник["is_email_verified"] = False
+    сотрудник["failed_attempts"] = 3
+
+    ответ = await _вход(client, ПАРОЛЬ)
+    assert ответ.status_code == 403, ответ.text
+    assert "access_token" not in ответ.json()
+    assert сотрудник["failed_attempts"] == 0, (
+        "верный пароль обязан обнулить счётчик ДО ворот подтверждения почты"
+    )
+    assert сотрудник["locked_until"] is None
+
+
+@pytest.mark.asyncio
 async def test_successful_login_resets_the_counter(client, сотрудник):
     сотрудник["failed_attempts"] = 3
     assert (await _вход(client, ПАРОЛЬ)).status_code == 200

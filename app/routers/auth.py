@@ -247,6 +247,24 @@ async def login(request: Request, body: LoginIn):
             detail=f"Слишком много попыток. Попробуйте через {mins} мин",
         )
 
+    # ⚠️ БЛОКИРОВКА ИСТЕКЛА — ЧИСТИМ СЧЁТЧИК ДО ПРОВЕРКИ ПАРОЛЯ (S-59).
+    # Сюда попадаем, только если проверка выше не сработала, то есть
+    # locked_until в прошлом. До 20.08.2026 время снимало ЗАПРЕТ, но не ВИНУ:
+    # failed_attempts оставался 5, 10, сколько накопилось, и любая следующая
+    # опечатка снова давала attempts >= 5 → мгновенные новые 15 минут.
+    # Обнулить мог только успешный вход — а если пароль не вспомнить и
+    # восстановления нет (S-56), выхода из петли не существовало вовсе.
+    # Живой случай 18.08.2026: у владельца 10 попыток, вход невозможен часами,
+    # лечили ручным UPDATE через бастион.
+    # Смысл правки: отсидел 15 минут — прощён.
+    if u.get("locked_until"):
+        await p.execute(
+            "UPDATE users SET failed_attempts=0, locked_until=NULL WHERE id=$1",
+            u["id"],
+        )
+        u["failed_attempts"] = 0
+        u["locked_until"] = None
+
     if not verify_password(body.password, u.get("password_hash")):
         attempts = (u.get("failed_attempts") or 0) + 1
         locked = now + timedelta(minutes=15) if attempts >= 5 else None
@@ -262,13 +280,19 @@ async def login(request: Request, body: LoginIn):
             )
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
 
+    # ⚠️ СБРОС ИДЁТ ДО ВОРОТ ПОДТВЕРЖДЕНИЯ ПОЧТЫ (S-59). Счётчик защищает
+    # от ПОДБОРА, а верный пароль доказывает, что подбора нет. До 20.08.2026
+    # 403 вылетал раньше сброса, и человек с неподтверждённой почтой копил
+    # попытки при КАЖДОМ верном вводе.
+    await p.execute(
+        "UPDATE users SET failed_attempts=0, locked_until=NULL WHERE id=$1",
+        u["id"],
+    )
+
     if not u.get("is_email_verified"):
         raise HTTPException(status_code=403, detail="Подтвердите email")
 
-    await p.execute(
-        "UPDATE users SET failed_attempts=0, locked_until=NULL, last_login_at=NOW() WHERE id=$1",
-        u["id"],
-    )
+    await p.execute("UPDATE users SET last_login_at=NOW() WHERE id=$1", u["id"])
     return await _auth_payload(p, u)
 
 
