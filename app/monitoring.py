@@ -18,7 +18,7 @@ from sentry_sdk.integrations.fastapi import FastApiIntegration
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from aocg_security.masking import mask_log_dict
+from aocg_security.masking import _SECRET_KEYS, mask_log_dict
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,112 @@ def _scrub_query(value: str) -> str:
     return _SENSITIVE_QS.sub(lambda m: f"{m.group(1)}=***", value)
 
 
+# ─── Разрешительный список для request.data (S-66, S-68, S-69) ───────────────
+# ПРИНЦИП ЗДЕСЬ ОБРАТНЫЙ mask_log_dict, И ЭТО НАМЕРЕННО. mask_log_dict режет
+# ИЗВЕСТНОЕ ПЛОХОЕ (список ключей ПД); он подвёл трижды — на `text` шлюза MAX,
+# на 16 полях с именами в шести роутерах и внутри `raw_data`, где ключи
+# придумали не мы, а ФНС. Здесь наоборот: остаётся только ЯВНО НАЗВАННОЕ
+# безопасное, остальное режется. Отказ становится шумным (в разборе не хватит
+# поля) вместо тихого (ПД ушли и никто не заметил).
+#
+# Область — ТОЛЬКО request.data: там лежит присланное пользователем, а в этом
+# приложении присланное пользователем и есть ПД. event["extra"] наполняет наш
+# собственный код, свободного пользовательского текста там нет, и он остаётся
+# на mask_log_dict.
+#
+# Список собран замером по ВСЕМ моделям запросов проекта (48 полей), а не по
+# памяти. Каждое имя — идентификатор, перечисление или флаг: ни одно не
+# приходит свободным текстом. `region` в список НЕ вошёл: по таблице он похож
+# на перечисление, а по модели (`users.py:110`) — Optional[str].
+_DATA_ALLOWLIST = frozenset(
+    {
+        # идентификаторы и ссылки: значение бессмысленно без базы
+        "chat_id",
+        "employee_id",
+        "employee_number",
+        "group_id",
+        "ids",
+        "receiptids",
+        "photo_key",
+        # перечисления: конечный набор значений, задан нашим кодом
+        "role",
+        "source",
+        "status",
+        "org_type",
+        "tax_kind",
+        "tax_system",
+        "format",
+        # флаги и числа настройки
+        "force",
+        "is_visible",
+        "notify",
+        "max_uses",
+        "expires_hours",
+    }
+)
+
+# ⚠️ ЗАВИСИМОСТЬ ОТ ЗАПРЕТИТЕЛЬНОГО МОДУЛЯ НАМЕРЕННАЯ: для ключей из
+# _SECRET_KEYS форма метки ДРУГАЯ — без типа и длины. Длина пароля сужает
+# перебор, и то же верно для token, refresh_token, api_key.
+# ЕСЛИ СЮДА ДОБАВЯТ КЛЮЧ, ПОВЕДЕНИЕ ЭТОЙ ФУНКЦИИ ИЗМЕНИТСЯ МОЛЧА.
+_MAX_DEPTH = 6
+
+
+def _метка(значение) -> str:
+    """Форма вырезанного: тип и размер, но НЕ содержимое."""
+    if isinstance(значение, dict):
+        return f"<вырезано: dict, {len(значение)} ключей>"
+    if isinstance(значение, (list, tuple)):
+        return f"<вырезано: list, {len(значение)} элементов>"
+    if isinstance(значение, str):
+        return f"<вырезано: str, {len(значение)}>"
+    return f"<вырезано: {type(значение).__name__}>"
+
+
+def _простое(значение) -> bool:
+    """Скаляр или список скаляров — то, ради чего ключ попал в список."""
+    if значение is None or isinstance(значение, (str, int, float, bool)):
+        return True
+    if isinstance(значение, (list, tuple)):
+        return all(
+            x is None or isinstance(x, (str, int, float, bool)) for x in значение
+        )
+    return False
+
+
+def _scrub_request_data(значение, глубина: int = 0):
+    """Разрешительная фильтрация request.data. Вариант «б»: неразрешённый узел
+    режется ЦЕЛИКОМ, внутрь не спускаемся.
+
+    Почему не спускаемся: список собран по НАШИМ моделям верхнего уровня.
+    На произвольной глубине то же имя несёт другое содержимое — `format`
+    наверху это "markdown" из закрытого набора, а внутри чужого объекта
+    может быть свободным текстом.
+    """
+    if глубина > _MAX_DEPTH:
+        return "<вырезано: слишком глубоко>"
+    if isinstance(значение, dict):
+        итог = {}
+        for k, v in значение.items():
+            kl = str(k).lower()
+            if kl in _SECRET_KEYS:
+                итог[k] = "<вырезано>"
+            elif kl in _DATA_ALLOWLIST and _простое(v):
+                итог[k] = v
+            else:
+                итог[k] = _метка(v)
+        return итог
+    if isinstance(значение, (list, tuple)):
+        return [_scrub_request_data(x, глубина + 1) for x in значение]
+    # ⚠️ ХВОСТ РЕЖЕТ, А НЕ ПРОПУСКАЕТ. Сюда попадает то, у чего НЕТ ключа:
+    # сырое тело запроса строкой на верхнем уровне и скаляры внутри списков.
+    # Разрешение выдаётся ИМЕНИ КЛЮЧА; нет ключа — нет и разрешения.
+    # Найдено вопросом владельца 19.08.2026: до правки строка с именем и ИНН
+    # проходила насквозь, и это было бы дырой ШИРЕ исходной — ни один ключ
+    # такое тело не защищает.
+    return _метка(значение)
+
+
 def _sentry_scrub(event, hint):
     """before_send: маскирует ПД до отправки. При любой ошибке scrub'а → None
     (НЕ слать неотскрабленное событие — приоритет защиты ПД над полнотой)."""
@@ -47,9 +153,10 @@ def _sentry_scrub(event, hint):
 
         req = event.get("request")
         if isinstance(req, dict):
-            data = req.get("data")
-            if isinstance(data, dict):
-                req["data"] = mask_log_dict(data)
+            # S-68/S-69: разрешительный список вместо mask_log_dict.
+            # Меняется ТОЛЬКО эта ветка; query_string, url и extra прежние.
+            if "data" in req:
+                req["data"] = _scrub_request_data(req["data"])
             qs = req.get("query_string")
             if isinstance(qs, str):
                 req["query_string"] = _scrub_query(qs)
