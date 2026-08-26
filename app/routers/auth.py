@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -52,6 +52,21 @@ router = APIRouter(prefix="/api", tags=["auth"])
 # в пяти местах, и добавлять .rstrip("/") в каждое — значит однажды забыть
 # в шестом. Так же сделано у MAX_API (max_relay.py:43).
 APP_URL = os.getenv("APP_URL", "").rstrip("/")
+
+
+# ⚠️ ПИСЬМА УХОДЯТ ЧЕРЕЗ background.add_task, А НЕ ПРЯМЫМ ВЫЗОВОМ (T66).
+# Отправка синхронная (smtplib), а обработчики — async. Прямой вызов
+# останавливал НЕ запрос, а весь цикл событий: uvicorn поднят одним
+# процессом без --workers, то есть цикл на приложение один. Замер 26.08.2026:
+# при отправке, длящейся 2 с, посторонний GET / начинался не на 0.20 с,
+# как задумано, а на 2.27 — он ждал ЧУЖОГО письма. На проде ожидание не 2 с,
+# а 20 (таймаут SMTP).
+#
+# ПОЧЕМУ ИМЕННО add_task, А НЕ asyncio.create_task: starlette исполняет
+# НЕасинхронную задачу через run_in_threadpool (background.py:29), то есть
+# разом снимает обе беды — ответ не ждёт письма И цикл не блокируется.
+# create_task «выстрелил и забыл» дал бы третью: исключение внутри улетело
+# бы в пустоту молча, и мы ослепли бы там, где сейчас видим [EMAIL] send failed.
 
 
 def проверить_адрес_фронта() -> None:
@@ -177,7 +192,7 @@ async def _auth_payload(p, user_row) -> dict:
 
 # ─── registration (admin → new organization) ───
 @router.post("/auth/register")
-async def register(body: RegisterIn):
+async def register(body: RegisterIn, background: BackgroundTasks):
     email = body.email.strip().lower()
     _validate(email, body.password)
     p = await get_pool()
@@ -208,7 +223,9 @@ async def register(body: RegisterIn):
         )
         if auto_verify:
             return await _auth_payload(p, row)
-        send_verification_email(email, f"{APP_URL}/verify-email?token={verify_tok}")
+        background.add_task(
+            send_verification_email, email, f"{APP_URL}/verify-email?token={verify_tok}"
+        )
         return {
             "verified": False,
             "message": "Проверьте email для подтверждения аккаунта",
@@ -253,7 +270,9 @@ async def register(body: RegisterIn):
 
     if auto_verify:
         return await _auth_payload(p, user)
-    send_verification_email(email, f"{APP_URL}/verify-email?token={verify_tok}")
+    background.add_task(
+        send_verification_email, email, f"{APP_URL}/verify-email?token={verify_tok}"
+    )
     return {"verified": False, "message": "Проверьте email для подтверждения аккаунта"}
 
 
@@ -469,7 +488,7 @@ async def invite_validate(token: str):
 
 
 @router.post("/auth/register-by-invite")
-async def register_by_invite(body: RegisterByInviteIn):
+async def register_by_invite(body: RegisterByInviteIn, background: BackgroundTasks):
     email = body.email.strip().lower()
     _validate(email, body.password)
     p = await get_pool()
@@ -520,7 +539,9 @@ async def register_by_invite(body: RegisterByInviteIn):
 
     if auto_verify:
         return await _auth_payload(p, user)
-    send_verification_email(email, f"{APP_URL}/verify-email?token={verify_tok}")
+    background.add_task(
+        send_verification_email, email, f"{APP_URL}/verify-email?token={verify_tok}"
+    )
     return {"verified": False, "message": "Проверьте email"}
 
 
