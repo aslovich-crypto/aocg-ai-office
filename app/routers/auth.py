@@ -34,7 +34,11 @@ from app.auth import (
 )
 from app.categories_seed import seed_default_categories
 from app.database import get_pool
-from app.email_service import email_enabled, send_verification_email
+from app.email_service import (
+    email_enabled,
+    send_password_reset_email,
+    send_verification_email,
+)
 
 limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(prefix="/api", tags=["auth"])
@@ -289,6 +293,152 @@ async def verify_email(token: str):
         row["id"],
     )
     return await _auth_payload(p, row)
+
+
+# ─── восстановление пароля (S-56) ───
+#
+# ⚠️ ССЫЛКА ИЗ ПИСЬМА — КЛЮЧ НА ПРЕДЪЯВИТЕЛЯ, ЖИВУЩИЙ В ПОЧТОВОМ ЯЩИКЕ.
+# Отсюда всё устройство ниже: короткий срок, одноразовость, гашение прежних
+# ссылок и всех выданных токенов, проверка is_active В МОМЕНТ ПРИМЕНЕНИЯ.
+#
+# ⚠️ И ГЛАВНОЕ, ЧТО ЛЕГКО ПОТЕРЯТЬ ПРИ ПРАВКЕ: ОТВЕТ НА СУЩЕСТВУЮЩИЙ
+# И НЕСУЩЕСТВУЮЩИЙ АДРЕС ОБЯЗАН БЫТЬ НЕОТЛИЧИМ. Ручка восстановления —
+# самое удобное место узнать, кто у нас зарегистрирован: разные ответы
+# выдали бы список клиентов. Одинаково должно быть всё: тело, код и —
+# насколько мы можем — время.
+ЖИЗНЬ_ССЫЛКИ_МИНУТ = 60
+ПИСЕМ_НА_АДРЕС_В_ЧАС = 3
+ЗАПРОСОВ_С_СЕТЕВОГО_АДРЕСА_В_ЧАС = 20
+ОТВЕТ_ВОССТАНОВЛЕНИЯ = {
+    "message": "Если такой адрес у нас есть, письмо со ссылкой отправлено"
+}
+
+
+def _хеш_почты(адрес: str) -> str:
+    """Адрес приводится к нижнему регистру: ИВАН@ и иван@ — один человек."""
+    return hashlib.sha256(адрес.strip().lower().encode()).hexdigest()
+
+
+def _хеш_токена(токен: str) -> str:
+    """⚠️ ТОКЕН ХЕШИРУЕТСЯ КАК ЕСТЬ, БЕЗ strip И БЕЗ lower, И ЭТО НЕ ПРИДИРКА.
+
+    Сначала здесь стояла одна функция на оба случая — та, что приводит
+    к нижнему регистру. Для почты это правильно, для токена — потеря стойкости:
+    `secrets.token_urlsafe` берёт символы из алфавита с обоими регистрами,
+    и приведение к нижнему складывает разные токены в один хеш, вырезая
+    примерно по биту на каждую букву. Работало бы всё так же — совпадение
+    при проверке достигается, — и именно поэтому ошибка прожила бы долго.
+    Поймано тестом, сверяющим хранимое значение с sha256 от токена КАК ОН ЕСТЬ.
+    """
+    return hashlib.sha256(токен.encode()).hexdigest()
+
+
+class ForgotIn(BaseModel):
+    email: str
+
+
+class ResetIn(BaseModel):
+    token: str
+    new_password: str
+
+
+@router.post("/auth/forgot-password")
+@limiter.limit(f"{ЗАПРОСОВ_С_СЕТЕВОГО_АДРЕСА_В_ЧАС}/hour")
+async def forgot_password(
+    request: Request, body: ForgotIn, background: BackgroundTasks
+):
+    email = body.email.strip().lower()
+    почта_хеш = _хеш_почты(email)
+    p = await get_pool()
+
+    # ⚠️ ПОПЫТКИ СЧИТАЮТСЯ ДО ПРОВЕРКИ СУЩЕСТВОВАНИЯ И НЕЗАВИСИМО ОТ НЕЁ.
+    # Считай мы только зарегистрированные адреса, пороги оказались бы разными
+    # (3 против 20), и перебирающий узнавал бы наши адреса по тому, где лимит
+    # наступает раньше: ответ одинаков, а поведение различается.
+    await p.execute(
+        "DELETE FROM reset_attempts WHERE created_at < NOW() - INTERVAL '1 hour'"
+    )
+    await p.execute("INSERT INTO reset_attempts (email_hash) VALUES ($1)", почта_хеш)
+    за_час = await p.fetchval(
+        "SELECT COUNT(*) FROM reset_attempts WHERE email_hash=$1 "
+        "AND created_at > NOW() - INTERVAL '1 hour'",
+        почта_хеш,
+    )
+    if за_час and за_час > ПИСЕМ_НА_АДРЕС_В_ЧАС:
+        return ОТВЕТ_ВОССТАНОВЛЕНИЯ
+
+    row = await p.fetchrow(
+        "SELECT id FROM users WHERE lower(email)=lower($1) AND is_active=true", email
+    )
+    if row:
+        # Прежние невостребованные ссылки гасим: иначе десять запросов дают
+        # десять живых ключей от одной учётной записи.
+        await p.execute(
+            "UPDATE password_resets SET used_at=NOW() "
+            "WHERE user_id=$1 AND used_at IS NULL",
+            row["id"],
+        )
+        токен = secrets.token_urlsafe(32)
+        await p.execute(
+            "INSERT INTO password_resets (user_id, token_hash, expires_at) "
+            "VALUES ($1,$2,$3)",
+            row["id"],
+            _хеш_токена(токен),
+            datetime.now(timezone.utc) + timedelta(minutes=ЖИЗНЬ_ССЫЛКИ_МИНУТ),
+        )
+        background.add_task(
+            send_password_reset_email, email, f"{APP_URL}/reset-password?token={токен}"
+        )
+    return ОТВЕТ_ВОССТАНОВЛЕНИЯ
+
+
+@router.post("/auth/reset-password")
+async def reset_password(body: ResetIn):
+    # ⚠️ ОДИН И ТОТ ЖЕ ОТКАЗ НА ВСЕ СЛУЧАИ: нет такого токена, использован,
+    # истёк, учётная запись отключена. Разные тексты различали бы состояния
+    # чужих ссылок — то есть подсказывали бы перебирающему, что он угадал.
+    отказ = HTTPException(status_code=400, detail="Ссылка недействительна")
+    if not body.new_password or len(body.new_password) < 8:
+        raise HTTPException(
+            status_code=400, detail="Новый пароль должен быть не менее 8 символов"
+        )
+    p = await get_pool()
+    строка = await p.fetchrow(
+        "SELECT id, user_id, expires_at, used_at FROM password_resets "
+        "WHERE token_hash=$1",
+        _хеш_токена(body.token),
+    )
+    if (
+        not строка
+        or строка["used_at"]
+        or строка["expires_at"] <= datetime.now(timezone.utc)
+    ):
+        raise отказ
+    # ⚠️ is_active ПРОВЕРЯЕТСЯ ЗДЕСЬ, А НЕ ТОЛЬКО ПРИ ВЫДАЧЕ: удаления
+    # пользователя в проекте нет, оно мягкое (users.py, is_active=false).
+    # Значит у уволенного сотрудника строка жива, почта та же, и запрошенная
+    # до увольнения ссылка осталась бы ключом от учётной записи.
+    пользователь = await p.fetchrow(
+        "SELECT id FROM users WHERE id=$1 AND is_active=true", строка["user_id"]
+    )
+    if not пользователь:
+        raise отказ
+
+    # Момент из ПРИЛОЖЕНИЯ, а не NOW() базы, и до выдачи новых токенов —
+    # разбор в users.py:change_password (S-16).
+    момент = datetime.now(timezone.utc)
+    await p.execute(
+        "UPDATE users SET password_hash=$1, tokens_valid_from=$2 WHERE id=$3",
+        hash_password(body.new_password),
+        момент,
+        строка["user_id"],
+    )
+    await p.execute(
+        "UPDATE password_resets SET used_at=$1 WHERE user_id=$2 AND used_at IS NULL",
+        момент,
+        строка["user_id"],
+    )
+    return {"message": "Пароль изменён"}
 
 
 @router.post("/auth/login")

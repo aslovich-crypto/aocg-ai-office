@@ -106,6 +106,28 @@ def send_verification_email(to_email: str, verify_url: str) -> bool:
     return _send(to_email, "Подтвердите email — AOCG AI Офис", html)
 
 
+def send_password_reset_email(to_email: str, reset_url: str) -> bool:
+    """Письмо со ссылкой на смену пароля (S-56).
+
+    ⚠️ СРОК ЖИЗНИ НАЗВАН В САМОМ ПИСЬМЕ, И ЭТО НЕ УКРАШЕНИЕ: человек, увидев
+    ссылку через два часа, должен понимать, почему она не работает, — иначе
+    он решит, что сломан сервис, и запросит ещё пять писем.
+
+    ⚠️ И ПРЕДУПРЕЖДЕНИЕ ТОМУ, КТО ПИСЬМА НЕ ЗАПРАШИВАЛ: чужой запрос сам
+    по себе ничего не ломает, но человек должен знать, что кто-то вводил
+    его адрес.
+    """
+    html = f"""<div style="font-family:Arial,sans-serif;color:#111318">
+      <h2 style="color:#A4161A">Смена пароля</h2>
+      <p>Кто-то запросил смену пароля для этого адреса в AOCG AI Офис.
+         Ссылка действует <b>60 минут</b> и сработает один раз:</p>
+      <p><a href="{reset_url}">{reset_url}</a></p>
+      <p style="color:#5A6472;font-size:13px">Если вы этого не запрашивали —
+         просто не открывайте ссылку. Пароль останется прежним.</p>
+    </div>"""
+    return _send(to_email, "Смена пароля — AOCG AI Офис", html)
+
+
 def send_invite_notification(
     to_email: str, invite_url: str, org_name: str, role: str
 ) -> bool:

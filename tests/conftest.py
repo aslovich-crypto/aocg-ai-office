@@ -120,12 +120,26 @@ class FakePool:
         # доступа. Не выполнялся в тестах ни разу (замер tests/tools).
         self.invite_links = []
         self.revoked_tokens = []
+        # S-56: восстановление пароля. Двойник ЗЕРКАЛИТ РАЗДЕЛЕНИЕ таблиц —
+        # попытки считаются отдельно от выданных ссылок, потому что попытка
+        # заводится и на несуществующий адрес (иначе пороги неравны и выдают
+        # наши адреса).
+        self.password_resets = []
+        self.reset_attempts = []
+        self._prid = 0
         self._invid = 0
         self._uid = 0
         self._rid = self._repid = self._cid = self._consid = 0
         self._gid = self._catid = 0
 
     async def fetchval(self, query, *args):
+        if _norm(query).startswith("SELECT COUNT(*) FROM reset_attempts"):
+            граница = datetime.now(timezone.utc) - timedelta(hours=1)
+            return sum(
+                1
+                for a in self.reset_attempts
+                if a["email_hash"] == args[0] and a["created_at"] > граница
+            )
         # Фикс №1 фаза A: seed_default_categories использует fetchval для idempotency-
         # проверки и для INSERT ... RETURNING id групп.
         q = _norm(query)
@@ -433,6 +447,33 @@ class FakePool:
 
     async def fetchrow(self, query, *args):
         q = _norm(query)
+        # ─── S-56 ───
+        if q.startswith("SELECT id, user_id, expires_at, used_at FROM password_resets"):
+            return next(
+                (dict(с) for с in self.password_resets if с["token_hash"] == args[0]),
+                None,
+            )
+        if q.startswith(
+            "SELECT id FROM users WHERE lower(email)=lower($1) AND is_active"
+        ):
+            return next(
+                (
+                    {"id": u["id"]}
+                    for u in self.users
+                    if (u.get("email") or "").lower() == str(args[0]).lower()
+                    and u.get("is_active", True)
+                ),
+                None,
+            )
+        if q.startswith("SELECT id FROM users WHERE id=$1 AND is_active=true"):
+            return next(
+                (
+                    {"id": u["id"]}
+                    for u in self.users
+                    if u["id"] == args[0] and u.get("is_active", True)
+                ),
+                None,
+            )
         # Задача #1/INT: профиль организации (GET /api/organizations/me).
         if q.startswith(
             "SELECT id, name, inn, type, owner_id, created_at, tax_system FROM organizations"
@@ -1081,6 +1122,41 @@ class FakePool:
 
     async def execute(self, query, *args):
         q = _norm(query)
+        # ─── S-56, восстановление пароля ───
+        if q.startswith("DELETE FROM reset_attempts WHERE created_at <"):
+            граница = datetime.now(timezone.utc) - timedelta(hours=1)
+            self.reset_attempts = [
+                a for a in self.reset_attempts if a["created_at"] >= граница
+            ]
+            return "DELETE"
+        if q.startswith("INSERT INTO reset_attempts"):
+            self.reset_attempts.append(
+                {"email_hash": args[0], "created_at": datetime.now(timezone.utc)}
+            )
+            return "INSERT 0 1"
+        if q.startswith("INSERT INTO password_resets"):
+            self._prid += 1
+            self.password_resets.append(
+                {
+                    "id": self._prid,
+                    "user_id": args[0],
+                    "token_hash": args[1],
+                    "created_at": datetime.now(timezone.utc),
+                    "expires_at": args[2],
+                    "used_at": None,
+                }
+            )
+            return "INSERT 0 1"
+        if q.startswith("UPDATE password_resets SET used_at=NOW()"):
+            for стр in self.password_resets:
+                if стр["user_id"] == args[0] and стр["used_at"] is None:
+                    стр["used_at"] = datetime.now(timezone.utc)
+            return "UPDATE"
+        if q.startswith("UPDATE password_resets SET used_at=$1"):
+            for стр in self.password_resets:
+                if стр["user_id"] == args[1] and стр["used_at"] is None:
+                    стр["used_at"] = args[0]
+            return "UPDATE"
         if (
             q.startswith(
                 ("CREATE TABLE", "ALTER TABLE", "CREATE UNIQUE INDEX", "CREATE INDEX")

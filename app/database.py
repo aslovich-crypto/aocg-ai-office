@@ -295,6 +295,44 @@ async def init_db():
                 token_hash  TEXT NOT NULL,
                 expires_at  TIMESTAMPTZ NOT NULL
             );
+            -- S-56, восстановление пароля. ОТДЕЛЬНАЯ ТАБЛИЦА, а не колонки
+            -- в users: сбросов за жизнь пользователя несколько, и по ним надо
+            -- видеть, кто и когда сбрасывал. В колонках users всегда только
+            -- последнее.
+            --
+            -- ⚠️ ХРАНИТСЯ ХЕШ, А НЕ ТОКЕН (как в revoked_tokens): утечка базы
+            -- не должна давать работающих ссылок на смену чужого пароля.
+            CREATE TABLE IF NOT EXISTS password_resets (
+                id          SERIAL PRIMARY KEY,
+                user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                token_hash  TEXT NOT NULL,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                expires_at  TIMESTAMPTZ NOT NULL,
+                used_at     TIMESTAMPTZ
+            );
+            CREATE INDEX IF NOT EXISTS ix_password_resets_hash
+                ON password_resets (token_hash);
+            -- ⚠️ ПОПЫТКИ СЧИТАЮТСЯ ПО АДРЕСУ НЕЗАВИСИМО ОТ ТОГО, СУЩЕСТВУЕТ ОН
+            -- ИЛИ НЕТ, И ЭТО НЕ ПЕДАНТИЗМ. Считай мы только существующие,
+            -- пороги стали бы разными: 3 запроса в час на зарегистрированный
+            -- адрес и 20 на любой другой. Ответ при этом одинаков, а ПОВЕДЕНИЕ
+            -- различается — перебирающий узнаёт наши адреса по тому, где лимит
+            -- наступает раньше. Канал не в теле ответа, а в поведении системы.
+            --
+            -- Побочная выгода: работа на обоих путях становится одинаковой
+            -- (вставка + подсчёт), и разница во времени ответа сужается
+            -- до одной вставки токена.
+            --
+            -- ⚠️ ХРАНИМ ХЕШ АДРЕСА, А НЕ АДРЕС: иначе таблица копила бы почту
+            -- людей, которые у нас не регистрировались. Строки старше окна
+            -- чистятся, долгого хранения нет.
+            CREATE TABLE IF NOT EXISTS reset_attempts (
+                id          SERIAL PRIMARY KEY,
+                email_hash  TEXT NOT NULL,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS ix_reset_attempts_hash
+                ON reset_attempts (email_hash, created_at);
             -- Bootstrap a default org so existing single-tenant data isn't orphaned
             -- once org filtering turns on; assign all current rows to it.
             INSERT INTO organizations (name, type, owner_id)
