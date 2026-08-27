@@ -16,6 +16,7 @@ from typing import Optional
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -427,8 +428,26 @@ async def reset_password(body: ResetIn):
     # Момент из ПРИЛОЖЕНИЯ, а не NOW() базы, и до выдачи новых токенов —
     # разбор в users.py:change_password (S-16).
     момент = datetime.now(timezone.utc)
+    # ⚠️ ПЯТЬ КОЛОНОК ОДНИМ ЗАПРОСОМ, И КАЖДАЯ ЗДЕСЬ ПО ДЕЛУ.
+    #
+    # is_email_verified=true — ПЕРЕХОД ПО ССЫЛКЕ ИЗ ПИСЬМА ЕСТЬ ТО ЖЕ САМОЕ
+    # ДОКАЗАТЕЛЬСТВО ВЛАДЕНИЯ АДРЕСОМ, ЧТО И verify-email. Требовать его дважды
+    # значит не пустить человека, который уже доказал. Куплено на проде
+    # 26.08.2026: сброс отработал (200, хеш сменился), а вход отдал 403, потому
+    # что флаг остался false; фронт показал это как «неверный пароль», и человек
+    # пошёл менять пароль, который и так был верен.
+    #
+    # failed_attempts=0 и locked_until=NULL — ЗАКРЫТИЕ ПЕТЛИ ИЗ S-59. Там
+    # записано: «если пароль не вспомнить, а восстановления нет, выхода
+    # из петли не существовало вовсе». Восстановление появилось — но замок
+    # оно не снимало, и петля осталась: пароль сменён, войти нельзя.
+    #
+    # ОДНИМ ЗАПРОСОМ, А НЕ ДВУМЯ: между двумя UPDATE есть промежуток, в котором
+    # пароль уже новый, а замок ещё старый. Транзакции здесь нет, и этот
+    # промежуток наблюдаем снаружи.
     await p.execute(
-        "UPDATE users SET password_hash=$1, tokens_valid_from=$2 WHERE id=$3",
+        "UPDATE users SET password_hash=$1, tokens_valid_from=$2, "
+        "is_email_verified=true, failed_attempts=0, locked_until=NULL WHERE id=$3",
         hash_password(body.new_password),
         момент,
         строка["user_id"],
@@ -504,7 +523,15 @@ async def login(request: Request, body: LoginIn):
     )
 
     if not u.get("is_email_verified"):
-        raise HTTPException(status_code=403, detail="Подтвердите email")
+        # ⚠️ КОД РЯДОМ С ТЕКСТОМ, А НЕ ВМЕСТО НЕГО. По тексту ветвиться нельзя:
+        # сверка строк ломается от первой же правки формулировки, а показывать
+        # 403 тем же сообщением, что 401 («неверный пароль»), — отправлять
+        # человека менять верный пароль. Текст остаётся для человека,
+        # код — для интерфейса.
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "Подтвердите email", "code": "email_not_verified"},
+        )
 
     await p.execute("UPDATE users SET last_login_at=NOW() WHERE id=$1", u["id"])
     return await _auth_payload(p, u)

@@ -1301,6 +1301,22 @@ class FakePool:
             self.revoked_tokens = [t for t in self.revoked_tokens if _жив(t)]
             return f"DELETE {было - len(self.revoked_tokens)}"
         # S-16: смена пароля ставит отметку отзыва тем же запросом.
+        if q.startswith(
+            "UPDATE users SET password_hash=$1, tokens_valid_from=$2, "
+            "is_email_verified=true, failed_attempts=0, locked_until=NULL"
+        ):
+            # S-56: восстановление пароля снимает и ворота почты, и замок.
+            # ⚠️ Ветка стоит ВЫШЕ более общей «password_hash=$1, tokens_valid_from=$2»:
+            # разбор идёт по началу строки, и общая перехватила бы этот запрос,
+            # молча не тронув три колонки из пяти (T59).
+            for u in self.users:
+                if u["id"] == args[2]:
+                    u["password_hash"] = args[0]
+                    u["tokens_valid_from"] = args[1]
+                    u["is_email_verified"] = True
+                    u["failed_attempts"] = 0
+                    u["locked_until"] = None
+            return "UPDATE"
         if q.startswith("UPDATE users SET password_hash=$1, tokens_valid_from=$2"):
             for u in self.users:
                 if u["id"] == args[2]:
