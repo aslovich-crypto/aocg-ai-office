@@ -453,6 +453,25 @@ class FakePool:
                 (dict(с) for с in self.password_resets if с["token_hash"] == args[0]),
                 None,
             )
+        # S-83: переотправка ищет ТОЛЬКО неподтверждённых. Ветка стоит ВЫШЕ
+        # общей намеренно: её запрос НАЧИНАЕТСЯ текстом общей, а FakePool
+        # сравнивает префиксом — общая, стоя первой, проглотила бы условие
+        # `is_email_verified=false` молча и выдала бы токен подтверждённому.
+        # Поймано тестом, а не чтением (класс T59).
+        if q.startswith(
+            "SELECT id FROM users WHERE lower(email)=lower($1) "
+            "AND is_active=true AND is_email_verified=false"
+        ):
+            return next(
+                (
+                    {"id": u["id"]}
+                    for u in self.users
+                    if (u.get("email") or "").lower() == str(args[0]).lower()
+                    and u.get("is_active", True)
+                    and not u.get("is_email_verified", False)
+                ),
+                None,
+            )
         if q.startswith(
             "SELECT id FROM users WHERE lower(email)=lower($1) AND is_active"
         ):
@@ -1360,6 +1379,21 @@ class FakePool:
                 if u["id"] == args[0]:
                     u["is_email_verified"] = True
                     u["email_verify_token"] = None
+                    # T75: срок гасится вместе с токеном — строка с пустым
+                    # токеном и живым сроком читалась бы как «ссылка была».
+                    u["email_verify_expires_at"] = None
+            return "UPDATE 1"
+        # S-83: переотправка выдаёт новый токен и НОВЫЙ срок. Ветка стоит
+        # ПОСЛЕ гашения намеренно: обе начинаются с «UPDATE users SET
+        # email_verify…», а FakePool сравнивает ПРЕФИКСОМ — более общая,
+        # поставленная выше, перехватила бы более частную (класс T59).
+        if q.startswith(
+            "UPDATE users SET email_verify_token=$1, email_verify_expires_at=$2"
+        ):
+            for u in self.users:
+                if u["id"] == args[2]:
+                    u["email_verify_token"] = args[0]
+                    u["email_verify_expires_at"] = args[1]
             return "UPDATE 1"
         if q.startswith("UPDATE users SET password_hash=$1 WHERE id=$2"):
             for u in self.users:
