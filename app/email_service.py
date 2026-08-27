@@ -92,14 +92,15 @@ def _send(to_email: str, subject: str, html: str) -> bool:
         return False
 
 
-def send_verification_email(to_email: str, verify_url: str) -> bool:
+def send_verification_email(to_email: str, verify_url: str, часов: int = 72) -> bool:
     # ⚠️ ССЫЛКУ В ЖУРНАЛ НЕ ПИШЕМ (S-73). Переход по ней возвращает access
     # и refresh токены — то есть строка в журнале была бы готовым входом
     # в чужой аккаунт. Сегодня она не печаталась лишь потому, что при
     # выключенной почте сюда не доходило управление; с Postbox дошло бы.
     html = f"""<div style="font-family:Arial,sans-serif;color:#111318">
       <h2 style="color:#A4161A">Подтвердите email</h2>
-      <p>Чтобы активировать аккаунт в AOCG AI Офис, нажмите кнопку:</p>
+      <p>Чтобы активировать аккаунт в AOCG AI Офис, нажмите кнопку.
+         Ссылка действует <b>{часов} часа</b> и сработает один раз:</p>
       <p><a href="{verify_url}" style="background:#A4161A;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;display:inline-block">Подтвердить email</a></p>
       <p style="color:#636B7D;font-size:13px">Или откройте ссылку: {verify_url}</p>
     </div>"""

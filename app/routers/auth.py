@@ -8,6 +8,7 @@ user must click the emailed link (GET /api/auth/verify-email) to get tokens.
 
 import asyncio
 import hashlib
+import logging
 import os
 import secrets
 import uuid
@@ -42,6 +43,8 @@ from app.email_service import (
 )
 
 limiter = Limiter(key_func=get_remote_address)
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api", tags=["auth"])
 
 # APP_URL — адрес ФРОНТА, не API: из него строятся ссылки подтверждения почты
@@ -195,6 +198,34 @@ async def _auth_payload(p, user_row) -> dict:
     }
 
 
+# ⚠️ СРОК ЖИЗНИ ССЫЛКИ ПОДТВЕРЖДЕНИЯ (T75). 72 часа, и число не взято
+# по аналогии с 60 минутами восстановления — это РАЗНЫЕ поступки.
+# Восстановление человек запускает САМ и сидит перед экраном: час покрывает
+# сам поступок. Письмо подтверждения читают «потом» — вечером, назавтра,
+# в понедельник. Покрыть надо выходные: пятница вечер → утро понедельника
+# это около 60 часов, 72 закрывают их с запасом и не закрывают «забыл
+# на месяц».
+#
+# ⚠️ И ВТОРАЯ ПОЛОВИНА ДОВОДА, БЕЗ КОТОРОЙ ЧИСЛО ЧИТАЕТСЯ КАК ПРОИЗВОЛ:
+# переход по этой ссылке возвращает `_auth_payload`, то есть ссылка —
+# ЭТО ВХОД В УЧЁТНУЮ ЗАПИСЬ, лежащий в почтовом ящике. До T75 окно было
+# БЕСКОНЕЧНЫМ. ∞ → 72 часа снимает почти всю выдержку; 72 → 24 добавляет
+# мало, а тупиков добавляет заметно.
+ЖИЗНЬ_ПОДТВЕРЖДЕНИЯ_ЧАСОВ = 72
+
+
+def _срок_подтверждения(auto_verify: bool):
+    """Когда протухнет ссылка подтверждения. None — если её нет вовсе.
+
+    При выключенной почте токен не выдаётся (`auto_verify`), и срок
+    ставить не к чему: строка с `email_verify_token IS NULL` и непустым
+    сроком читалась бы как «ссылка была, да сплыла».
+    """
+    if auto_verify:
+        return None
+    return datetime.now(timezone.utc) + timedelta(hours=ЖИЗНЬ_ПОДТВЕРЖДЕНИЯ_ЧАСОВ)
+
+
 # ─── registration (admin → new organization) ───
 @router.post("/auth/register")
 async def register(body: RegisterIn, background: BackgroundTasks):
@@ -216,7 +247,8 @@ async def register(body: RegisterIn, background: BackgroundTasks):
                       phone=COALESCE($2, phone),
                       first_name=COALESCE(NULLIF($3,''), first_name),
                       last_name=COALESCE(NULLIF($4,''), last_name),
-                      is_email_verified=$5, email_verify_token=$6
+                      is_email_verified=$5, email_verify_token=$6,
+                      email_verify_expires_at=$8
                WHERE id=$7 RETURNING *""",
             hash_password(body.password),
             body.phone,
@@ -225,11 +257,15 @@ async def register(body: RegisterIn, background: BackgroundTasks):
             auto_verify,
             verify_tok,
             existing["id"],
+            _срок_подтверждения(auto_verify),
         )
         if auto_verify:
             return await _auth_payload(p, row)
         background.add_task(
-            send_verification_email, email, f"{APP_URL}/verify-email?token={verify_tok}"
+            send_verification_email,
+            email,
+            f"{APP_URL}/verify-email?token={verify_tok}",
+            ЖИЗНЬ_ПОДТВЕРЖДЕНИЯ_ЧАСОВ,
         )
         return {
             "verified": False,
@@ -253,8 +289,9 @@ async def register(body: RegisterIn, background: BackgroundTasks):
             )
             user = await conn.fetchrow(
                 """INSERT INTO users (first_name,last_name,email,phone,password_hash,role,org_id,
-                                      is_email_verified,email_verify_token)
-                   VALUES ($1,$2,$3,$4,$5,'admin',$6,$7,$8) RETURNING *""",
+                                      is_email_verified,email_verify_token,email_verify_expires_at)
+                   VALUES ($1,$2,$3,$4,$5,'admin',$6,$7,$8,
+                           $9) RETURNING *""",
                 body.first_name,
                 body.last_name,
                 email,
@@ -263,6 +300,7 @@ async def register(body: RegisterIn, background: BackgroundTasks):
                 org["id"],
                 auto_verify,
                 verify_tok,
+                _срок_подтверждения(auto_verify),
             )
             await conn.execute(
                 "UPDATE organizations SET owner_id=$1 WHERE id=$2",
@@ -276,9 +314,31 @@ async def register(body: RegisterIn, background: BackgroundTasks):
     if auto_verify:
         return await _auth_payload(p, user)
     background.add_task(
-        send_verification_email, email, f"{APP_URL}/verify-email?token={verify_tok}"
+        send_verification_email,
+        email,
+        f"{APP_URL}/verify-email?token={verify_tok}",
+        ЖИЗНЬ_ПОДТВЕРЖДЕНИЯ_ЧАСОВ,
     )
     return {"verified": False, "message": "Проверьте email для подтверждения аккаунта"}
+
+
+# ⚠️ ОДИН ОТВЕТ НА ВСЕ ПРОМАХИ — И ЭТО НЕ ЛЕНЬ, А РЕШЕНИЕ (T75).
+#
+# Случаев отказа три: токена нет вовсе, токен есть но просрочен, владелец
+# деактивирован. Развести их РАЗНЫМИ сообщениями нельзя: «истекла» вместо
+# «недействительна» подтверждает перебирающему, что значение существовало.
+# Но и прежнее «недействительна ИЛИ истекла» не годилось — оно называло
+# причину, которой не существовало (истечения не было в коде вообще),
+# и не говорило человеку, что делать.
+#
+# Выход не в том, чтобы развести два ответа, а в том, чтобы ОДИН ответ
+# стал полезным: он называет СРОК и ДЕЙСТВИЕ. Честному человеку этого
+# достаточно при любой из трёх причин, перебирающий не узнаёт ничего.
+# Различие пишется в журнал приложения — без токена и без адреса.
+ОТВЕТ_ПОДТВЕРЖДЕНИЯ = (
+    f"Ссылка не действует. Она живёт {ЖИЗНЬ_ПОДТВЕРЖДЕНИЯ_ЧАСОВ} часа "
+    "и срабатывает один раз — запросите новое письмо на экране входа"
+)
 
 
 @router.get("/auth/verify-email")
@@ -286,11 +346,39 @@ async def verify_email(token: str):
     p = await get_pool()
     row = await p.fetchrow("SELECT * FROM users WHERE email_verify_token=$1", token)
     if not row:
-        raise HTTPException(
-            status_code=400, detail="Ссылка недействительна или истекла"
+        logger.info("verify-email: токен не найден")
+        raise HTTPException(status_code=400, detail=ОТВЕТ_ПОДТВЕРЖДЕНИЯ)
+
+    # Срок. NULL — токен выдан до введения срока (T75): считаем от создания
+    # пользователя. Отдельной миграции для таких строк нет намеренно, см.
+    # комментарий в database.py.
+    #
+    # ⚠️ ОТКАЗ ЗАКРЫВАЕТ, А НЕ ОТКРЫВАЕТ. Если ни срока, ни даты создания
+    # определить нечем — ссылка негодна. Обратное («даты нет, значит
+    # пропустим») дало бы обход срока строкой с пустой датой, и обход
+    # этот был бы невидим: ответ такой же, как у здоровой ссылки.
+    срок = row.get("email_verify_expires_at")
+    if срок is None:
+        создан = row.get("created_at")
+        срок = (
+            создан + timedelta(hours=ЖИЗНЬ_ПОДТВЕРЖДЕНИЯ_ЧАСОВ)
+            if создан is not None
+            else None
         )
+    if срок is None or срок <= datetime.now(timezone.utc):
+        logger.info("verify-email: срок ссылки истёк или не определён")
+        raise HTTPException(status_code=400, detail=ОТВЕТ_ПОДТВЕРЖДЕНИЯ)
+
+    # ⚠️ is_active. Удаление в проекте МЯГКОЕ (users.py: is_active=false),
+    # строка и почта остаются. Без этой проверки ссылка уволенного остаётся
+    # рабочим входом в организацию бывшего работодателя.
+    if not row.get("is_active", True):
+        logger.info("verify-email: учётная запись отключена")
+        raise HTTPException(status_code=400, detail=ОТВЕТ_ПОДТВЕРЖДЕНИЯ)
+
     await p.execute(
-        "UPDATE users SET is_email_verified=true, email_verify_token=NULL WHERE id=$1",
+        "UPDATE users SET is_email_verified=true, email_verify_token=NULL, "
+        "email_verify_expires_at=NULL WHERE id=$1",
         row["id"],
     )
     return await _auth_payload(p, row)
@@ -689,8 +777,9 @@ async def register_by_invite(body: RegisterByInviteIn, background: BackgroundTas
         async with conn.transaction():
             user = await conn.fetchrow(
                 """INSERT INTO users (first_name,last_name,email,phone,password_hash,role,org_id,
-                                      is_email_verified,email_verify_token)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *""",
+                                      is_email_verified,email_verify_token,email_verify_expires_at)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
+                           $10) RETURNING *""",
                 body.first_name,
                 body.last_name,
                 email,
@@ -705,6 +794,7 @@ async def register_by_invite(body: RegisterByInviteIn, background: BackgroundTas
                 inv["org_id"],
                 auto_verify,
                 verify_tok,
+                _срок_подтверждения(auto_verify),
             )
             new_uses = inv["uses_count"] + 1
             await conn.execute(
@@ -717,7 +807,10 @@ async def register_by_invite(body: RegisterByInviteIn, background: BackgroundTas
     if auto_verify:
         return await _auth_payload(p, user)
     background.add_task(
-        send_verification_email, email, f"{APP_URL}/verify-email?token={verify_tok}"
+        send_verification_email,
+        email,
+        f"{APP_URL}/verify-email?token={verify_tok}",
+        ЖИЗНЬ_ПОДТВЕРЖДЕНИЯ_ЧАСОВ,
     )
     return {"verified": False, "message": "Проверьте email"}
 

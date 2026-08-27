@@ -10,7 +10,7 @@
 """
 
 import json
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -34,6 +34,12 @@ def неподтверждённый(db):
         is_active=True,
         is_email_verified=False,
         email_verify_token="ключ-из-письма",
+        # ⚠️ Зеркальная правка двойника (13а.8): в реальной схеме created_at
+        # это DEFAULT NOW() и пустым не бывает, а email_verify_expires_at
+        # добавлена в T75. Без них двойник расходится с продом ровно там,
+        # где проверяется срок.
+        created_at=datetime.now(timezone.utc),
+        email_verify_expires_at=datetime.now(timezone.utc) + timedelta(hours=72),
     )
     db.users.append(row)
     db._uid = 5
@@ -58,6 +64,108 @@ async def test_verify_email_rejects_unknown_token(client, неподтвержд
     assert "access_token" not in r.json()
     assert неподтверждённый["is_email_verified"] is False, (
         "чужая попытка не должна подтверждать аккаунт"
+    )
+
+
+# ─────────────────────── срок и is_active (T75) ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_verify_email_отвергает_просроченную_ссылку(client, неподтверждённый):
+    """Час назад истёкшая ссылка не пускает — и не подтверждает аккаунт."""
+    неподтверждённый["email_verify_expires_at"] = datetime.now(
+        timezone.utc
+    ) - timedelta(hours=1)
+    r = await client.get("/api/auth/verify-email?token=ключ-из-письма")
+    assert r.status_code == 400, r.text
+    assert "access_token" not in r.json()
+    assert неподтверждённый["is_email_verified"] is False, (
+        "просроченная ссылка не должна подтверждать адрес"
+    )
+    assert неподтверждённый["email_verify_token"] == "ключ-из-письма", (
+        "и не должна гасить токен: иначе один поздний клик убивал бы ссылку, "
+        "которую человек ещё может успеть обновить"
+    )
+
+
+@pytest.mark.asyncio
+async def test_verify_email_старый_токен_без_срока_считается_от_создания(
+    client, неподтверждённый
+):
+    """Строки, выданные ДО T75: срок берётся от created_at, миграции нет."""
+    неподтверждённый["email_verify_expires_at"] = None
+    неподтверждённый["created_at"] = datetime.now(timezone.utc) - timedelta(hours=100)
+    r = await client.get("/api/auth/verify-email?token=ключ-из-письма")
+    assert r.status_code == 400, "100 часов > 72, ссылка обязана быть мертва"
+    assert неподтверждённый["is_email_verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_verify_email_старый_токен_в_пределах_срока_ещё_живёт(
+    client, неподтверждённый
+):
+    """Вторая половина: не все старые строки протухают — только те, что старше."""
+    неподтверждённый["email_verify_expires_at"] = None
+    неподтверждённый["created_at"] = datetime.now(timezone.utc) - timedelta(hours=10)
+    r = await client.get("/api/auth/verify-email?token=ключ-из-письма")
+    assert r.status_code == 200, r.text
+    assert неподтверждённый["is_email_verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_verify_email_без_обеих_дат_отказ_закрывает(client, неподтверждённый):
+    """Ни срока, ни даты создания — ссылка негодна.
+
+    ⚠️ Тест написан ПОСЛЕ мутации, которая его отсутствие и вскрыла: замена
+    условия на `срок is not None and ...` открывала проход строке с пустыми
+    датами, и ни один из четырёх прежних тестов этого не замечал. Обход был бы
+    невидим — ответ такой же, как у здоровой ссылки.
+    """
+    неподтверждённый["email_verify_expires_at"] = None
+    неподтверждённый["created_at"] = None
+    r = await client.get("/api/auth/verify-email?token=ключ-из-письма")
+    assert r.status_code == 400, "без дат отказ обязан ЗАКРЫВАТЬ, а не открывать"
+    assert неподтверждённый["is_email_verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_verify_email_отвергает_отключённого(client, неподтверждённый):
+    """Ссылка уволенного не должна оставаться входом в чужую организацию."""
+    неподтверждённый["is_active"] = False
+    r = await client.get("/api/auth/verify-email?token=ключ-из-письма")
+    assert r.status_code == 400, r.text
+    assert "access_token" not in r.json()
+    assert неподтверждённый["is_email_verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_verify_email_один_ответ_на_все_промахи(client, неподтверждённый):
+    """Снаружи три случая неразличимы — иначе ответ подсказывает перебирающему.
+
+    ⚠️ Проверяется РАВЕНСТВО текстов, а не их содержание: как только кто-то
+    разведёт формулировки «истекла» и «недействительна», тест покраснеет.
+    """
+    чужой = await client.get("/api/auth/verify-email?token=подобранный")
+
+    неподтверждённый["email_verify_expires_at"] = datetime.now(
+        timezone.utc
+    ) - timedelta(hours=1)
+    просроченный = await client.get("/api/auth/verify-email?token=ключ-из-письма")
+
+    неподтверждённый["email_verify_expires_at"] = datetime.now(
+        timezone.utc
+    ) + timedelta(hours=1)
+    неподтверждённый["is_active"] = False
+    отключённый = await client.get("/api/auth/verify-email?token=ключ-из-письма")
+
+    тексты = {
+        чужой.json()["detail"],
+        просроченный.json()["detail"],
+        отключённый.json()["detail"],
+    }
+    assert len(тексты) == 1, f"ответы различаются и выдают причину: {тексты}"
+    assert "72" in тексты.pop(), (
+        "ответ обязан называть срок — иначе человеку нечего делать"
     )
 
 

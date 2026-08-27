@@ -227,6 +227,17 @@ async def init_db():
             ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS is_email_verified BOOLEAN DEFAULT false;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verify_token TEXT;
+            -- Срок жизни ссылки подтверждения (T75, 72 часа). Отдельная
+            -- колонка, а НЕ вычисление от created_at: после появления
+            -- переотправки (S-83) токен переиздаётся, и время создания
+            -- ПОЛЬЗОВАТЕЛЯ перестаёт быть временем выдачи ТОКЕНА —
+            -- новый токен родился бы уже мёртвым.
+            -- NULL означает «выдан до введения срока»: такие проверяются
+            -- по created_at, отдельного кода миграции для них не пишем.
+            -- Основание — замер с бастиона 27.08.2026: строк с непустым
+            -- токеном 5, все тестовые, живых пользователей за ними нет.
+            -- Обратный DDL: ALTER TABLE users DROP COLUMN email_verify_expires_at;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verify_expires_at TIMESTAMPTZ;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_attempts INTEGER DEFAULT 0;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
             ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
