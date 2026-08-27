@@ -6,7 +6,7 @@
 - FastAPI (Python)
 - PostgreSQL через asyncpg
 - JWT-авторизация (bcrypt, refresh-токены)
-- Railway (хостинг, auto-deploy из main)
+- Timeweb Cloud, App Platform (хостинг, auto-deploy из `main`)
 - GitHub Actions (pytest на каждый push)
 
 ## Запуск локально
@@ -33,7 +33,7 @@ tests/                 pytest + conftest (FakePool)
 ```
 
 ## Переменные окружения
-Полный список — в `.env.example`. Реальные значения хранятся в Railway → Variables, в репозиторий не коммитятся.
+Полный список — в `.env.example`. Реальные значения хранятся в панели Timeweb → Переменные, в репозиторий не коммитятся.
 
 ## Документация
 - `docs/development-workflow.md` — цикл разработки
@@ -45,4 +45,5 @@ tests/                 pytest + conftest (FakePool)
 Проект работает с персональными и финансовыми данными (152-ФЗ). Оператор ПД — ИП Шукалович Алексей Иванович. Перед коммитом работают pre-commit хуки (блокировка секретов). Правила безопасности — в `CLAUDE.md` и проектной документации.
 
 ## Деплой
-Push в `main` → Railway пересобирает и деплоит автоматически за 1–2 минуты.
+Push в `main` → Timeweb App Platform пересобирает и деплоит автоматически.
+(Длительность выката на новой площадке не замерялась — прежние «1–2 минуты» относились к Railway.)

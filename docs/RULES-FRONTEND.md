@@ -77,7 +77,7 @@
 - Иконки: lucide-react
 - Графики: recharts
 - QR: jsqr
-- Хостинг: Railway (auto-deploy из main)
+- Хостинг: Timeweb Cloud, App Platform (auto-deploy из `main`; переехали 18.08.2026, S-06)
 
 ## Команды
 
@@ -495,7 +495,7 @@ System», файл `colors_and_type.css` (блок `:root`).** Машинные 
 
 ## Паттерны «не делай»
 
-- НЕ коммитить секреты — только в Railway → Variables. `.env` в `.gitignore`.
+- НЕ коммитить секреты — только в панель Timeweb → Переменные. `.env` в `.gitignore`.
 - НЕ использовать `dangerouslySetInnerHTML` без явной санитизации.
 - НЕ копировать стиль Stripe / Linear / Revolut — сохранять АОЦГ-идентичность.
 - НЕ навязывать подсказки (см. UX-принципы ниже).

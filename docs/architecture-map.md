@@ -43,7 +43,7 @@ flowchart TB
     FE_Settings --> FE_API
 
     %% ============ БЭКЕНД ============
-    subgraph BE["БЭКЕНД · aocg-ai-office · FastAPI · Railway (Procfile uvicorn :$PORT)"]
+    subgraph BE["БЭКЕНД · aocg-ai-office · FastAPI · Timeweb App Platform (Procfile uvicorn :$PORT)"]
         direction TB
         BE_MW["AOCGSecurityMiddleware<br/>rate-limit · IP-бан · HTTPS · security-headers"]
         BE_CORS["CORS whitelist (CORS_ORIGINS)"]
@@ -73,7 +73,7 @@ flowchart TB
     R_fns --> BE_Cat
 
     %% ============ ДАННЫЕ ============
-    subgraph DATA["ДАННЫЕ · PostgreSQL @ Railway (asyncpg pool, init_db)"]
+    subgraph DATA["ДАННЫЕ · PostgreSQL @ Timeweb Cloud, Москва (asyncpg pool, init_db)"]
         DB[("12 таблиц<br/>organizations · users · receipts ·<br/>receipt_items · reports · report_items ·<br/>cards · category_groups · categories ·<br/>invite_links · user_consents · revoked_tokens")]
         PHOTO["Фото чека:<br/>сейчас base64 в receipts.raw_data (JSONB)<br/>поле photo_url есть, но upload НЕ реализован"]
     end
@@ -106,7 +106,7 @@ flowchart TB
     BE_MW -.-> EX_Sentry
 
     %% ============ ИНФРА ============
-    subgraph INFRA["ИНФРА · Railway (auto-deploy из main) + CI"]
+    subgraph INFRA["ИНФРА · Timeweb Cloud (auto-deploy из main) + CI"]
         INF_BE["сервис: backend (FastAPI)"]
         INF_FE["сервис: frontend (server.js)"]
         INF_PG["сервис: PostgreSQL"]
@@ -368,17 +368,19 @@ cards → ocr → consent → users → services → categories → organization
 
 ## 6. Инфраструктура и деплой
 
-- **Хостинг:** Railway, auto-deploy из ветки `main`.
+- **Хостинг:** Timeweb Cloud, App Platform, auto-deploy из ветки `main` (с 18.08.2026, S-06).
   - Бэкенд: `Procfile` → `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
   - Фронтенд: `server.js` (Express static + SPA-fallback), слушает **порт 4173**
     (хардкод, не `$PORT`), запуск `npm run start`; сборка `vite build` → `dist/`.
-  - PostgreSQL: отдельный сервис Railway, строка `DATABASE_URL`.
+  - PostgreSQL: отдельная база Timeweb Cloud (Москва), строка `DATABASE_URL`.
 - **CI:** GitHub Actions на каждый push/PR — `pytest tests/ -v` + `ruff check app/`
   (Python 3.11). Тесты на `FakePool` (зеркало PostgreSQL в `conftest.py`).
-- **Секреты:** только Railway → Variables (`JWT_SECRET_KEY`, `ANTHROPIC_API_KEY`,
+- **Секреты:** только панель Timeweb → Переменные (`JWT_SECRET_KEY`, `ANTHROPIC_API_KEY`,
   `PROVERKACHEKA_TOKEN`, `RESEND_API_KEY`, `SENTRY_DSN`, `CORS_ORIGINS`, …).
   `.env` локально пуст, есть `.env.example`.
-- **Резидентность (152-ФЗ):** сейчас БД и фото — на Railway (вне РФ, переходно).
+- **Резидентность (152-ФЗ):** БД и фото — в РФ, Timeweb Cloud (Москва),
+  с 18.08.2026. ⚠️ ПОПРАВКА 27.08 (T65): прежняя строка «сейчас на Railway
+  (вне РФ, переходно)» была неверна три месяца и читалась как разрешение.
   Целевое — Timeweb Cloud (управляемый PostgreSQL + S3, РФ), задача **S-06**
   (площадка выбрана владельцем 11.08.2026 по сравнению трёх,
   `docs/AOCG-INFRA-001-Sravnenie_ploshchadok_RF.md`).

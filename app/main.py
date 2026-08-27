@@ -87,7 +87,7 @@ app.add_exception_handler(Exception, unhandled_exception_handler)
 # Security middleware (rate-limit per IP, авто-бан, security-headers, enforce
 # HTTPS). Конфиг через env SECURITY_* — все НЕ обязательны (дефолты: 60/мин,
 # /api/auth/* 5/мин, бан после 10 превышений, enforce_https=true). HTTPS-проверка
-# смотрит x-forwarded-proto (Railway за прокси), поэтому прод проходит; локально
+# смотрит x-forwarded-proto (площадка держит прод за прокси), поэтому прод проходит; локально
 # выключается SECURITY_ENFORCE_HTTPS=false.
 # ВАЖНО (порядок): добавляем ДО CORS, чтобы CORS остался добавленным ПОСЛЕДНИМ
 # = ВНЕШНИМ слоем — тогда даже 429/403 от security проходят через CORS и
@@ -97,7 +97,7 @@ app.add_middleware(AOCGSecurityMiddleware)
 # CORS-whitelist через env CORS_ORIGINS — запятая-разделённый список origin'ов
 # (напр. "https://app.example.ru,https://example.ru"). Если переменная не задана —
 # fallback "*" (как было: не ломает прод до выставления env и локальную разработку).
-# На проде выставить CORS_ORIGINS в Railway = домен(ы) фронта → whitelist включится
+# На проде выставить CORS_ORIGINS в панели Timeweb = домен(ы) фронта → whitelist включится
 # на ближайшем рестарте контейнера, без передеплоя кода. См. задачу S-19.
 _cors_env = os.environ.get("CORS_ORIGINS", "").strip()
 _cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()] or ["*"]

@@ -128,7 +128,7 @@ class AOCGSecurityMiddleware(BaseHTTPMiddleware):
         now = time.time()
         ip = self._client_ip(request)
 
-        # 1. Принуждение HTTPS (за прокси/Railway смотрим x-forwarded-proto).
+        # 1. Принуждение HTTPS (за прокси площадки смотрим x-forwarded-proto).
         if self.enforce_https:
             proto = request.headers.get("x-forwarded-proto", request.url.scheme)
             if proto == "http":

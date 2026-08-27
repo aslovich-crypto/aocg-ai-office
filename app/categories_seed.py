@@ -25,7 +25,7 @@ async def seed_default_categories(conn, org_id) -> int:
     """Идемпотентно засеять 11 групп + 48 статей для org_id.
 
     No-op, если у орг уже есть категории (защита от повторного seed при рестарте
-    Railway или ручном вызове). Возвращает число созданных статей (0 при skip).
+    площадкой или ручном вызове). Возвращает число созданных статей (0 при skip).
     Вызывается внутри уже открытой транзакции (регистрация / init_db)."""
     exists = await conn.fetchval(
         "SELECT EXISTS(SELECT 1 FROM categories WHERE org_id=$1)", org_id

@@ -19,7 +19,8 @@
 ПОВТОРНЫЙ ЗАПУСК безопасен ровно один раз: после успешной чистки строк
 не останется, и второй прогон упадёт на проверке «не 19», ничего не тронув.
 
-ЗАПУСК: railway run --service Postgres ./venv/bin/python tests/tools/purge_consents.py
+ЗАПУСК: DATABASE_URL=<внешняя строка подключения из панели Timeweb> \
+            ./venv/bin/python tests/tools/purge_consents.py
 """
 
 import asyncio

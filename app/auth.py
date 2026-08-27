@@ -1,6 +1,6 @@
 """Password hashing + JWT tokens + the get_current_user dependency.
 
-Reads config from env (set these on Railway at cutover):
+Reads config from env (set these in the Timeweb panel at cutover):
   JWT_SECRET_KEY, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS
 JWT_SECRET_KEY is REQUIRED — the app refuses to start without it (no insecure
 default), so production can never accidentally sign tokens with a known key.
@@ -18,7 +18,7 @@ from passlib.context import CryptContext
 from app.database import get_pool
 
 # Fail-fast: НЕ подписываем токены публично известным дефолтом. Если ключ не
-# задан (Railway variables / локальный .env) — отказываемся стартовать, а не
+# задан (Переменные в панели Timeweb / локальный .env) — отказываемся стартовать, а не
 # молча падаем на угадываемый секрет (иначе любой смог бы подделать JWT).
 JWT_SECRET = os.getenv("JWT_SECRET_KEY")
 if not JWT_SECRET:

@@ -33,8 +33,9 @@
 ЗАПУСК:
     # CI (пустая база из сервиса postgres)
     DATABASE_URL=postgresql://... ./venv/bin/python tests/tools/sql_check.py --schema
-    # локально против прод-схемы, read-only
-    railway run --service Postgres ./venv/bin/python tests/tools/sql_check.py
+    # локально против прод-схемы, read-only — строка подключения берётся
+    # из панели Timeweb, ВНЕШНИМ (публичным) адресом базы
+    DATABASE_PUBLIC_URL=postgresql://... ./venv/bin/python tests/tools/sql_check.py
 """
 
 import asyncio
@@ -70,9 +71,10 @@ def _пропустить(sql):
 
 
 async def main():
-    # ПУБЛИЧНЫЙ адрес ПЕРВЫМ: `railway run` кладёт в DATABASE_URL ВНУТРЕННИЙ
-    # хост (postgres.railway.internal), который снаружи не резолвится вовсе —
-    # прогон падал на DNS. В CI публичного адреса нет, там сработает второй.
+    # ПУБЛИЧНЫЙ адрес ПЕРВЫМ: у площадки внутренний хост базы снаружи не
+    # резолвится вовсе, и прогон падал на DNS. Куплено на Railway
+    # (`postgres.railway.internal` из `railway run`); у Timeweb внутренний
+    # адрес свой, но свойство то же. В CI публичного адреса нет — сработает второй.
     url = os.environ.get("DATABASE_PUBLIC_URL") or os.environ.get("DATABASE_URL")
     if not url:
         sys.exit("нет DATABASE_URL / DATABASE_PUBLIC_URL — базу неоткуда взять")
