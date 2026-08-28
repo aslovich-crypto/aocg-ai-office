@@ -6,7 +6,13 @@ kopecks → rubles.
 
 from typing import List
 
-from app.parsers.fns_parser import _VAT_RATE_BY_CODE, _kopecks, _num, _str_or_none
+from app.parsers.fns_parser import (
+    СТАВКА_ПО_КОДУ,
+    _код_ставки,
+    _kopecks,
+    _num,
+    _str_or_none,
+)
 
 
 def parse_fns_items(raw_data: dict) -> List[dict]:
@@ -26,7 +32,11 @@ def parse_fns_items(raw_data: dict) -> List[dict]:
                 "quantity": _num(item.get("quantity")),
                 "price": _kopecks(item.get("price")),
                 "sum": _kopecks(item.get("sum")),
-                "vat_rate": _VAT_RATE_BY_CODE.get(item.get("nds")),
+                # ЕДИНАЯ карта тега 1199 (fns_parser). До 28.08 здесь стояла
+                # шестикодовая `_VAT_RATE_BY_CODE`: коды 7–12 давали NULL,
+                # 5 и 6 схлопывались в "0". Замер: 80 позиций с кодом 22%
+                # лежали в базе без ставки, 448 позиций «без НДС» — как "0".
+                "vat_rate": СТАВКА_ПО_КОДУ.get(_код_ставки(item.get("nds"))),
             }
         )
     return result
@@ -37,7 +47,7 @@ def parse_ocr_items(raw_data: dict) -> List[dict]:
     _finalize_items). Differs from parse_fns_items:
       * price/sum/quantity are in RUBLES — _num, NOT _kopecks (no /100).
       * vat_rate already arrives as a string ('20'/'10'/'0'/None) — taken as-is,
-        NOT mapped through _VAT_RATE_BY_CODE (which decodes FNS int nds codes).
+        NOT mapped through СТАВКА_ПО_КОДУ (which decodes FNS int nds codes).
     Same defensive contract: never raises, [] on odd input."""
     if not isinstance(raw_data, dict):
         return []
