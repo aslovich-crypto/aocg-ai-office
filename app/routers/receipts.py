@@ -442,11 +442,16 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                         org_inn, payment_form, payment_detail, card_last4,
                         tax_system, address, vat_0, vat_total,
                         kkt_serial, kkt_rn, fd_num, fpd, cashier, category_id, user_id,
-                        vat_breakdown, photo_key
+                        vat_breakdown, photo_key,
+                        -- ⚠️ НОВЫЕ КОЛОНКИ — ПОСЛЕДНИМИ, как photo_key и по той же
+                        -- причине: иначе сдвигаются позиции всех параметров ниже,
+                        -- и зеркало FakePool приходится перенумеровывать целиком.
+                        -- На этом уже горели (NDS-CLEANUP ②, 33 красных теста).
+                        sum_vat_0, sum_no_vat
                     ) VALUES (
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
                         $12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
-                        $23,$24,$25,$26,$27,$28,$29,$30,$31,$32
+                        $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34
                     ) RETURNING *""",
                     user["org_id"],
                     r.date,
@@ -480,6 +485,8 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                     user["id"],
                     parsed.get("vat_breakdown"),
                     r.photo_key,
+                    parsed.get("sum_vat_0"),
+                    parsed.get("sum_no_vat"),
                 )
                 # Позиции — best-effort: вложенная транзакция (SAVEPOINT), чтобы
                 # сбой вставки/парсинга позиций откатывал ТОЛЬКО их, а чек оставался.
