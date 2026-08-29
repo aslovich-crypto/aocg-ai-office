@@ -6,19 +6,25 @@
 а не маловероятным: читать нечего, кроме файла.
 
 ⚠️ ЗАЧЕМ ТАК, А НЕ ХУКОМ. Прежняя витрина (артефакт на claude.ai) собиралась
-руками и отставала на два дня: файл правится по семь раз за день. Ставить
-сборку в pre-commit значило бы класть готовый HTML в git — и вернуть вторую
-копию, ровно то, от чего уходим. Плюс diff перестал бы читаться: правил одну
-строку — в коммите две тысячи.
+руками и отстала на два дня и 18 задач: 228 против 246. Ставить сборку
+в pre-commit значило бы класть готовый HTML в git — и вернуть вторую копию,
+ровно то, от чего уходим.
 
 ⚠️ РАЗБОР НЕ ПЕРЕПИСЫВАЕТСЯ. `строки_задач` (tracker_guard) и `ячейки`
 (md_table) уже под тестами и работают — граница поставлена владельцем.
 Здесь только сборка и показ.
+
+⚠️ ПОЧЕМУ СТРОКИ ПЕЧАТАЕТ СБОРЩИК, А НЕ СКРИПТ В БРАУЗЕРЕ. Прежняя витрина
+держала задачи одним куском JSON и рисовала строки на клиенте — в самом
+файле не было НИ ОДНОГО <article>. Повтори её дословно — сторож насчитал бы
+ноль вместо 246 и покраснел. Печать строк сборщиком оставляет контракт
+со сторожем целым, а Ctrl+F и печать страницы берут ВСЕ задачи.
 """
 
 import html
 import importlib.util
 import pathlib
+import re
 import sys
 
 КОРЕНЬ = pathlib.Path(__file__).resolve().parents[2]
@@ -38,14 +44,54 @@ def _модуль(имя):
 tracker_guard = _модуль("tracker_guard")
 md_table = _модуль("md_table")
 
-ЦВЕТ_ПРИОРИТЕТА = {"🔴": "#A4161A", "🟡": "#B45309", "🟢": "#166534"}
-ФОН_СТАТУСА = {
-    "✅": ("#F0FDF4", "#166534"),
-    "⬜": ("#F8FAFC", "#475569"),
-    "🔵": ("#EFF6FF", "#1D4ED8"),
-    "⏸": ("#FFFBEB", "#B45309"),
-    "👀": ("#FAF5FF", "#7E22CE"),
-}
+КЛАСС_ПРИОРИТЕТА = {"🔴": "crit", "🟡": "mid", "🟢": "low"}
+КЛАСС_СТАТУСА = {"✅": "done", "👀": "look", "🔵": "look", "⏸": "hold"}
+
+
+def разметка_строки(текст):
+    """`код`, **жирный**, [[ссылка]] — как в прежней витрине.
+
+    ⚠️ ПРИМЕНЯЕТСЯ И К ИМЕНАМ ЗАДАЧ. В прежней витрине имена шли сырыми:
+    LEGAL-005 читалась как «**[ДО-КЛИЕНТА]** … `aocgai.ru` …» вместе
+    со звёздочками и обратными кавычками. Дефект оригинала не возвращаем.
+
+    ⚠️ ПОРЯДОК ЗДЕСЬ — НЕ ВКУСОВЩИНА, ОН ИЗМЕРЕН. Кодовые вставки прячутся
+    заглушкой ДО разбора жирного, и обе беды снимаются разом:
+    ① `**` внутри кода (`Write(**/.env)`) больше не смыкается с парой
+      снаружи вставки — раньше выходил перехлёст <code>…<strong>…</code>,
+      три штуки на странице;
+    ② жирное, ВНУТРИ которого лежит код («**… фронт `fe01d98` …**»),
+      остаётся целым — а такого в трекере большинство. Резать строку
+      по коду нельзя: пары ** разрываются, замер дал 556 сырых знаков
+      вместо 26.
+    """
+    ч = html.escape(текст)
+    коды = []
+
+    def _спрятать(м):
+        коды.append(м.group(1))
+        return f"\x00{len(коды) - 1}\x00"
+
+    ч = re.sub(r"`([^`]+)`", _спрятать, ч)
+    # ⚠️ (.+?), А НЕ ([^*]+): жирное сплошь и рядом содержит одиночную
+    # звёздочку — CORS_ORIGINS → ["*"], глоб *.py. Класс символов на ней
+    # ломался, и оба знака ** оставались видны глазами.
+    ч = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", ч, flags=re.S)
+    ч = re.sub(r"\[\[([^\]]+)\]\]", r'<span class="ref">\1</span>', ч)
+    return re.sub(
+        r"\x00(\d+)\x00", lambda м: f"<code>{коды[int(м.group(1))]}</code>", ч
+    )
+
+
+def разметка_примечания(текст):
+    """═══ делит разбор на абзацы, ⚠️-абзац идёт вишнёвой плашкой."""
+    куски = [к.strip() for к in текст.split("═══") if к.strip()]
+    абзацы = []
+    for к in куски:
+        предупреждение = к.startswith("⚠️") or к.startswith("**⚠️")
+        кл = ' class="warn"' if предупреждение else ""
+        абзацы.append(f"<p{кл}>{разметка_строки(к)}</p>")
+    return "".join(абзацы) or "<p>—</p>"
 
 
 def собрать(текст):
@@ -73,56 +119,187 @@ def собрать(текст):
     return разделы, задачи
 
 
-def в_html(разделы, всего):
+def строка_задачи(запись):
+    ид, название, пр, ст, план, факт, прим, н = запись
+    полоска = КЛАСС_ПРИОРИТЕТА.get(пр, "")
+    пилюля = КЛАСС_СТАТУСА.get(ст, "")
+    план_ф = план if план and план != "—" else ""
+    факт_ф = факт if факт and факт != "—" else ""
+    сроки = " · ".join(
+        ч
+        for ч in (
+            f"план {план_ф}" if план_ф else "",
+            f"факт {факт_ф}" if факт_ф else "",
+        )
+        if ч
+    )
+    # ⚠️ Ссылка на строку файла — добавка к прежнему виду, оставлена
+    # по решению владельца: видно, куда править.
+    return (
+        '<article class="task">'
+        '<details><summary class="row">'
+        f'<span class="stripe {полоска}"></span>'
+        f'<span class="tid">{html.escape(ид)}</span>'
+        f'<span class="tname">{разметка_строки(название)}</span>'
+        f'<span class="meta">'
+        f'<span class="pill {пилюля}">{html.escape(ст)}</span>'
+        + (f'<span class="fact">{html.escape(сроки)}</span>' if сроки else "")
+        + f'<span class="line">TASKS.md:{н}</span>'
+        "</span></summary>"
+        f'<div class="note">{разметка_примечания(прим)}</div>'
+        "</details></article>"
+    )
+
+
+def в_html(разделы):
     ч = []
     for заголовок, уровень, строки in разделы:
         if not строки:
             continue
-        ч.append(f"<h{уровень}>{html.escape(заголовок)}</h{уровень}>")
-        for ид, название, пр, ст, план, факт, прим, н in строки:
-            цвет = ЦВЕТ_ПРИОРИТЕТА.get(пр, "#94A3B8")
-            фон, текст_ст = ФОН_СТАТУСА.get(ст, ("#F8FAFC", "#475569"))
-            ч.append(
-                f'<article style="border-left:4px solid {цвет}">'
-                f'<div class="шапка">'
-                f'<span class="ид">{html.escape(ид)}</span>'
-                f'<span class="имя">{html.escape(название)}</span>'
-                f'<span class="ст" style="background:{фон};color:{текст_ст}">{html.escape(ст)}</span>'
-                f"</div>"
-                f'<div class="мета">план {html.escape(план or "—")} · факт {html.escape(факт or "—")}'
-                f' · <span class="строка">TASKS.md:{н}</span></div>'
-                + (
-                    f'<details><summary>примечание</summary><div class="прим">{html.escape(прим)}</div></details>'
-                    if прим
-                    else ""
-                )
-                + "</article>"
-            )
+        класс = "blk" if уровень == 3 else "sec"
+        ч.append(
+            f'<h{уровень} class="{класс}">{разметка_строки(заголовок)}</h{уровень}>'
+        )
+        ч.append('<div class="list">')
+        ч.extend(строка_задачи(з) for з in строки)
+        ч.append("</div>")
     return "\n".join(ч)
 
 
+# ⚠️ ШРИФТЫ ТЯНУТСЯ С fonts.googleapis.com, А ВИТРИНА ОТКРЫВАЕТСЯ КАК file://.
+# Без сети запрос не пройдёт, и страница молча съедет на запасной стек —
+# решение владельца: пережить, а не вшивать шрифты в файл (+400 КБ в /tmp).
+# Поэтому у каждого начертания честный запасной стек, а не голое имя.
+ШРИФТЫ = (
+    '<link rel="preconnect" href="https://fonts.googleapis.com">'
+    '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+    '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
+    "family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600"
+    '&family=IBM+Plex+Serif:wght@500;600&display=swap">'
+)
+
 СТИЛЬ = """
-:root{--фон:#FFFFFF;--текст:#111318;--серый:#64748B;--рамка:#E2E8F0}
-@media (prefers-color-scheme:dark){:root{--фон:#0F1115;--текст:#E8EAED;--серый:#94A3B8;--рамка:#232833}}
+:root{
+  --ground:#F5F6F9; --surface:#FFFFFF; --raise:#FAFBFC;
+  --ink:#14181F; --muted:#5C6674; --faint:#8A94A3;
+  --line:#E1E5EC; --line-soft:#EDF0F4;
+  --cherry:#A4161A; --cherry-soft:#F6E9EA;
+  --crit:#A4161A; --mid:#8A5510; --low:#2E6B4F;
+  --shadow:0 1px 2px rgba(20,24,31,.05), 0 8px 24px -16px rgba(20,24,31,.18);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#12151A; --surface:#191D24; --raise:#1E232B;
+    --ink:#E7EAF0; --muted:#98A2B1; --faint:#6E7887;
+    --line:#2A303A; --line-soft:#232830;
+    --cherry:#E4585F; --cherry-soft:#2A1618;
+    --crit:#E4585F; --mid:#D9A055; --low:#6FC098;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.8);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#12151A; --surface:#191D24; --raise:#1E232B;
+  --ink:#E7EAF0; --muted:#98A2B1; --faint:#6E7887;
+  --line:#2A303A; --line-soft:#232830;
+  --cherry:#E4585F; --cherry-soft:#2A1618;
+  --crit:#E4585F; --mid:#D9A055; --low:#6FC098;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.8);
+}
 *{box-sizing:border-box}
-body{margin:0;padding:24px 20px 64px;background:var(--фон);color:var(--текст);
-     font:400 15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-     max-width:900px;margin-inline:auto}
-h1{font-size:22px;margin:0 0 4px}
-h2{font-size:17px;margin:32px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--рамка)}
-h3{font-size:14px;margin:20px 0 8px;color:var(--серый);text-transform:uppercase;letter-spacing:.04em}
-.свод{color:var(--серый);font-size:13px;margin-bottom:8px}
-article{padding:10px 12px;margin:6px 0;background:var(--фон);border:1px solid var(--рамка);border-radius:6px}
-.шапка{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
-.ид{font-weight:700;font-variant-numeric:tabular-nums;flex-shrink:0}
-.имя{flex:1;min-width:200px}
-.ст{font-size:12px;padding:1px 7px;border-radius:999px;flex-shrink:0}
-.мета{font-size:12px;color:var(--серый);margin-top:3px}
-.строка{font-family:ui-monospace,SFMono-Regular,monospace}
-details{margin-top:6px}
-summary{font-size:12px;color:var(--серый);cursor:pointer}
-.прим{font-size:13px;color:var(--текст);margin-top:6px;padding-left:10px;
-      border-left:2px solid var(--рамка);white-space:pre-wrap;overflow-wrap:anywhere}
+body{
+  margin:0 auto; max-width:1140px; padding:0 20px 80px;
+  background:var(--ground); color:var(--ink);
+  font-family:"IBM Plex Sans","Helvetica Neue","Segoe UI",Roboto,Arial,sans-serif;
+  font-size:15px; line-height:1.55; -webkit-font-smoothing:antialiased;
+}
+header{padding:44px 0 26px; border-bottom:1px solid var(--line)}
+h1{
+  font-family:"IBM Plex Serif",Georgia,"Times New Roman",serif; font-weight:600;
+  font-size:clamp(26px,4vw,36px); letter-spacing:-.015em; margin:0 0 6px;
+  text-wrap:balance;
+}
+.sub{color:var(--muted); margin:0; max-width:62ch}
+.src{
+  font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:12px; color:var(--faint); margin-top:14px;
+  display:flex; gap:14px; flex-wrap:wrap;
+}
+.sec{
+  font-family:"IBM Plex Sans","Helvetica Neue",Arial,sans-serif;
+  font-size:15px; font-weight:600; margin:38px 0 10px;
+  padding-bottom:7px; border-bottom:1px solid var(--line);
+}
+.blk{
+  font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-weight:400;
+  font-size:11px; color:var(--faint); letter-spacing:.02em; margin:26px 0 8px;
+}
+.list{margin:0 0 4px}
+.task{
+  background:var(--surface); border:1px solid var(--line); border-top:none;
+}
+.list .task:first-child{border-top:1px solid var(--line)}
+details>summary{list-style:none}
+details>summary::-webkit-details-marker{display:none}
+.row{
+  display:grid; grid-template-columns:14px 88px 1fr auto; gap:0 14px;
+  align-items:baseline; width:100%; text-align:left; cursor:pointer;
+  padding:11px 14px 11px 0;
+}
+.row:hover{background:var(--raise)}
+.row:focus-visible{outline:2px solid var(--cherry); outline-offset:-2px}
+.stripe{align-self:stretch; width:4px}
+.stripe.crit{background:var(--crit)}
+.stripe.mid{background:var(--mid)}
+.stripe.low{background:var(--low)}
+.tid{
+  font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-size:12.5px;
+  font-weight:500; color:var(--muted); font-variant-numeric:tabular-nums;
+}
+.tname{font-size:14.5px}
+.tname code,.tname strong{font-size:inherit}
+.meta{display:flex; gap:8px; align-items:center; white-space:nowrap}
+.pill{
+  font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-size:11px;
+  letter-spacing:.02em; border:1px solid var(--line); border-radius:2px;
+  padding:2px 7px; color:var(--muted);
+}
+.pill.done{color:var(--low); border-color:color-mix(in srgb,var(--low) 40%,transparent)}
+.pill.look{color:var(--cherry); border-color:color-mix(in srgb,var(--cherry) 40%,transparent)}
+.pill.hold{color:var(--mid); border-color:color-mix(in srgb,var(--mid) 40%,transparent)}
+.fact,.line{
+  font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-size:11.5px;
+  color:var(--faint); font-variant-numeric:tabular-nums;
+}
+.line{color:color-mix(in srgb,var(--faint) 70%,transparent)}
+.note{
+  background:var(--raise); border-top:1px solid var(--line-soft);
+  padding:16px 20px 20px 32px; font-size:14px; color:var(--ink);
+}
+.note p{margin:0 0 11px; max-width:74ch; overflow-wrap:anywhere}
+.note p:last-child{margin-bottom:0}
+.note strong{font-weight:600}
+code{
+  font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-size:12.5px;
+  background:var(--surface); border:1px solid var(--line-soft);
+  border-radius:2px; padding:1px 4px;
+}
+.note .warn{
+  border-left:2px solid var(--cherry); background:var(--cherry-soft);
+  margin-left:-14px; padding:8px 10px 8px 12px;
+}
+.ref{
+  font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-size:12px;
+  color:var(--cherry);
+  border-bottom:1px dotted color-mix(in srgb,var(--cherry) 50%,transparent);
+}
+@media (max-width:720px){
+  .row{grid-template-columns:14px 1fr; gap:0 10px}
+  .tid,.meta{grid-column:2}
+  .meta{margin-top:4px; white-space:normal; flex-wrap:wrap}
+  .note{padding-left:20px}
+  .note .warn{margin-left:-8px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
 """
 
 
@@ -145,11 +322,16 @@ def main():
     ВЫХОД.write_text(
         "<!doctype html><html lang=ru><head><meta charset=utf-8>"
         '<meta name=viewport content="width=device-width,initial-scale=1">'
-        f"<title>Трекер AOCG AI Офис</title><style>{СТИЛЬ}</style></head><body>"
-        f"<h1>Трекер AOCG AI Офис</h1>"
-        f'<div class="свод">задач {len(задачи)} · собрано из docs/TASKS.md · '
-        f"представление, а не копия — в git не хранится</div>"
-        + в_html(разделы, len(задачи))
+        "<title>Трекер AOCG AI Офис</title>"
+        f"{ШРИФТЫ}<style>{СТИЛЬ}</style></head><body>"
+        "<header><h1>Трекер AOCG AI Офис</h1>"
+        '<p class="sub">Все задачи платформы: что открыто, что закрыто и чем это '
+        "подтверждено. Строка раскрывается — внутри разбор находки, замеры "
+        "и оговорки.</p>"
+        '<div class="src"><span>источник: docs/TASKS.md</span>'
+        f"<span>задач {len(задачи)} · собрано командой make tracker</span>"
+        "<span>представление, а не копия — в git не хранится</span></div></header>"
+        + в_html(разделы)
         + "</body></html>",
         encoding="utf-8",
     )
