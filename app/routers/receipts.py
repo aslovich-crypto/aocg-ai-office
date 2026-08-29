@@ -434,6 +434,21 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     try:
         async with p.acquire() as conn:
             async with conn.transaction():
+                # ⚠️ НОВЫЕ КОЛОНКИ ДОБАВЛЯЮТСЯ ПОСЛЕДНИМИ — `sum_vat_0`,
+                # `sum_no_vat` после `photo_key`, и по той же причине, что
+                # `photo_key` когда-то: иначе сдвигаются позиции ВСЕХ параметров
+                # ниже, и зеркало FakePool приходится перенумеровывать целиком.
+                # На этом уже горели (NDS-CLEANUP ②, 33 красных теста).
+                #
+                # ⚠️ И ПОЯСНЕНИЕ СТОИТ ЗДЕСЬ, А НЕ ВНУТРИ SQL, — ЭТО ВТОРАЯ ЦЕНА
+                # ТОГО ЖЕ УРОКА. Прежде оно лежало внутри литерала строкой `--`.
+                # Приложение работало: asyncpg получает SQL с переводами строк.
+                # Ломался ПРИБОР `sql_check`: он нормализует SQL как
+                # `" ".join(sql.split())` (mirror_gaps.py:59), переводы строк
+                # схлопываются, и `--` съедает ОСТАТОК ЗАПРОСА — «синтаксическая
+                # ошибка в конце». Отказ вылезал в другом файле и три недели был
+                # не виден вовсе: шаг CI падал раньше, на init_db (см. T89).
+                # Правило записано в CLAUDE.md: комментарий НАД конструкцией.
                 row = await conn.fetchrow(
                     """INSERT INTO receipts (
                         org_id, date, org, payment, amount, employee,
@@ -443,10 +458,6 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                         tax_system, address, vat_0, vat_total,
                         kkt_serial, kkt_rn, fd_num, fpd, cashier, category_id, user_id,
                         vat_breakdown, photo_key,
-                        -- ⚠️ НОВЫЕ КОЛОНКИ — ПОСЛЕДНИМИ, как photo_key и по той же
-                        -- причине: иначе сдвигаются позиции всех параметров ниже,
-                        -- и зеркало FakePool приходится перенумеровывать целиком.
-                        -- На этом уже горели (NDS-CLEANUP ②, 33 красных теста).
                         sum_vat_0, sum_no_vat
                     ) VALUES (
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
