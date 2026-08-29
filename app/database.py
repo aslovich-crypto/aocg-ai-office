@@ -271,22 +271,14 @@ async def init_db():
             --        ALTER TABLE reports DROP COLUMN user_id;
             ALTER TABLE reports ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
             CREATE INDEX IF NOT EXISTS idx_reports_user_id ON reports(user_id);
-            -- Бэкфилл ②, идемпотентный (WHERE user_id IS NULL): автор = автор
-            -- чеков состава; для отчёта без чеков — владелец организации.
-            UPDATE reports SET user_id = (
-                SELECT MIN(rc.user_id)
-                FROM report_items ri JOIN receipts rc ON rc.id = ri.receipt_id
-                WHERE ri.report_id = reports.id
-            ) WHERE user_id IS NULL;
-            UPDATE reports SET user_id = (
-                SELECT owner_id FROM organizations o WHERE o.id = reports.org_id
-            ) WHERE user_id IS NULL;
-            -- ③ Второй деплой (REP-AUTHOR ЧП2): код выше уже на проде и всегда
-            -- пишет user_id, бэкфилл ② отработал (0 строк с NULL) — значит
-            -- ограничение можно закрепить. Идемпотентно: повторный SET NOT NULL
-            -- на уже NOT NULL колонке — no-op, init_db на каждом старте не падает.
-            -- Откат: ALTER TABLE reports ALTER COLUMN user_id DROP NOT NULL;
-            ALTER TABLE reports ALTER COLUMN user_id SET NOT NULL;
+            -- ⚠️ БЭКФИЛЛ И SET NOT NULL ПЕРЕЕХАЛИ НИЖЕ, К БЛОКУ receipts.
+            -- Они читают receipts.user_id (`SELECT MIN(rc.user_id)`), а эта
+            -- колонка создаётся ALTER-ом в блоке receipts — на сотню строк
+            -- ниже. На НЕПУСТОЙ базе колонка уже есть от прошлых деплоев,
+            -- и порядок ни на чём не сказывается; на ЧИСТОЙ её ещё нет,
+            -- и init_db падает с `column rc.user_id does not exist`.
+            -- Замер 29.08.2026: 147 красных прогонов CI подряд с 07.08,
+            -- ровно эта строка.
             CREATE TABLE IF NOT EXISTS invite_links (
                 id          SERIAL PRIMARY KEY,
                 token       TEXT UNIQUE NOT NULL,
@@ -377,6 +369,42 @@ async def init_db():
             -- Автор чека (A-ACL): кто создал. NULLABLE навсегда — старые строки и
             -- пограничные кейсы без автора остаются валидны. Доступ по роли — в роутере.
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS user_id        INTEGER REFERENCES users(id);
+            -- ⚠️ БЭКФИЛЛ reports.user_id СТОИТ ЗДЕСЬ, А НЕ У СВОЕЙ КОЛОНКИ,
+            -- И ЭТО НЕ НЕБРЕЖНОСТЬ, А ЕДИНСТВЕННОЕ ВЕРНОЕ МЕСТО.
+            -- Он читает receipts.user_id — строку выше. Пока он стоял в блоке
+            -- reports, между ним и этим ALTER лежало сто строк чужого кода,
+            -- и порядок глазами не проверялся: на непустой базе колонка уже
+            -- есть от прошлых деплоев, дефект невидим. На ЧИСТОЙ базе —
+            -- падение `column rc.user_id does not exist`.
+            --
+            -- ⚠️ ЧЕТЫРЕ ОПЕРАТОРА НЕРАЗДЕЛИМЫ: два бэкфилла и SET NOT NULL.
+            -- Ограничение обязано идти ПОСЛЕ обоих — иначе строка без автора
+            -- уронит контейнер на старте.
+            --
+            -- ЦЕНА, ЗАМЕР 29.08.2026: 147 красных прогонов CI подряд с 07.08.
+            -- Дефект лежал с 31.07 (REP-AUTHOR) и был невидим, пока 07.08
+            -- в CI не появился шаг «SQL через настоящий PostgreSQL» — прибор
+            -- заработал и сразу нашёл настоящую находку.
+            --
+            -- ⚠️ init_db — ЕДИНСТВЕННЫЙ путь поднять схему с нуля: вторая
+            -- среда, восстановление из копии, переезд. Приёмка правки —
+            -- не «CI позеленел», а «развёртывание с нуля работает».
+            -- Бэкфилл ②, идемпотентный (WHERE user_id IS NULL): автор = автор
+            -- чеков состава; для отчёта без чеков — владелец организации.
+            UPDATE reports SET user_id = (
+                SELECT MIN(rc.user_id)
+                FROM report_items ri JOIN receipts rc ON rc.id = ri.receipt_id
+                WHERE ri.report_id = reports.id
+            ) WHERE user_id IS NULL;
+            UPDATE reports SET user_id = (
+                SELECT owner_id FROM organizations o WHERE o.id = reports.org_id
+            ) WHERE user_id IS NULL;
+            -- ③ Второй деплой (REP-AUTHOR ЧП2): код выше уже на проде и всегда
+            -- пишет user_id, бэкфилл ② отработал (0 строк с NULL) — значит
+            -- ограничение можно закрепить. Идемпотентно: повторный SET NOT NULL
+            -- на уже NOT NULL колонке — no-op, init_db на каждом старте не падает.
+            -- Откат: ALTER TABLE reports ALTER COLUMN user_id DROP NOT NULL;
+            ALTER TABLE reports ALTER COLUMN user_id SET NOT NULL;
             -- Желательные (5):
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS tax_system     VARCHAR(30);
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS address        TEXT;
