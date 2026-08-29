@@ -358,7 +358,12 @@ input[type=search]:focus-visible,select:focus-visible,.chip:focus-visible{
 details>summary{list-style:none}
 details>summary::-webkit-details-marker{display:none}
 .row{
-  display:grid; grid-template-columns:14px 88px minmax(0,1fr) minmax(0,auto);
+  /* ⚠️ ПОСЛЕДНЯЯ ДОРОЖКА ОГРАНИЧЕНА ЧИСЛОМ, А НЕ auto. max-width
+     на самой ячейке НЕ сжимает дорожку сетки: под auto она требует
+     ширину по содержимому, а у сроков это до 261 знака в одну
+     строку. Дорожка забирала всё, имени доставался его минимум
+     220px, и справа зияло пустое поле в пол-экрана. */
+  display:grid; grid-template-columns:14px 88px minmax(220px,1fr) minmax(0,340px);
   gap:0 14px; align-items:baseline; width:100%; text-align:left; cursor:pointer;
   padding:11px 14px 11px 0;
 }
@@ -372,14 +377,18 @@ details>summary::-webkit-details-marker{display:none}
   font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-size:12.5px;
   font-weight:500; color:var(--muted); font-variant-numeric:tabular-nums;
 }
-.tname{font-size:14.5px; min-width:0; overflow-wrap:anywhere}
+/* ⚠️ break-word, А НЕ anywhere. Разница не косметическая: anywhere
+   МЕНЯЕТ минимальную ширину элемента до одного знака, и колонка имени
+   схлопнулась в букву — задача №28 встала столбиком по вертикали.
+   break-word переносит длинное слово, но минимальную ширину не трогает. */
+.tname{font-size:14.5px; min-width:0; overflow-wrap:break-word}
 .tname s{color:var(--faint)}
 .tname code,.tname strong{font-size:inherit}
 /* ⚠️ max-width — НЕ ВКУСОВЩИНА: без него ячейка сроков на 261 знак
    съедала колонку имени и выносила хвост за край страницы. */
 .meta{
   display:flex; gap:8px; align-items:center; white-space:nowrap;
-  min-width:0; max-width:min(42ch,46%);
+  min-width:0; max-width:100%; justify-self:end;
 }
 .meta>.pill,.meta>.line{flex-shrink:0}
 .pill{
