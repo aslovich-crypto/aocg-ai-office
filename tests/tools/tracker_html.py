@@ -79,6 +79,10 @@ def разметка_строки(текст):
     # ломался, и оба знака ** оставались видны глазами.
     ч = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", ч, flags=re.S)
     ч = re.sub(r"\[\[([^\]]+)\]\]", r'<span class="ref">\1</span>', ч)
+    # ⚠️ Зачёркивание нашлось ЗАМЕРОМ ПО СТРАНИЦЕ, а не по коду: восемь
+    # знаков ~~ торчали в именах четырёх задач (MOB-1, 28, 30, MOB-4).
+    # Сторож их не проверял — набор сырых знаков дополнен в T101.
+    ч = re.sub(r"~~(.+?)~~", r"<s>\1</s>", ч, flags=re.S)
     return re.sub(
         r"\x00(\d+)\x00", lambda м: f"<code>{коды[int(м.group(1))]}</code>", ч
     )
@@ -134,6 +138,13 @@ def строка_задачи(запись):
         )
         if ч
     )
+    # ⚠️ ПОЛНЫЕ СРОКИ ЖИВУТ В ПРИМЕЧАНИИ, А НЕ В СТРОКЕ. Замер 29.08.2026:
+    # медиана «план · факт» — 0 знаков, но у четырёх задач она до 261 (№30),
+    # 172 (MOB-4), 150 (№28). В строке такая ячейка распирала сетку, имя
+    # схлопывалось в один слог по вертикали, а хвост уезжал за край экрана.
+    # Теперь в строке усечённая ячейка с подсказкой, а полностью — здесь:
+    # ничего не потеряно, Ctrl+F и поиск по разбору по-прежнему находят.
+    шапка_сроков = f'<p class="сроки">{html.escape(сроки)}</p>' if сроки else ""
     # ⚠️ ПРИЗНАКИ ВИСЯТ НА САМОЙ КАРТОЧКЕ, И ЭТО НЕ УКРАШЕНИЕ. Фильтр обязан
     # ПРЯТАТЬ уже напечатанные <article>, а не рисовать их скриптом из JSON:
     # иначе сторож насчитает ноль вместо 249. Ровно эту ловушку содержала
@@ -149,10 +160,15 @@ def строка_задачи(запись):
         f'<span class="tname">{разметка_строки(название)}</span>'
         '<span class="meta">'
         f'<span class="pill {пилюля}">{html.escape(ст)}</span>'
-        + (f'<span class="fact">{html.escape(сроки)}</span>' if сроки else "")
+        + (
+            f'<span class="fact" title="{html.escape(сроки, quote=True)}">'
+            f"{html.escape(сроки)}</span>"
+            if сроки
+            else ""
+        )
         + f'<span class="line">TASKS.md:{н}</span>'
         "</span></summary>"
-        f'<div class="note">{разметка_примечания(прим)}</div>'
+        f'<div class="note">{шапка_сроков}{разметка_примечания(прим)}</div>'
         "</details></article>"
     )
 
@@ -271,7 +287,7 @@ def панель(разделы, пр, всего):
 }
 *{box-sizing:border-box}
 body{
-  margin:0 auto; max-width:1140px; padding:0 20px 80px;
+  margin:0 auto; max-width:1140px; padding:0 20px 80px; overflow-x:hidden;
   background:var(--ground); color:var(--ink);
   font-family:"IBM Plex Sans","Helvetica Neue","Segoe UI",Roboto,Arial,sans-serif;
   font-size:15px; line-height:1.55; -webkit-font-smoothing:antialiased;
@@ -342,8 +358,8 @@ input[type=search]:focus-visible,select:focus-visible,.chip:focus-visible{
 details>summary{list-style:none}
 details>summary::-webkit-details-marker{display:none}
 .row{
-  display:grid; grid-template-columns:14px 88px 1fr auto; gap:0 14px;
-  align-items:baseline; width:100%; text-align:left; cursor:pointer;
+  display:grid; grid-template-columns:14px 88px minmax(0,1fr) minmax(0,auto);
+  gap:0 14px; align-items:baseline; width:100%; text-align:left; cursor:pointer;
   padding:11px 14px 11px 0;
 }
 .row:hover{background:var(--raise)}
@@ -356,9 +372,16 @@ details>summary::-webkit-details-marker{display:none}
   font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-size:12.5px;
   font-weight:500; color:var(--muted); font-variant-numeric:tabular-nums;
 }
-.tname{font-size:14.5px}
+.tname{font-size:14.5px; min-width:0; overflow-wrap:anywhere}
+.tname s{color:var(--faint)}
 .tname code,.tname strong{font-size:inherit}
-.meta{display:flex; gap:8px; align-items:center; white-space:nowrap}
+/* ⚠️ max-width — НЕ ВКУСОВЩИНА: без него ячейка сроков на 261 знак
+   съедала колонку имени и выносила хвост за край страницы. */
+.meta{
+  display:flex; gap:8px; align-items:center; white-space:nowrap;
+  min-width:0; max-width:min(42ch,46%);
+}
+.meta>.pill,.meta>.line{flex-shrink:0}
 .pill{
   font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-size:11px;
   letter-spacing:.02em; border:1px solid var(--line); border-radius:2px;
@@ -370,6 +393,12 @@ details>summary::-webkit-details-marker{display:none}
 .fact,.line{
   font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-size:11.5px;
   color:var(--faint); font-variant-numeric:tabular-nums;
+}
+.fact{min-width:0; overflow:hidden; text-overflow:ellipsis}
+.сроки{
+  font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-size:12px;
+  color:var(--muted); margin:0 0 12px; padding-bottom:10px;
+  border-bottom:1px solid var(--line-soft); overflow-wrap:anywhere;
 }
 .line{color:color-mix(in srgb,var(--faint) 70%,transparent)}
 .note{
