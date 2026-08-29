@@ -287,7 +287,11 @@ def панель(разделы, пр, всего):
 }
 *{box-sizing:border-box}
 body{
-  margin:0 auto; max-width:1140px; padding:0 20px 80px; overflow-x:hidden;
+  /* ⚠️ overflow-x:hidden УБРАН СОЗНАТЕЛЬНО. Он прятал не беду, а её
+     признак: содержимое всё равно уезжало за край, только молча
+     обрезалось. И он ослеплял проверку размещения (T102) — боковую
+     прокрутку стало бы нечем поймать. Причина чинится в сетке. */
+  margin:0 auto; max-width:1140px; padding:0 20px 80px;
   background:var(--ground); color:var(--ink);
   font-family:"IBM Plex Sans","Helvetica Neue","Segoe UI",Roboto,Arial,sans-serif;
   font-size:15px; line-height:1.55; -webkit-font-smoothing:antialiased;

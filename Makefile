@@ -12,7 +12,7 @@
 
 PY := venv/bin/python
 
-.PHONY: tracker tracker-check help
+.PHONY: tracker tracker-check tracker-look help
 
 ## tracker — собрать витрину трекера и открыть в браузере
 tracker:
@@ -23,6 +23,13 @@ tracker:
 ## tracker-check — сверить, что до витрины доехали ВСЕ задачи
 tracker-check:
 	@$(PY) tests/tools/tracker_html_guard.py
+
+# ⚠️ ОТДЕЛЬНОЙ ЦЕЛЬЮ, А НЕ ВНУТРИ tracker-check: нужен Chrome, это внешняя
+# зависимость, и прогон идёт секунды, а не мгновение. Но при отсутствии
+# браузера проверка НЕ МОЛЧИТ — печатает «ПРОВЕРКА НЕ ВЫПОЛНЕНА» и краснеет.
+## tracker-look — проверить РАЗМЕЩЕНИЕ: страницу считает Chrome без окна
+tracker-look:
+	@$(PY) tests/tools/tracker_look_guard.py
 
 help:
 	@grep -E '^## ' Makefile | sed 's/^## /  /'
