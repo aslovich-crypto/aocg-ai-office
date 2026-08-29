@@ -21,6 +21,7 @@
 со сторожем целым, а Ctrl+F и печать страницы берут ВСЕ задачи.
 """
 
+import collections
 import html
 import importlib.util
 import pathlib
@@ -133,15 +134,20 @@ def строка_задачи(запись):
         )
         if ч
     )
+    # ⚠️ ПРИЗНАКИ ВИСЯТ НА САМОЙ КАРТОЧКЕ, И ЭТО НЕ УКРАШЕНИЕ. Фильтр обязан
+    # ПРЯТАТЬ уже напечатанные <article>, а не рисовать их скриптом из JSON:
+    # иначе сторож насчитает ноль вместо 249. Ровно эту ловушку содержала
+    # прежняя витрина — см. T98.
     # ⚠️ Ссылка на строку файла — добавка к прежнему виду, оставлена
     # по решению владельца: видно, куда править.
     return (
-        '<article class="task">'
+        f'<article class="task" data-pr="{html.escape(пр, quote=True)}" '
+        f'data-st="{html.escape(ст, quote=True)}">'
         '<details><summary class="row">'
         f'<span class="stripe {полоска}"></span>'
         f'<span class="tid">{html.escape(ид)}</span>'
         f'<span class="tname">{разметка_строки(название)}</span>'
-        f'<span class="meta">'
+        '<span class="meta">'
         f'<span class="pill {пилюля}">{html.escape(ст)}</span>'
         + (f'<span class="fact">{html.escape(сроки)}</span>' if сроки else "")
         + f'<span class="line">TASKS.md:{н}</span>'
@@ -156,14 +162,72 @@ def в_html(разделы):
     for заголовок, уровень, строки in разделы:
         if not строки:
             continue
-        класс = "blk" if уровень == 3 else "sec"
+        класс = "blk" if уровень == 3 else "sec-h"
+        # ⚠️ <section> нужен, чтобы при фильтре пропадал и ЗАГОЛОВОК тоже.
+        # Без него остаются висеть заголовки блоков без единой задачи под ними.
+        ч.append(f'<section class="sec" data-b="{html.escape(заголовок, quote=True)}">')
         ч.append(
             f'<h{уровень} class="{класс}">{разметка_строки(заголовок)}</h{уровень}>'
         )
         ч.append('<div class="list">')
         ч.extend(строка_задачи(з) for з in строки)
-        ч.append("</div>")
+        ч.append("</div></section>")
     return "\n".join(ч)
+
+
+def сводка(задачи):
+    """Шесть чисел, как в прежней витрине. Считаются, а не проставляются."""
+    ст = collections.Counter(з[3] for з in задачи)
+    пр = collections.Counter(з[2] for з in задачи)
+    с_фактом = sum(1 for з in задачи if з[3] == "✅" and з[5] and з[5] != "—")
+    карточки = (
+        ("", ст.get("⬜", 0), "открыто"),
+        ("crit", пр.get("🔴", 0), "🔴 критично"),
+        ("mid", пр.get("🟡", 0), "🟡 средне"),
+        ("low", пр.get("🟢", 0), "🟢 низко"),
+        ("", ст.get("✅", 0), "✅ закрыто"),
+        ("", с_фактом, "из них с фактом"),
+    )
+    тела = "".join(
+        f'<div class="stat {к}"><b>{ч}</b><span>{п}</span></div>'
+        for к, ч, п in карточки
+    )
+    return f'<div class="stats">{тела}</div>', пр
+
+
+def панель(разделы, пр, всего):
+    """Поиск, кнопки приоритета и статуса, список блоков, счётчик."""
+    приоритеты = "".join(
+        f'<button class="chip" aria-pressed="false" data-v="{з}">{з} {пр.get(з, 0)}</button>'
+        for з in ("🔴", "🟡", "🟢")
+    )
+    статусы = "".join(
+        f'<button class="chip" aria-pressed="false" data-v="{з}">{з} {п}</button>'
+        for з, п in (
+            ("⬜", "открыто"),
+            ("✅", "закрыто"),
+            ("👀", "проверка"),
+            ("🔵", "в работе"),
+            ("⏸", "блок"),
+        )
+    )
+    блоки = "".join(
+        f'<option value="{html.escape(з, quote=True)}">{html.escape(з)}</option>'
+        for з, _, стр in разделы
+        if стр
+    )
+    return (
+        '<div class="bar">'
+        '<input type="search" id="q" autocomplete="off" '
+        'placeholder="Поиск по номеру, названию и разбору" aria-label="Поиск">'
+        f'<div class="chips" id="pr" role="group" aria-label="Приоритет">{приоритеты}</div>'
+        f'<div class="chips" id="st" role="group" aria-label="Статус">{статусы}</div>'
+        f'<select id="blk" aria-label="Блок"><option value="">все блоки</option>{блоки}</select>'
+        f'<span class="count" id="cnt">{всего} из {всего}</span>'
+        "</div>"
+        '<p class="empty" id="empty" hidden>Ничего не нашлось. '
+        "Снимите фильтры или измените запрос.</p>"
+    )
 
 
 # ⚠️ ШРИФТЫ ТЯНУТСЯ С fonts.googleapis.com, А ВИТРИНА ОТКРЫВАЕТСЯ КАК file://.
@@ -233,6 +297,43 @@ h1{
   font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-weight:400;
   font-size:11px; color:var(--faint); letter-spacing:.02em; margin:26px 0 8px;
 }
+.stats{display:flex; flex-wrap:wrap; gap:10px; margin:22px 0 0}
+.stat{
+  background:var(--surface); border:1px solid var(--line); border-radius:3px;
+  padding:10px 14px; min-width:104px; box-shadow:var(--shadow);
+}
+.stat b{
+  display:block; font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+  font-size:22px; font-weight:600; font-variant-numeric:tabular-nums; line-height:1.2;
+}
+.stat span{font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.07em}
+.stat.crit b{color:var(--crit)}
+.stat.mid b{color:var(--mid)}
+.stat.low b{color:var(--low)}
+.bar{
+  position:sticky; top:0; z-index:5; background:var(--ground);
+  padding:16px 0 14px; border-bottom:1px solid var(--line);
+  display:flex; gap:10px; flex-wrap:wrap; align-items:center;
+}
+input[type=search],select{
+  font:inherit; font-size:14px; color:var(--ink); background:var(--surface);
+  border:1px solid var(--line); border-radius:3px; padding:8px 11px;
+}
+input[type=search]{flex:1 1 240px; min-width:180px}
+input[type=search]:focus-visible,select:focus-visible,.chip:focus-visible{
+  outline:2px solid var(--cherry); outline-offset:1px;
+}
+.chips{display:flex; gap:6px; flex-wrap:wrap}
+.chip{
+  font:inherit; font-size:13px; cursor:pointer; background:var(--surface);
+  border:1px solid var(--line); border-radius:3px; padding:7px 11px; color:var(--muted);
+}
+.chip[aria-pressed="true"]{background:var(--ink); color:var(--ground); border-color:var(--ink)}
+.count{
+  font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-size:12px;
+  color:var(--faint); margin-left:auto; font-variant-numeric:tabular-nums;
+}
+.empty{padding:48px 0; color:var(--muted); text-align:center}
 .list{margin:0 0 4px}
 .task{
   background:var(--surface); border:1px solid var(--line); border-top:none;
@@ -303,6 +404,49 @@ code{
 """
 
 
+# ⚠️ СКРИПТ ТОЛЬКО ПРЯЧЕТ. Все 249 <article> уже напечатаны сборщиком и
+# лежат в файле — фильтр переключает им атрибут hidden, и ничего не рисует.
+# Отсюда три следствия: сторож считает карточки в ФАЙЛЕ и остаётся зелёным
+# при любом фильтре; Ctrl+F браузера и печать берут все задачи; страница
+# читается и со сломанным скриптом.
+СКРИПТ = """
+(function(){
+  const карточки=[...document.querySelectorAll('article.task')].map(э=>({
+    э:э, т:э.textContent.toLowerCase(), пр:э.dataset.pr, ст:э.dataset.st,
+    б:э.closest('.sec').dataset.b}));
+  const секции=[...document.querySelectorAll('section.sec')];
+  const q=document.getElementById('q'), blk=document.getElementById('blk');
+  const cnt=document.getElementById('cnt'), пусто=document.getElementById('empty');
+  const выбор={pr:new Set(), st:new Set()};
+  function рисуй(){
+    const текст=q.value.trim().toLowerCase(), б=blk.value;
+    let видно=0;
+    for(const к of карточки){
+      const ок=(!выбор.pr.size||выбор.pr.has(к.пр))
+             &&(!выбор.st.size||выбор.st.has(к.ст))
+             &&(!б||к.б===б)
+             &&(!текст||к.т.includes(текст));
+      к.э.hidden=!ок; if(ок) видно++;
+    }
+    for(const с of секции) с.hidden=!с.querySelector('article.task:not([hidden])');
+    cnt.textContent=видно+' из '+карточки.length;
+    пусто.hidden=видно>0;
+  }
+  for(const [ид,ключ] of [['pr','pr'],['st','st']]){
+    document.getElementById(ид).addEventListener('click',e=>{
+      const c=e.target.closest('.chip'); if(!c) return;
+      const v=c.dataset.v, было=выбор[ключ].has(v);
+      было?выбор[ключ].delete(v):выбор[ключ].add(v);
+      c.setAttribute('aria-pressed',String(!было)); рисуй();
+    });
+  }
+  q.addEventListener('input',рисуй);
+  blk.addEventListener('change',рисуй);
+  рисуй();
+})();
+"""
+
+
 def main():
     if not ТРЕКЕР.exists():
         sys.exit(f"⚠️ СБОРКА НЕ ВЫПОЛНЕНА: нет {ТРЕКЕР}")
@@ -319,6 +463,7 @@ def main():
             "   Пустая витрина хуже отсутствующей — не собираю."
         )
 
+    блок_сводки, пр = сводка(задачи)
     ВЫХОД.write_text(
         "<!doctype html><html lang=ru><head><meta charset=utf-8>"
         '<meta name=viewport content="width=device-width,initial-scale=1">'
@@ -330,9 +475,12 @@ def main():
         "и оговорки.</p>"
         '<div class="src"><span>источник: docs/TASKS.md</span>'
         f"<span>задач {len(задачи)} · собрано командой make tracker</span>"
-        "<span>представление, а не копия — в git не хранится</span></div></header>"
+        "<span>представление, а не копия — в git не хранится</span></div>"
+        + блок_сводки
+        + "</header>"
+        + панель(разделы, пр, len(задачи))
         + в_html(разделы)
-        + "</body></html>",
+        + f"<script>{СКРИПТ}</script></body></html>",
         encoding="utf-8",
     )
     print(f"✓ витрина собрана: {ВЫХОД}")
