@@ -408,13 +408,17 @@ class FakePool:
         if "org_inn = $3" in q and "7 days" in q:
             # Ветка 2 — сильный composite (фаза C): ВСЕ совпадения, created_at ASC.
             # Динамический fn-фильтр: при has_reliable_fn матчим только fn-less чеки.
-            d, amount, org_inn, org_id, has_reliable_fn = args
+            # ⚠️ МЕРА А (№25): дата сравнивается ОКНОМ ±N дней, а не равенством.
+            # Зеркало обязано повторять запрос, иначе тест на форму «одна сумма,
+            # разные даты» пройдёт у нас и провалится на настоящей базе — ровно
+            # тот разрыв, что стоил трёх недель красного CI (T59).
+            d, amount, org_inn, org_id, has_reliable_fn, окно = args
             cutoff = datetime.utcnow() - timedelta(days=7)
             hits = [
                 r
                 for r in self.receipts
                 if (
-                    r["date"] == d
+                    abs((r["date"] - d).days) <= окно
                     and r["amount"] == amount
                     and r.get("org_inn") == org_inn
                     and r.get("org_id") == org_id
@@ -425,15 +429,16 @@ class FakePool:
             ]
             hits.sort(key=lambda r: r["created_at"])
             return [_dup_fakerow(r, self) for r in hits]
-        if "amount = $2 AND org_id = $3 AND (NOT $4" in q and "7 days" in q:
+        if "amount = $2 AND org_id = $3" in q and "7 days" in q:
             # Ветка 3 — слабый composite (фаза C): ВСЕ совпадения, created_at ASC.
-            d, amount, org_id, has_reliable_fn = args
+            # ⚠️ МЕРА А (№25): то же окно ±N дней, что и в сильной ветке.
+            d, amount, org_id, has_reliable_fn, окно = args
             cutoff = datetime.utcnow() - timedelta(days=7)
             hits = [
                 r
                 for r in self.receipts
                 if (
-                    r["date"] == d
+                    abs((r["date"] - d).days) <= окно
                     and r["amount"] == amount
                     and r.get("org_id") == org_id
                     and (not has_reliable_fn or r.get("kkt_fn") is None)

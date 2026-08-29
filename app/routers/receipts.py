@@ -270,6 +270,47 @@ def _dup_item(row, *, is_new, in_report) -> dict:
     }
 
 
+_МЕСЯЦЫ = (
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+)
+
+
+def _сообщение_о_дубле(строки, совпало: str) -> str:
+    """Текст предупреждения о дубле — С ДАТОЙ НАЙДЕННОГО ЧЕКА.
+
+    ⚠️ ТРЕБОВАНИЕ ВЛАДЕЛЬЦА (№25, мера А): не «такой чек уже есть», а
+    «этот чек уже добавлен 2 августа». Довод дословно: человек не помнит,
+    сканировал он этот чек или нет, и предупреждение отвечает ровно на
+    этот вопрос. С датой он РЕШАЕТ, без даты — гадает.
+
+    ⚠️ ДАТА ЧЕКА, А НЕ ДАТА ДОБАВЛЕНИЯ. Человек ищет в памяти покупку,
+    а не своё действие в приложении: «второго покупал» вспоминается,
+    «второго заводил в приложение» — нет.
+
+    Дат может быть несколько (окно ±3 дня): называем ВСЕ различные, иначе
+    сообщение утверждает больше, чем знает. Порядок — по возрастанию,
+    чтобы читалось как перечисление, а не как случайный набор.
+    """
+    даты = sorted({с["date"] for с in строки if с.get("date")})
+    if not даты:
+        # Дат нет вовсе — форма без даты, чтобы не утверждать лишнего.
+        return f"Возможный дубль: {совпало} — как у чека за последние 7 дней"
+    словами = ", ".join(f"{д.day} {_МЕСЯЦЫ[д.month - 1]}" for д in даты)
+    начало = "Этот чек уже добавлен" if len(даты) == 1 else "Такие чеки уже добавлены"
+    return f"{начало} {словами} — {совпало}"
+
+
 @router.post("/")
 async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     p = await get_pool()
@@ -381,6 +422,31 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     # динамическим fn-фильтром он бы не попал). SELECT тянет source/kkt_fn (для
     # deletable) + EXISTS(report_items) AS in_report. created_at ASC — хронология.
     # Срабатывает ровно одна ветка: сильная (есть ИНН) ИЛИ слабая (нет ИНН).
+    # ⚠️ МЕРА А (№25): КЛЮЧ ОТВЯЗАН ОТ ТОЧНОГО СОВПАДЕНИЯ ДАТЫ.
+    #
+    # Было `date = $1`. Живой случай 12.08.2026: ОДИН чек сохранён ТРИЖДЫ
+    # (id 71, 72, 73, все по 3500, все photo_ocr), приложение промолчало.
+    # Пары разошлись так: 71 и 72 — по ДАТЕ (владелец правил её руками),
+    # 72 и 73 — по ОРГАНИЗАЦИИ (ошибка распознавания). Точное равенство
+    # даты не совпало ни разу, и ветка не сработала.
+    #
+    # ⚠️ КОРЕНЬ, НАЗВАННЫЙ ВЛАДЕЛЬЦЕМ: ключ опирается на РЕДАКТИРУЕМЫЕ
+    # и РАСПОЗНАННЫЕ поля. Дату правят руками, организацию читает модель.
+    # Окно ±3 дня снимает первую половину; вторая (организация) остаётся
+    # и лечится не здесь — см. трекер, вариант Б, он НЕ начат намеренно.
+    #
+    # ПОЧЕМУ ТРИ ДНЯ, А НЕ СЕМЬ: `created_at > NOW() - 7 days` уже
+    # ограничивает выборку недавно ЗАВЕДЁННЫМИ чеками. Три дня — про дату
+    # САМОГО ЧЕКА, и это запас на ручную правку и на ошибку распознавания
+    # дня, а не на «покупал раз в неделю». Шире окно — больше регулярных
+    # покупок попадёт в предупреждение зря.
+    #
+    # ⚠️ ЭТО ПРЕДУПРЕЖДЕНИЕ, А НЕ ЗАПРЕТ. Жёсткий запрет остаётся только
+    # там, где он и был: уникальный индекс (kkt_fn, fd_num). Ложное
+    # срабатывание стоит одного касания «всё равно добавить»;
+    # пропущенный дубль стоит завышенного расхода в отчёте.
+    ОКНО_ДНЕЙ = 3
+
     dup_confidence = dup_message = None
     similar_rows = []
     if effective_org_inn:
@@ -388,7 +454,8 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
             """SELECT id, org, amount, date, source, kkt_fn,
                       EXISTS(SELECT 1 FROM report_items ri WHERE ri.receipt_id = receipts.id) AS in_report
                FROM receipts
-               WHERE date = $1 AND amount = $2 AND org_inn = $3 AND org_id = $4
+               WHERE date BETWEEN $1::date - $6::int AND $1::date + $6::int
+                 AND amount = $2 AND org_inn = $3 AND org_id = $4
                  AND (NOT $5::boolean OR kkt_fn IS NULL)
                  AND created_at > NOW() - INTERVAL '7 days'
                ORDER BY created_at ASC""",
@@ -397,16 +464,20 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
             effective_org_inn,
             org_id,
             has_reliable_fn,
+            ОКНО_ДНЕЙ,
         )
         if similar_rows:
             dup_confidence = "high"
-            dup_message = "Возможный дубль: дата, сумма и ИНН поставщика совпадают с чеком за последние 7 дней"
+            dup_message = _сообщение_о_дубле(
+                similar_rows, "совпадают сумма и ИНН поставщика"
+            )
     else:
         similar_rows = await p.fetch(
             """SELECT id, org, amount, date, source, kkt_fn,
                       EXISTS(SELECT 1 FROM report_items ri WHERE ri.receipt_id = receipts.id) AS in_report
                FROM receipts
-               WHERE date = $1 AND amount = $2 AND org_id = $3
+               WHERE date BETWEEN $1::date - $5::int AND $1::date + $5::int
+                 AND amount = $2 AND org_id = $3
                  AND (NOT $4::boolean OR kkt_fn IS NULL)
                  AND created_at > NOW() - INTERVAL '7 days'
                ORDER BY created_at ASC""",
@@ -414,12 +485,11 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
             r.amount,
             org_id,
             has_reliable_fn,
+            ОКНО_ДНЕЙ,
         )
         if similar_rows:
             dup_confidence = "low"
-            dup_message = (
-                "Возможный дубль: дата и сумма совпадают с чеком за последние 7 дней"
-            )
+            dup_message = _сообщение_о_дубле(similar_rows, "совпадает сумма")
 
     # Вариант A: photo_ocr НЕ пишет номер в kkt_fn (OCR-номер ненадёжен, остаётся
     # только в raw_data.fn). Надёжные источники пишут kkt_fn — каноническую колонку
