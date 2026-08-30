@@ -145,6 +145,32 @@ async def test_locked_account_rejects_even_the_correct_password(client, сотр
 
 
 @pytest.mark.asyncio
+async def test_отключённый_сотрудник_получает_внятный_отказ(client, сотрудник):
+    """Погашенный сотрудник отвергается НА ВХОДЕ, а не молча на первом запросе.
+
+    ⚠️ ЗАМЕР ПРОДА 31.08.2026: трое сотрудников «ООО АОЦГ» стоят
+    is_active=false. Вход их НЕ ПРОВЕРЯЛ — смотрел только пароль, выдавал
+    токены и отвечал «вход выполнен». А `get_current_user` читает
+    `AND is_active=true` и отвергал КАЖДЫЙ следующий запрос. Человек видел
+    успешный вход и пустое приложение без единой причины.
+
+    ⚠️ Доступа к данным у него не было — это не дыра, это ТИХИЙ ТУПИК,
+    и он хуже честного отказа: непонятно, что чинить.
+    """
+    сотрудник["is_active"] = False
+    r = await _вход(client, ПАРОЛЬ)
+    assert r.status_code == 403, r.text
+    тело = r.json()
+    # код — для интерфейса, текст — для человека; ветвиться по тексту нельзя
+    assert тело["code"] == "account_disabled"
+    assert "отключена" in тело["detail"]
+    # ⚠️ И ГЛАВНОЕ: токенов не выдано. Иначе «вход выполнен» остаётся правдой
+    # для клиента, и тупик просто переезжает на шаг дальше.
+    assert "access_token" not in тело
+    assert "refresh_token" not in тело
+
+
+@pytest.mark.asyncio
 async def test_unverified_email_cannot_log_in(client, сотрудник):
     сотрудник["is_email_verified"] = False
     r = await _вход(client, ПАРОЛЬ)
