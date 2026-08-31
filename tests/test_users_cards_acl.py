@@ -83,7 +83,13 @@ async def test_админ_не_может_отключить_самого_себ
     )
     r = await client.delete("/api/users/1")
     assert r.status_code == 409, r.text
-    assert "самого себя" in r.json()["detail"]
+    # ⚠️ ТЕКСТ ПРОВЕРЯЕТСЯ ДОСЛОВНО, И ЭТО ТРЕБОВАНИЕ ВЛАДЕЛЬЦА 31.08.2026.
+    # До этого дня первой срабатывала проверка «нельзя себя», и человек читал,
+    # ЧТО нельзя, — ни почему, ни что делать. Формулировка с причиной
+    # существовала, но стояла второй и не показывалась НИКОГДА.
+    текст = r.json()["detail"]
+    assert "единственный администратор" in текст, текст
+    assert "пригласите второго" in текст, "нет следующего шага"
     assert db.users[-1]["is_active"] is True, "строка не должна была погаснуть"
 
 
@@ -135,9 +141,12 @@ async def test_роль_вне_белого_списка_не_проходит(c
 @pytest.mark.asyncio
 async def test_нельзя_понизить_САМОГО_СЕБЯ(client, db, seeded):
     """Понижение себя — тот же тупик, что отключение себя: отменить некому."""
+    db.users.append(
+        dict(id=1, first_name="Админ", role="admin", org_id=1, is_active=True)
+    )
     r = await client.patch("/api/users/1", json={"role": "employee"})
     assert r.status_code == 409, r.text
-    assert "самого себя" in r.json()["detail"]
+    assert "единственный администратор" in r.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -285,6 +294,56 @@ async def test_возврат_только_админу(client_employee, db, see
     r = await client_employee.post("/api/users/2/restore")
     assert r.status_code == 403, r.text
     assert db.users[0]["is_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_себя_отключить_МОЖНО_когда_есть_второй_админ(client, db, seeded):
+    """⚠️ ПОРЯДОК ③, РЕШЕНИЕ ВЛАДЕЛЬЦА 31.08.2026: «передать дела и уйти».
+
+    Прежний безусловный запрет был верен ровно при одном администраторе:
+    снявший себя не может отменить своё же действие. **При двух отменить
+    может второй**, и запрет только мешал: уйти было нельзя вообще, снять
+    вас мог лишь кто-то другой.
+    """
+    db.users.append(
+        dict(id=1, first_name="Ухожу", role="admin", org_id=1, is_active=True)
+    )
+    db.users.append(
+        dict(id=4, first_name="Остаюсь", role="admin", org_id=1, is_active=True)
+    )
+    r = await client.delete("/api/users/1")
+    assert r.status_code == 200, r.text
+    assert [u for u in db.users if u["id"] == 1][0]["is_active"] is False
+    assert [u for u in db.users if u["id"] == 4][0]["is_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_себя_понизить_МОЖНО_когда_есть_второй_админ(client, db, seeded):
+    """Та же дверь, другой путь: понижение себя — тоже уход из администраторов."""
+    db.users.append(
+        dict(id=1, first_name="Ухожу", role="admin", org_id=1, is_active=True)
+    )
+    db.users.append(
+        dict(id=4, first_name="Остаюсь", role="admin", org_id=1, is_active=True)
+    )
+    r = await client.patch("/api/users/1", json={"role": "employee"})
+    assert r.status_code == 200, r.text
+    assert [u for u in db.users if u["id"] == 1][0]["role"] == "employee"
+
+
+@pytest.mark.asyncio
+async def test_отказ_ЧУЖОЙ_строке_объясняет_по_своему(client, db, seeded):
+    """⚠️ ДВА ТЕКСТА, ПОТОМУ ЧТО РАЗНЫЙ СЛЕДУЮЩИЙ ШАГ: себе — «пригласите
+    второго», чужому — «назначьте другого». Один текст на оба случая отправлял
+    бы половину читателей не туда."""
+    db.users.append(
+        dict(id=3, first_name="Единственный", role="admin", org_id=1, is_active=True)
+    )
+    r = await client.delete("/api/users/3")
+    assert r.status_code == 409, r.text
+    текст = r.json()["detail"]
+    assert "последний администратор" in текст, текст
+    assert "назначьте другого" in текст
 
 
 @pytest.mark.asyncio
