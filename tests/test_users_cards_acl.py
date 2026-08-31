@@ -108,6 +108,78 @@ async def test_нельзя_снять_последнего_активного_�
 
 
 @pytest.mark.asyncio
+async def test_роль_сотрудника_меняется_и_человек_остаётся_собой(client, db, seeded):
+    """T118: повышение НЕ должно требовать удаления и заведения заново.
+
+    ⚠️ ЗАЧЕМ ИМЕННО ТАК. До 31.08.2026 роль не входила ни в `UserUpdate`,
+    ни в `UPDATABLE` — PATCH молча её отбрасывал и отвечал 400 «No fields
+    to update». Единственным способом повысить человека было удалить строку
+    и завести заново, то есть **потерять его чеки и отчёты**. Довод
+    владельца: приглашают один раз, а роли меняют постоянно.
+    """
+    r = await client.patch("/api/users/2", json={"role": "accountant"})
+    assert r.status_code == 200, r.text
+    assert r.json()["role"] == "accountant"
+    assert db.users[0]["role"] == "accountant"
+    assert db.users[0]["id"] == 2, "строка та же — человек не заведён заново"
+
+
+@pytest.mark.asyncio
+async def test_роль_вне_белого_списка_не_проходит(client, db, seeded):
+    """Тот же белый список, что у приглашения (S-24): иначе роль есть, а прав нет."""
+    r = await client.patch("/api/users/2", json={"role": "manager"})
+    assert r.status_code == 422, r.text
+    assert db.users[0]["role"] != "manager"
+
+
+@pytest.mark.asyncio
+async def test_нельзя_понизить_САМОГО_СЕБЯ(client, db, seeded):
+    """Понижение себя — тот же тупик, что отключение себя: отменить некому."""
+    r = await client.patch("/api/users/1", json={"role": "employee"})
+    assert r.status_code == 409, r.text
+    assert "самого себя" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_нельзя_понизить_ПОСЛЕДНЕГО_админа(client, db, seeded):
+    """⚠️ ПОНИЖЕНИЕ АДМИНА = СНЯТИЕ АДМИНИСТРАТОРА, ТОЛЬКО ДРУГОЙ ДВЕРЬЮ.
+
+    Закрыть DELETE и оставить открытым PATCH значило бы починить одну дверь
+    из двух: организация так же осталась бы без администратора.
+    """
+    db.users.append(
+        dict(id=3, first_name="Единственный", role="admin", org_id=1, is_active=True)
+    )
+    r = await client.patch("/api/users/3", json={"role": "employee"})
+    assert r.status_code == 409, r.text
+    assert "последний администратор" in r.json()["detail"]
+    assert [u for u in db.users if u["id"] == 3][0]["role"] == "admin"
+
+
+@pytest.mark.asyncio
+async def test_при_двух_админах_понизить_одного_МОЖНО(client, db, seeded):
+    """Обратная сторона: запрет, срабатывающий всегда, ломает обычную работу."""
+    db.users.append(
+        dict(id=3, first_name="Первый", role="admin", org_id=1, is_active=True)
+    )
+    db.users.append(
+        dict(id=4, first_name="Второй", role="admin", org_id=1, is_active=True)
+    )
+    r = await client.patch("/api/users/3", json={"role": "employee"})
+    assert r.status_code == 200, r.text
+    assert [u for u in db.users if u["id"] == 3][0]["role"] == "employee"
+    assert [u for u in db.users if u["id"] == 4][0]["role"] == "admin"
+
+
+@pytest.mark.asyncio
+async def test_повышение_ДО_админа_гейтом_не_блокируется(client, db, seeded):
+    """Повышение админов не убавляет — гейт обязан пропускать."""
+    r = await client.patch("/api/users/2", json={"role": "admin"})
+    assert r.status_code == 200, r.text
+    assert db.users[0]["role"] == "admin"
+
+
+@pytest.mark.asyncio
 async def test_при_ДВУХ_админах_одного_снять_МОЖНО(client, db, seeded):
     """⚠️ ОБРАТНАЯ СТОРОНА ЗАЩИТЫ T119, И БЕЗ НЕЁ ЗАЩИТА НЕ ДОКАЗАНА.
 

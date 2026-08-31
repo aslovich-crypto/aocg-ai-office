@@ -31,6 +31,12 @@ UPDATABLE = (
     "inn",
     "region",
     "employee_id",
+    # ⚠️ T118, 31.08.2026. РОЛЬ ЗДЕСЬ ОТСУТСТВОВАЛА, и это делало повышение
+    # человека невозможным: единственным способом было удалить строку и
+    # завести заново — то есть потерять его чеки и отчёты. Довод владельца:
+    # приглашают человека ОДИН раз, а роли меняют постоянно, по мере того
+    # как люди берут на себя больше.
+    "role",
 )
 
 # Never expose secrets in user payloads.
@@ -102,6 +108,11 @@ async def _me_payload(p, u: dict) -> dict:
 
 
 class UserUpdate(BaseModel):
+    # ⚠️ `Role`, А НЕ `str` — тот же белый список, что у приглашения (S-24).
+    # Через PATCH роль приезжает в ту же колонку `users.role`, и произвольная
+    # строка здесь дала бы ровно то, от чего S-24 закрывала другую дверь:
+    # роль есть, а прав нет, потому что гейты сравнивают по равенству.
+    role: Optional[Role] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     patronymic: Optional[str] = None
@@ -325,6 +336,15 @@ async def update_user(id: int, u: UserUpdate, user: dict = Depends(get_current_u
         raise HTTPException(status_code=400, detail="No fields to update")
     sets, values = собрать_set(fields, UPDATABLE)
     p = await get_pool()
+    # ⚠️ ПОНИЖЕНИЕ АДМИНА — ЭТО СНЯТИЕ АДМИНИСТРАТОРА, ТОЛЬКО ДРУГОЙ ДВЕРЬЮ.
+    # Гейт writes один раз и зовётся отсюда ровно за этим (T119 предвидела
+    # T118 и оставила параметр `новая_роль`). Без этого вызова организация
+    # теряла бы последнего админа через PATCH при закрытой двери DELETE —
+    # чинить пришлось бы руками в базе.
+    if "role" in fields:
+        await проверить_что_админ_останется(
+            p, user["org_id"], user["id"], id, новая_роль=fields["role"]
+        )
     row = await p.fetchrow(
         f"UPDATE users SET {sets} WHERE id = ${len(values) + 1} "
         f"AND org_id = ${len(values) + 2} RETURNING *",
