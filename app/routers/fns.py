@@ -13,6 +13,11 @@ router = APIRouter(prefix="/api/fns", tags=["fns"])
 
 PROVERKACHEKA_URL = "https://proverkacheka.com/api/v1/check/get"
 REQUEST_TIMEOUT = httpx.Timeout(10.0)
+
+# ⚠️ КОДЫ, КОТОРЫМИ СЕРВИС ОТКАЗЫВАЕТ НАМ, А НЕ ЧЕКУ. Замер 31.08.2026:
+# с негодным ключом proverkacheka отвечает HTTP 200 и телом
+# {"code":401,"data":"Не авторизован (не представился)…"}.
+КОДЫ_ОТКАЗА_НАМ = {401, 402, 403, 429}
 RETRY_DELAY = 2.0
 
 
@@ -25,6 +30,90 @@ async def _fetch_check(client: httpx.AsyncClient, token: str, qr_raw: str) -> di
     resp = await client.post(PROVERKACHEKA_URL, json={"token": token, "qrraw": qr_raw})
     resp.raise_for_status()
     return resp.json()
+
+
+# ⚠️ ОДНА ДВЕРЬ ДЛЯ ВСЕХ, КТО СПРАШИВАЕТ ФНС (T132, 31.08.2026). Ручку
+# дозапроса по сохранённому чеку (`receipts.py`) писать со своим разбором
+# ответа значило бы завести ВТОРУЮ дверь с той же логикой — и однажды
+# починить одну из двух. Здесь принимается решение по ответу; кто спросил,
+# роли не играет.
+#
+# Возвращает (http-код, тело). Код 200 — данные разобраны и лежат в теле.
+async def спросить_фнс(qr_raw: str) -> tuple[int, dict]:
+    token = os.getenv("PROVERKACHEKA_TOKEN", "")
+    if not token:
+        print("[FNS] PROVERKACHEKA_TOKEN not set", flush=True)
+        return 500, {"status": "error", "message": "PROVERKACHEKA_TOKEN not set"}
+
+    # 152-ФЗ: не логируем содержимое QR (там ФН/сумма/ФПД) — только длину.
+    print(f"[FNS] POST {PROVERKACHEKA_URL}  qr_raw len={len(qr_raw)}", flush=True)
+
+    data: dict | None = None
+    last_error: str | None = None
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+        for attempt in (1, 2):
+            try:
+                data = await _fetch_check(client, token, qr_raw)
+                break  # получен HTTP-ответ (любой код) — повтор только на транспорте
+            except (httpx.TimeoutException, httpx.HTTPError) as e:
+                last_error = f"{type(e).__name__}: {e}"
+                print(f"[FNS] attempt {attempt}: {last_error}", flush=True)
+                data = None
+            if attempt == 1:
+                await asyncio.sleep(RETRY_DELAY)
+
+    if data is None:
+        print(f"[FNS] unavailable ({last_error})", flush=True)
+        return 503, {
+            "status": "fns_unavailable",
+            "message": "Сервис проверки ФНС временно недоступен",
+        }
+
+    код = data.get("code")
+    if код in КОДЫ_ОТКАЗА_НАМ:
+        подпись = str(data.get("data") or "")[:200]
+        print(f"[FNS] СЕРВИС ОТКАЗАЛ НАМ: code={код} {подпись}", flush=True)
+        return 502, {
+            "status": "fns_rejected_us",
+            "message": (
+                f"Сервис проверки чеков не принял наш доступ (код {код}). "
+                "Чек здесь ни при чём — проверьте ключ и остаток запросов."
+            ),
+        }
+
+    if код != 1:
+        print(
+            f"[FNS] not_found: code={код} body={str(mask_log_dict(data))[:200]}",
+            flush=True,
+        )
+        return 404, {
+            "status": "not_found",
+            "message": (
+                "Налоговая пока не отдаёт данные по этому чеку. Так бывает: "
+                "обычно они появляются в течение суток."
+            ),
+        }
+
+    j = data.get("data", {}).get("json", {})
+    org = j.get("user", "") or ""
+    return 200, {
+        "status": "ok",
+        "org": org,
+        "category": categorize(org, j.get("items") or [], brand=j.get("retailPlace")),
+        "inn": j.get("userInn", ""),
+        "address": j.get("retailPlaceAddress", ""),
+        "total": j.get("totalSum", 0) / 100,
+        "items": [
+            {
+                "name": item.get("name", ""),
+                "quantity": item.get("quantity", 1),
+                "price": item.get("price", 0) / 100,
+                "sum": item.get("sum", 0) / 100,
+            }
+            for item in j.get("items", [])
+        ],
+        "raw": j,
+    }
 
 
 @router.post("/check")
@@ -55,99 +144,10 @@ async def check_receipt(req: CheckRequest, user: dict = Depends(get_current_user
             status_code=400, content={"status": "error", "message": "qr_raw is empty"}
         )
 
-    token = os.getenv("PROVERKACHEKA_TOKEN", "")
-    if not token:
-        print("[FNS] PROVERKACHEKA_TOKEN not set", flush=True)
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "message": "PROVERKACHEKA_TOKEN not set"},
-        )
-
-    # 152-ФЗ: не логируем содержимое QR (там ФН/сумма/ФПД) — только длину.
-    print(f"[FNS] POST {PROVERKACHEKA_URL}  qr_raw len={len(req.qr_raw)}", flush=True)
-
-    data: dict | None = None
-    last_error: str | None = None
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-        for attempt in (1, 2):
-            try:
-                data = await _fetch_check(client, token, req.qr_raw)
-                break  # got an HTTP response (any code) — retry only on transport failure
-            except (httpx.TimeoutException, httpx.HTTPError) as e:
-                last_error = f"{type(e).__name__}: {e}"
-                print(f"[FNS] attempt {attempt}: {last_error}", flush=True)
-                data = None
-            if attempt == 1:
-                await asyncio.sleep(RETRY_DELAY)
-
-    # C — transport failure after retry: ФНС недоступна.
-    if data is None:
-        print(f"[FNS] unavailable ({last_error})", flush=True)
-        return JSONResponse(
-            status_code=503,
-            content={
-                "status": "fns_unavailable",
-                "message": "Сервис проверки ФНС временно недоступен",
-            },
-        )
-
-    # ⚠️ B-0 — СЕРВИС ОТВЕТИЛ, НО ОТКАЗАЛ НАМ, А НЕ ЧЕКУ. Замер 31.08.2026:
-    # с негодным ключом proverkacheka отвечает HTTP 200 и телом
-    # {"code":401,"data":"Не авторизован (не представился)…"}. Прежняя
-    # редакция сваливала ЛЮБОЙ code != 1 в «чек не зарегистрирован» — то есть
-    # при протухшем ключе или исчерпанной квоте человек читал, что виноват
-    # его чек, и шёл проверять реквизиты. **Это тот же класс, что молчащий
-    # пропуск: прибор называет не ту причину, и чинят не то.** Владелец
-    # 31.08.2026: «на всех чеках, не только на свежих» — ровно такая картина.
-    КОДЫ_ОТКАЗА_НАМ = {401, 402, 403, 429}
-    код = data.get("code")
-    if код in КОДЫ_ОТКАЗА_НАМ:
-        подпись = str(data.get("data") or "")[:200]
-        print(f"[FNS] СЕРВИС ОТКАЗАЛ НАМ: code={код} {подпись}", flush=True)
-        return JSONResponse(
-            status_code=502,
-            content={
-                "status": "fns_rejected_us",
-                "message": (
-                    "Сервис проверки чеков не принял наш доступ "
-                    f"(код {код}). Чек здесь ни при чём — "
-                    "проверьте ключ и остаток запросов."
-                ),
-            },
-        )
-
-    # B — proverkacheka responded but the receipt isn't confirmed/registered.
-    if data.get("code") != 1:
-        print(
-            f"[FNS] not_found: code={data.get('code')} body={str(mask_log_dict(data))[:200]}",
-            flush=True,
-        )
-        return JSONResponse(
-            status_code=404,
-            content={
-                "status": "not_found",
-                "message": "Чек не зарегистрирован в ФНС. Возможно, ему больше 30 дней или он не был передан оператору.",
-            },
-        )
-
-    # A — success.
-    j = data.get("data", {}).get("json", {})
-    org = j.get("user", "") or ""
-    return {
-        "status": "ok",
-        "org": org,
-        "category": categorize(org, j.get("items") or [], brand=j.get("retailPlace")),
-        "inn": j.get("userInn", ""),
-        "address": j.get("retailPlaceAddress", ""),
-        "total": j.get("totalSum", 0) / 100,
-        "items": [
-            {
-                "name": item.get("name", ""),
-                "quantity": item.get("quantity", 1),
-                "price": item.get("price", 0) / 100,
-                "sum": item.get("sum", 0) / 100,
-            }
-            for item in j.get("items", [])
-        ],
-        "raw": j,
-    }
+    # ⚠️ ВСЯ ЛОГИКА — В `спросить_фнс`. Здесь только приведение к HTTP: ручка
+    # дозапроса по сохранённому чеку ходит тем же путём, и две копии разбора
+    # ответа однажды разошлись бы (одну починили, вторую забыли).
+    код, тело = await спросить_фнс(req.qr_raw)
+    if код == 200:
+        return тело
+    return JSONResponse(status_code=код, content=тело)

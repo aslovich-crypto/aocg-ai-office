@@ -1,5 +1,6 @@
 import base64
 import binascii
+import json
 import logging
 from datetime import date
 from typing import List, Optional
@@ -14,6 +15,7 @@ from app.categorization import DEFAULT_FALLBACK, categorize
 from app.database import get_pool
 from app.sql_builder import собрать_set
 from app.parsers.fns_parser import parse_fns_response
+from app.routers.fns import спросить_фнс
 from app.parsers.items_parser import parse_fns_items, parse_ocr_items
 from app.parsers.ocr_parser import parse_ocr_response
 from app.storage import s3
@@ -48,6 +50,15 @@ class ReceiptIn(BaseModel):
     employee: Optional[str] = None
     fn: Optional[str] = None  # deprecated — фронт пока шлёт сюда; переходный alias
     kkt_fn: Optional[str] = None  # фискальный номер ККТ (заменяет fn)
+    # ⚠️ ФД И ФПД ПРИНИМАЮТСЯ ОТ КЛИЕНТА С 31.08.2026 (T132, шаг ⓪). До этого
+    # они брались ТОЛЬКО из `raw_data`, то есть только когда ФНС ответила, —
+    # а нужны они ровно в обратном случае. Замер 31.08.2026: строка QR нигде
+    # не хранится, `ReceiptIn` не принимал ни `fd_num`, ни `fpd`, и собрать
+    # запрос к ФНС по сохранённому чеку было НЕЧЕМ. Три поля вместо строки —
+    # решение владельца: строка «готова к отправке», три поля — нет, и они
+    # всё равно нужны для дедупликации и сверки с бумагой.
+    fd_num: Optional[str] = None  # ФД — номер фискального документа
+    fpd: Optional[str] = None  # ФПД — фискальный признак документа
     raw_data: Optional[dict] = None
     source: Optional[str] = None  # 'manual' | 'qr_scan' | 'photo_ocr' | 'fns'
     photo_url: Optional[str] = None  # external URL (Cloudflare R2 etc.) when set
@@ -91,7 +102,11 @@ async def get_receipts(user: dict = Depends(get_current_user)):
             user["org_id"],
             user["id"],
         )
-    return [dict(r) for r in rows]
+    # ⚠️ ПРИЗНАК СЧИТАЕТСЯ ЗДЕСЬ, А НЕ ВО ФРОНТЕ (T132, шаг ①). Правило
+    # «есть ФН+ФД+ФПД и пусто raw_data» живёт в ОДНОМ месте: две копии условия
+    # разошлись бы при первой же правке, и кнопка появлялась бы там, где
+    # дозапрос невозможен, — либо не появлялась там, где возможен.
+    return [с_признаком_дозапроса(r) for r in rows]
 
 
 @router.get("/suggest-payment")
@@ -219,7 +234,7 @@ async def get_receipt(id: int, user: dict = Depends(get_current_user)):
     row = await _fetch_receipt(p, id, user)
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
-    return dict(row)
+    return с_признаком_дозапроса(row)
 
 
 def _similar_receipt_brief(row) -> dict:
@@ -335,9 +350,12 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
             )
             parsed = {}
     effective_org_inn = parsed.get("org_inn")  # уже провалидирован в parse_*_response
-    effective_fd_num = parsed.get(
-        "fd_num"
-    )  # ФД из raw_data; документ уникален парой (ФН, ФД)
+    # ⚠️ ФД — из ответа ФНС, а если его нет, ИЗ КЛИЕНТА (T132, шаг ⓪). Документ
+    # уникален парой (ФН, ФД), и до 31.08.2026 при молчащей ФНС ФД не было
+    # вовсе — значит дедупликация по паре не срабатывала ровно тогда, когда
+    # человек пересканирует чек, не дождавшись ответа. Владелец назвал это
+    # вторым доводом за хранение трёх полей, и он верен.
+    effective_fd_num = parsed.get("fd_num") or r.fd_num
 
     # Категория: если пользователь не задал (или «Не указано») — авто. Приоритет
     # (Фикс №4 + A2): позиции → бренд (org_brand) → юрлицо (org) → «Прочие хозрасходы».
@@ -559,8 +577,12 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                     parsed.get("vat_total"),
                     parsed.get("kkt_serial"),
                     parsed.get("kkt_rn"),
-                    parsed.get("fd_num"),
-                    parsed.get("fpd"),
+                    # ⚠️ ОТВЕТ ФНС В ПРИОРИТЕТЕ, КЛИЕНТ — ЗАПАСНОЙ ПУТЬ, а не
+                    # наоборот: разобранный ответ достовернее того, что прочли
+                    # с картинки или ввели руками. Клиентское значение доезжает
+                    # ровно тогда, когда ФНС промолчала, — ради этого и заведено.
+                    parsed.get("fd_num") or r.fd_num,
+                    parsed.get("fpd") or r.fpd,
                     parsed.get("cashier"),
                     category_id,
                     user["id"],
@@ -615,7 +637,7 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     # Ответ создания — в той же канонической форме, что элемент списка
     # (RETURNING * не знает про in_report/report_id/report_title). Иначе клиент,
     # добавив созданный чек в список, получит строку беднее соседних.
-    result = dict(await _fetch_receipt(p, row["id"], user) or row)
+    result = с_признаком_дозапроса(await _fetch_receipt(p, row["id"], user) or row)
     if dup_confidence:
         # duplicates = существующие совпадения (created_at ASC) + только что
         # созданный чек (is_new=true, in_report=false: он ещё ни в одном отчёте).
@@ -830,7 +852,7 @@ async def patch_receipt(
         row = await _fetch_receipt(p, id, user)
         if not row:
             raise HTTPException(status_code=404, detail="Not found")
-        return dict(row)
+        return с_признаком_дозапроса(row)
     sets, values = собрать_set(поля, ПОЛЯ_ЧЕКА)
     values.append(id)
     values.append(user["org_id"])
@@ -848,7 +870,7 @@ async def patch_receipt(
     # RETURNING * даёт только колонки таблицы. Перечитываем чек канонической
     # формой, иначе ответ PATCH окажется беднее элемента списка, и клиент,
     # подставив его, потеряет in_report / report_title.
-    return dict(await _fetch_receipt(p, id, user) or row)
+    return с_признаком_дозапроса(await _fetch_receipt(p, id, user) or row)
 
 
 @router.delete("/{id}")
@@ -893,3 +915,150 @@ async def delete_receipt(id: int, user: dict = Depends(get_current_user)):
                 )
     # Всегда 200 {"ok": True} — не палим существование чужих чеков (anti-enumeration).
     return {"ok": True}
+
+# ─── T132: ДОЗАПРОС В ФНС ПО СОХРАНЁННОМУ ЧЕКУ ───────────────────────────
+#
+# ⚠️ ЗАЧЕМ. 31.08.2026 налоговая перестала отдавать данные: код 5 «нет
+# информации» приходил на ЗАРЕГИСТРИРОВАННЫЕ чеки — владелец проверил два
+# из них вручную на сайте, они там есть. Чек в такой день сохраняется по
+# фото, с пустыми позициями и НДС. **До этой правки они оставались пустыми
+# НАВСЕГДА**: перезапроса не было ни одного, а строки QR, которой он
+# делается, нигде не хранилось.
+#
+# ⚠️ ДЁРГАЕТ ЧЕЛОВЕК КНОПКОЙ, НЕ ФОН — решение владельца. Планировщика в
+# проекте нет вовсе, заводить его ради этого — работа другого класса
+# (заведена строкой отдельно). Кнопка закрывает случай: человек видит
+# неполный чек и жмёт, когда вспомнил.
+#
+# ⚠️ СТАРЫЕ ЧЕКИ НЕ ТРОГАЕМ — тоже решение владельца, дословно: «со старыми
+# чеками не разбираемся вовсе». У них нет ФД и ФПД, дозапросить их нечем,
+# и никаких пометок «невозможно» им не ставится.
+
+
+def _можно_дозапросить(row) -> bool:
+    """Есть ли чем повторить запрос в ФНС и нужно ли повторять.
+
+    ⚠️ ПРИЗНАК ВЫВОДИТСЯ, А НЕ ХРАНИТСЯ — колонки под него нет и не нужно.
+    Три поля (ФН, ФД, ФПД) появляются ТОЛЬКО из разобранного QR, а `raw_data`
+    остаётся пустым ТОЛЬКО когда ФНС промолчала: при удачном ответе туда
+    ложится её тело, при распознавании фото — тело OCR. Значит сочетание
+    «три поля есть, raw_data пусто» и означает ровно «QR прочитан, ФНС не
+    ответила». Старые чеки под условие не попадают сами: у них нет ФПД.
+    """
+    if not (row.get("kkt_fn") and row.get("fd_num") and row.get("fpd")):
+        return False
+    if not (row.get("datetime") and row.get("amount") is not None):
+        return False
+    return not row.get("raw_data")
+
+
+def с_признаком_дозапроса(row) -> dict:
+    """Одна форма чека на все ручки: список, карточка, правка, дозапрос.
+
+    ⚠️ ЗАВЕДЕНО ПО КРАСНОМУ СТОРОЖУ, А НЕ ЗАРАНЕЕ. Признак добавили сперва
+    только в список — и `test_receipt_shape_same_in_list_and_detail` покраснел
+    сразу: форма чека в списке и в карточке обязана совпадать, иначе фронт
+    видит кнопку в одном месте и не видит в другом.
+    """
+    д = dict(row)
+    д["можно_дозапросить"] = _можно_дозапросить(д)
+    return д
+
+
+def _строка_qr(row) -> str:
+    """Собирает строку QR из сохранённых полей — ту же, что читается с чека.
+
+    Формат ФНС: t=ГГГГММДДTЧЧММ & s=рубли.копейки & fn=ФН & i=ФД & fp=ФПД
+    & n=тип операции. Время до минуты — по нему налоговая и сверяет.
+    """
+    д = row["datetime"]
+    n = _ТИП_ОПЕРАЦИИ.get(row.get("operation_type") or "purchase", 1)
+    return (
+        f"t={д.strftime('%Y%m%dT%H%M')}"
+        f"&s={float(row['amount']):.2f}"
+        f"&fn={row['kkt_fn']}&i={row['fd_num']}&fp={row['fpd']}&n={n}"
+    )
+
+
+_ТИП_ОПЕРАЦИИ = {
+    "purchase": 1,
+    "refund": 2,
+    "expense": 3,
+    "expense_refund": 4,
+}
+
+# Колонки, которые дозапрос вправе заполнить. ⚠️ ТОЛЬКО ПУСТЫЕ: человек мог
+# ввести название и сумму руками, пока ждал налоговую, и затирать его работу
+# ответом сервиса нельзя — он пришёл позже, но это не делает его главнее.
+_ДОЗАПОЛНЯЕМЫЕ = (
+    "org",
+    "org_legal",
+    "org_brand",
+    "org_inn",
+    "address",
+    "tax_system",
+    "payment_form",
+    "kkt_serial",
+    "kkt_rn",
+    "cashier",
+    "vat_0",
+    "vat_total",
+    "sum_vat_0",
+    "sum_no_vat",
+)
+
+
+@router.post("/{id}/refetch-fns")
+async def refetch_fns(id: int, user: dict = Depends(get_current_user)):
+    """Повторяет запрос в ФНС по сохранённому чеку и дозаполняет пустое."""
+    p = await get_pool()
+    # Та же видимость, что у остальных ручек: employee — только свой чек.
+    if can_see_all(user["role"]):
+        row = await p.fetchrow(
+            "SELECT * FROM receipts WHERE id=$1 AND org_id=$2", id, user["org_id"]
+        )
+    else:
+        row = await p.fetchrow(
+            "SELECT * FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3",
+            id,
+            user["org_id"],
+            user["id"],
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    строка = dict(row)
+    if not _можно_дозапросить(строка):
+        # ⚠️ 409, А НЕ 400: запрос правильный, состояние чека не позволяет.
+        # Текст называет причину и следующий шаг, а не «нельзя».
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "По этому чеку дозапрос невозможен: не сохранены ФД и ФПД "
+                "(так заводились чеки до 31.08.2026) либо данные ФНС уже получены"
+            ),
+        )
+
+    код, тело = await спросить_фнс(_строка_qr(строка))
+    if код != 200:
+        raise HTTPException(status_code=код, detail=тело.get("message", "Отказ ФНС"))
+
+    разобранное = parse_fns_response(тело.get("raw") or {})
+    правки = {
+        к: разобранное.get(к)
+        for к in _ДОЗАПОЛНЯЕМЫЕ
+        if разобранное.get(к) is not None and not строка.get(к)
+    }
+    # `raw_data` кладём всегда: именно он снимает признак «можно дозапросить»,
+    # иначе кнопка осталась бы на экране после удачного дозапроса.
+    правки["raw_data"] = json.dumps(тело.get("raw") or {})
+
+    sets, values = собрать_set(правки, (*_ДОЗАПОЛНЯЕМЫЕ, "raw_data"))
+    обновлённый = await p.fetchrow(
+        f"UPDATE receipts SET {sets} WHERE id = ${len(values) + 1} "
+        f"AND org_id = ${len(values) + 2} RETURNING *",
+        *values,
+        id,
+        user["org_id"],
+    )
+    return с_признаком_дозапроса(обновлённый)

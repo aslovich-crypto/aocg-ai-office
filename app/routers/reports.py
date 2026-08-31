@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from app.auth import can_see_all, get_current_user
 from app.database import get_pool
+from app.routers.receipts import с_признаком_дозапроса
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -313,7 +314,11 @@ async def get_report(id: int, user: dict = Depends(get_current_user)):
             )
     d = dict(row)
     d["receiptIds"] = ids
-    d["receipts"] = [dict(r) for r in receipts]
+    # ⚠️ ТА ЖЕ ФОРМА, ЧТО У СПИСКА ЧЕКОВ (T132). Сторож
+    # `test_get_report_detail_has_list_fields_plus_receipts` требует совпадения,
+    # и он прав: чек внутри отчёта — тот же чек, и кнопка дозапроса на нём
+    # должна быть видна по тому же признаку.
+    d["receipts"] = [с_признаком_дозапроса(r) for r in receipts]
     return d
 
 

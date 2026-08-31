@@ -1216,6 +1216,28 @@ class FakePool:
                 ),
                 None,
             )
+        # ⚠️ ЗЕРКАЛЬНО (13а.8). T132: дозапрос в ФНС читает чек по id+org,
+        # а для сотрудника — ещё и по автору. Обе формы, потому что обе живут
+        # в коде: отразить одну значило бы проверять половину ACL.
+        if q.startswith("SELECT * FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3"):
+            for c in self.receipts:
+                if (
+                    c["id"] == args[0]
+                    and c.get("org_id") == args[1]
+                    and c.get("user_id") == args[2]
+                ):
+                    return dict(c)
+            return None
+        if q.startswith("SELECT * FROM receipts WHERE id=$1 AND org_id=$2"):
+            for c in self.receipts:
+                if c["id"] == args[0] and c.get("org_id") == args[1]:
+                    return dict(c)
+            return None
+        # ⚠️ ВЕТКИ ПОД `UPDATE receipts SET … RETURNING *` ЗДЕСЬ НЕТ НАМЕРЕННО.
+        # Первая редакция T132 её завела — и сторож порядка веток (T6) показал,
+        # что она МЕРТВА: общая ветка `UPDATE receipts SET` стоит выше и делает
+        # ровно то же. Мёртвый двойник хуже отсутствующего: он выглядит
+        # проверенным путём, которым никто не ходит.
         raise NotImplementedError(f"fetchrow: {q}")
 
     async def execute(self, query, *args):
