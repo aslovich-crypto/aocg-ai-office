@@ -134,15 +134,6 @@ class PasswordChange(BaseModel):
     new_password: str
 
 
-class UserCreate(BaseModel):
-    first_name: str
-    last_name: str = ""
-    patronymic: str = ""
-    email: str = ""
-    # S-24: тот же белый список, что у приглашений — вторая дверь к users.role.
-    role: Role = "employee"
-
-
 @router.get("/")
 async def get_users(user: dict = Depends(get_current_user)):
     """Active users of the caller's organization, oldest first.
@@ -245,24 +236,19 @@ async def change_password(body: PasswordChange, user: dict = Depends(get_current
     }
 
 
-@router.post("/")
-async def create_user(u: UserCreate, user: dict = Depends(get_current_user)):
-    """Add an employee directly into the caller's organization (ТОЛЬКО admin)."""
-    # S-29: создание пользователя = выдача доступа к данным организации, и роль
-    # приходит ИЗ ТЕЛА запроса — без гейта любой сотрудник заводил себе админа.
-    _require_admin(user)
-    p = await get_pool()
-    row = await p.fetchrow(
-        """INSERT INTO users (first_name, last_name, patronymic, email, role, org_id)
-           VALUES ($1, $2, $3, $4, $5, $6) RETURNING *""",
-        u.first_name,
-        u.last_name,
-        u.patronymic,
-        u.email,
-        u.role,
-        user["org_id"],
-    )
-    return _safe(row)
+# ⚠️ `POST /api/users/` СНЕСЕНА 31.08.2026 (T104, этап ④). Она заводила
+# человека БЕЗ ПАРОЛЯ и без письма: строка в `users` появлялась, а войти по ней
+# было нельзя — приглашение не выписывалось, пароль не задавался. Именно так
+# 30.08 «завёлся» Анис Ламри, которого потом не нашли ни в списке, ни в базе
+# по его почте (замер владельца: `al@aocg.ru` — 0 строк).
+#
+# ⚠️ ЕДИНСТВЕННЫЙ ПУТЬ ЗАВЕСТИ ЧЕЛОВЕКА ТЕПЕРЬ ОДИН — `POST /api/invite/create`.
+# Два пути к одному итогу, из которых первый молча ломал вход, — это не выбор,
+# а мина. Гейты, что стояли здесь (только админ; роль из белого списка `Role`),
+# на приглашении стоят те же, и тесты прав переведены на него, а не удалены.
+#
+# ⚠️ ЗАМЕР ПЕРЕД СНОСОМ: вызовов из фронта — НОЛЬ (форма сотрудника снесена
+# этапом ③), из тестов — четыре, все про права, все переведены.
 
 
 async def проверить_что_админ_останется(

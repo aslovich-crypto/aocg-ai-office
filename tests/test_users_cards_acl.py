@@ -30,19 +30,46 @@ import pytest
 
 
 @pytest.mark.asyncio
-async def test_employee_cannot_create_user(client_employee, db, seeded):
-    r = await client_employee.post(
-        "/api/users/",
-        json={"first_name": "Пётр", "last_name": "Сидоров", "role": "admin"},
+async def test_вторая_дверь_к_заведению_людей_ЗАКРЫТА(client, db, seeded):
+    """⚠️ T104, ЭТАП ④: `POST /api/users/` снесена, и это надо стеречь.
+
+    Она заводила человека БЕЗ ПАРОЛЯ и без письма: строка в `users` появлялась,
+    а войти по ней было нельзя. Именно так 30.08.2026 «завёлся» Анис Ламри,
+    которого потом не нашли ни в списке, ни в базе по его почте.
+
+    ⚠️ Без этого теста снос ничем не охраняется: ручку вернут «на всякий
+    случай», и мина встанет обратно молча. Проверяется ПОВЕДЕНИЕ ручки,
+    а не отсутствие строки в исходнике.
+    """
+    r = await client.post(
+        "/api/users/", json={"first_name": "Пётр", "last_name": "Сидоров"}
     )
-    assert r.status_code == 403, r.text
-    assert len(db.users) == 1, "пользователь не должен был создаться"
+    assert r.status_code in (404, 405), (
+        f"POST /api/users/ снова отвечает {r.status_code} — "
+        "вторая дверь к заведению людей открылась"
+    )
+    assert len(db.users) == 1, "и строки завестись не должно"
 
 
 @pytest.mark.asyncio
-async def test_accountant_cannot_create_user(client_accountant, db, seeded):
+async def test_employee_cannot_invite(client_employee, db, seeded):
+    # ⚠️ ПЕРЕВЕДЕНО НА ПРИГЛАШЕНИЕ 31.08.2026 (T104, этап ④): `POST /api/users/`
+    # снесена, единственный путь завести человека — `POST /api/invite/create`.
+    # Тест НЕ УДАЛЁН, а переведён: гейт тот же, дверь другая.
+    r = await client_employee.post(
+        "/api/invite/create",
+        json={"role": "admin", "email": "p@example.com"},
+    )
+    assert r.status_code == 403, r.text
+    assert len(db.users) == 1, "пользователь не должен был создаться"
+    assert not db.invite_links, "и приглашение выписаться не должно"
+
+
+@pytest.mark.asyncio
+async def test_accountant_cannot_invite(client_accountant, db, seeded):
+    # ⚠️ Та же дверь, что у сотрудника (T104, этап ④).
     r = await client_accountant.post(
-        "/api/users/", json={"first_name": "Пётр", "last_name": "Сидоров"}
+        "/api/invite/create", json={"role": "employee", "email": "p@example.com"}
     )
     assert r.status_code == 403, r.text
 
@@ -360,11 +387,15 @@ async def test_обычного_сотрудника_отключить_МОЖН
 @pytest.mark.asyncio
 async def test_admin_still_manages_users(client, db, seeded):
     """Админ работает как раньше — иначе гейт «чинит» ценой поломки."""
+    # ⚠️ СОЗДАНИЕ ПЕРЕЕХАЛО НА ПРИГЛАШЕНИЕ (T104, этап ④): админ по-прежнему
+    # заводит людей, но выписывая ссылку, а не строку без пароля.
     created = await client.post(
-        "/api/users/", json={"first_name": "Пётр", "last_name": "Сидоров"}
+        "/api/invite/create",
+        json={"role": "employee", "email": "p@example.com", "first_name": "Пётр"},
     )
     assert created.status_code == 200, created.text
     assert created.json()["first_name"] == "Пётр"
+    assert created.json()["invite_url"], "ссылка обязана вернуться"
 
     patched = await client.patch("/api/users/2", json={"inn": "123456789012"})
     assert patched.status_code == 200, patched.text
@@ -440,10 +471,13 @@ async def test_admin_cannot_delete_card_of_other_org(client, db, seeded):
 
 
 @pytest.mark.asyncio
-async def test_create_user_with_unknown_role_is_rejected(client, db, seeded):
+async def test_invite_with_unknown_role_is_rejected(client, db, seeded):
     """S-24: вторая дверь к users.role — POST /api/users/ — под тем же списком."""
+    # ⚠️ S-24 ЖИВ, ТОЛЬКО ДВЕРЬ ОДНА (T104, этап ④): белый список `Role` стоит
+    # на приглашении, и вторая дверь к `users.role` больше не существует.
     r = await client.post(
-        "/api/users/", json={"first_name": "Пётр", "role": "суперадмин"}
+        "/api/invite/create", json={"role": "суперадмин", "email": "p@example.com"}
     )
     assert r.status_code == 422, r.text
     assert len(db.users) == 1, "пользователь с чужой ролью не должен создаться"
+    assert not db.invite_links, "и приглашение с чужой ролью не должно выписаться"
