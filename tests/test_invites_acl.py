@@ -71,6 +71,13 @@ def _приглашение(
         uses_count=uses_count,
         is_active=is_active,
         created_at=datetime.now(timezone.utc),
+        # ⚠️ T104: колонки получателя. Без них выдача списка падала
+        # KeyError — то есть тест ловил расхождение фикстуры со схемой,
+        # и это правильно: строка приглашения обязана быть полной.
+        email=None,
+        first_name="",
+        last_name="",
+        sent_at=None,
     )
     db.invite_links.append(row)
     return row
@@ -389,3 +396,96 @@ async def test_old_invite_with_bad_role_downgrades_to_employee(client, орг):
     assert r.status_code == 200, r.text
     (новый,) = [u for u in орг.users if u["email"] == "z@example.com"]
     assert новый["role"] == "employee", "неизвестная роль обязана понижаться"
+
+
+# ─────────────────── T104 этап ②: приглашение знает, кому ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_приглашение_с_почтой_шлёт_письмо_и_помнит_получателя(
+    client, db, monkeypatch
+):
+    """⚠️ `send_invite_notification` была НАПИСАНА И НЕ ВЫЗЫВАЛАСЬ НИОТКУДА
+    (T96): функция, шаблон и канал существовали, не хватало ровно
+    получателя. Теперь он есть — и письмо обязано уйти.
+    """
+    ушло = []
+    monkeypatch.setattr(
+        auth_router, "send_invite_notification", lambda *a: ушло.append(a) or True
+    )
+    r = await client.post(
+        "/api/invite/create",
+        json={"role": "employee", "email": "Novyi@Example.COM", "first_name": "Пётр"},
+    )
+    assert r.status_code == 200, r.text
+    d = r.json()
+    # почта приводится к нижнему регистру и обрезается — иначе один человек
+    # заводится дважды разным написанием
+    assert d["email"] == "novyi@example.com"
+    assert d["first_name"] == "Пётр"
+    assert d["sent_at"], "отметка об отправке обязана проставиться"
+    assert d["invite_url"].endswith(d["token"])
+    assert len(ушло) == 1, "письмо не ушло"
+    assert ушло[0][0] == "novyi@example.com"
+
+
+@pytest.mark.asyncio
+async def test_приглашение_без_почты_письма_не_шлёт(client, db, monkeypatch):
+    """Ссылку по-прежнему можно создать «в никуда» и передать руками."""
+    ушло = []
+    monkeypatch.setattr(
+        auth_router, "send_invite_notification", lambda *a: ушло.append(a) or True
+    )
+    r = await client.post("/api/invite/create", json={"role": "employee"})
+    assert r.status_code == 200, r.text
+    assert r.json()["email"] is None
+    assert r.json()["sent_at"] is None
+    assert not ушло, "письма быть не должно — некому"
+
+
+@pytest.mark.asyncio
+async def test_повторная_отправка_шлёт_ТОТ_ЖЕ_токен(client, db, monkeypatch):
+    """⚠️ Новый токен на каждую переотправку плодил бы живые приглашения:
+    старое осталось бы действующим, и в списке росли бы дубли на одного.
+    """
+    ушло = []
+    monkeypatch.setattr(
+        auth_router, "send_invite_notification", lambda *a: ушло.append(a) or True
+    )
+    создано = (
+        await client.post(
+            "/api/invite/create", json={"role": "employee", "email": "a@b.ru"}
+        )
+    ).json()
+    ушло.clear()
+
+    r = await client.post(f"/api/invite/{создано['token']}/resend")
+    assert r.status_code == 200, r.text
+    assert len(ушло) == 1
+    assert ушло[0][1].endswith(создано["token"]), "токен обязан быть ТОТ ЖЕ"
+    assert len(db.invite_links) == 1, "второе приглашение заводиться не должно"
+
+
+@pytest.mark.asyncio
+async def test_повторная_отправка_без_почты_отказывает_честно(client, db):
+    создано = (
+        await client.post("/api/invite/create", json={"role": "employee"})
+    ).json()
+    r = await client.post(f"/api/invite/{создано['token']}/resend")
+    assert r.status_code == 409, r.text
+    assert "нет почты" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_список_показывает_статус_и_получателя(client, db):
+    await client.post(
+        "/api/invite/create",
+        json={"role": "employee", "email": "kto@example.com", "first_name": "Анна"},
+    )
+    r = await client.get("/api/invite/list")
+    assert r.status_code == 200, r.text
+    строка = r.json()[0]
+    assert строка["email"] == "kto@example.com"
+    assert строка["first_name"] == "Анна"
+    assert строка["статус"] == "приглашён, ожидает"
+    assert строка["sent_at"], "отметка об отправке обязана быть в списке"

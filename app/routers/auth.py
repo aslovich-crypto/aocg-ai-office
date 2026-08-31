@@ -38,6 +38,7 @@ from app.categories_seed import seed_default_categories
 from app.database import get_pool
 from app.email_service import (
     email_enabled,
+    send_invite_notification,
     send_password_reset_email,
     send_verification_email,
 )
@@ -141,6 +142,13 @@ class InviteCreateIn(BaseModel):
     role: Role = "employee"
     expires_hours: Optional[int] = None  # None = permanent (no expiry)
     max_uses: int = 1
+    # ⚠️ T104: приглашение теперь ЗНАЕТ, КОМУ выписано. До этого ссылка была
+    # предъявительской: в списке нельзя было увидеть, кому она уходила,
+    # и «отправить повторно» было НЕКОМУ. Почта необязательна — ссылку
+    # по-прежнему можно создать «в никуда» и передать руками.
+    email: Optional[str] = None
+    first_name: str = ""
+    last_name: str = ""
 
 
 class RegisterByInviteIn(BaseModel):
@@ -807,7 +815,11 @@ def _require_admin(user: dict):
 
 
 @router.post("/invite/create")
-async def invite_create(body: InviteCreateIn, user: dict = Depends(get_current_user)):
+async def invite_create(
+    body: InviteCreateIn,
+    background: BackgroundTasks,
+    user: dict = Depends(get_current_user),
+):
     _require_admin(user)
     token = secrets.token_urlsafe(32)
     expires = (
@@ -817,21 +829,52 @@ async def invite_create(body: InviteCreateIn, user: dict = Depends(get_current_u
     )
     p = await get_pool()
     row = await p.fetchrow(
-        """INSERT INTO invite_links (token, org_id, role, created_by, expires_at, max_uses)
-           VALUES ($1,$2,$3,$4,$5,$6) RETURNING *""",
+        """INSERT INTO invite_links
+             (token, org_id, role, created_by, expires_at, max_uses,
+              email, first_name, last_name)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *""",
         token,
         user["org_id"],
         body.role,
         user["id"],
         expires,
         body.max_uses,
+        (body.email or "").strip().lower() or None,
+        body.first_name.strip(),
+        body.last_name.strip(),
     )
+
+    ссылка = f"{APP_URL}/join/{token}"
+    отправлено = None
+    # ⚠️ ПИСЬМО ШЛЁТСЯ, ЕСЛИ ЕСТЬ КОМУ. `send_invite_notification` была
+    # написана и НЕ ВЫЗЫВАЛАСЬ НИОТКУДА (T96) — функция, шаблон и канал
+    # существовали, не хватало ровно получателя. Теперь он есть.
+    # ⚠️ Ссылка возвращается ВСЕГДА, даже когда письмо ушло: доставка
+    # двумя способами — решение владельца, «приглашение одно, способов два».
+    if row["email"]:
+        орг = await _org(p, user["org_id"])
+        background.add_task(
+            send_invite_notification,
+            row["email"],
+            ссылка,
+            (орг or {}).get("name") or "организацию",
+            body.role,
+        )
+        отправлено = datetime.now(timezone.utc)
+        await p.execute(
+            "UPDATE invite_links SET sent_at=$1 WHERE token=$2", отправлено, token
+        )
+
     return {
         "token": token,
-        "invite_url": f"{APP_URL}/join/{token}",
+        "invite_url": ссылка,
         "role": body.role,
         "max_uses": body.max_uses,
         "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
+        "email": row["email"],
+        "first_name": row["first_name"],
+        "last_name": row["last_name"],
+        "sent_at": отправлено.isoformat() if отправлено else None,
     }
 
 
@@ -936,9 +979,68 @@ async def invite_list(user: dict = Depends(get_current_user)):
             "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
             "max_uses": r["max_uses"],
             "uses_count": r["uses_count"],
+            # ⚠️ T104: КОМУ выписано и когда отправляли. Без этих полей
+            # в списке нельзя было отличить одно приглашение от другого —
+            # только роль и дата, — и «отправить повторно» было некому.
+            "email": r["email"],
+            "first_name": r["first_name"],
+            "last_name": r["last_name"],
+            "sent_at": r["sent_at"].isoformat() if r["sent_at"] else None,
+            # Статус выводится, а не хранится: колонки под него нет и не нужно.
+            "статус": "зарегистрировался"
+            if r["uses_count"] > 0
+            else "приглашён, ожидает",
         }
         for r in rows
     ]
+
+
+@router.post("/invite/{token}/resend")
+async def invite_resend(
+    token: str,
+    background: BackgroundTasks,
+    user: dict = Depends(get_current_user),
+):
+    """Отправить письмо с тем же приглашением ещё раз.
+
+    ⚠️ ТОТ ЖЕ ТОКЕН, А НЕ НОВЫЙ. Создавать новую ссылку на каждую
+    переотправку значило бы плодить живые приглашения: старое осталось бы
+    действующим, и в списке росли бы дубли на одного человека.
+    """
+    _require_admin(user)
+    p = await get_pool()
+    inv = await p.fetchrow(
+        "SELECT * FROM invite_links WHERE token=$1 AND org_id=$2",
+        token,
+        user["org_id"],
+    )
+    if not inv:
+        raise HTTPException(status_code=404, detail="Приглашение не найдено")
+    if not inv["email"]:
+        # ⚠️ Отказ ЧЕСТНЫЙ, а не тихий: приглашение без почты — это ссылка,
+        # которую передают руками, и слать её некуда.
+        raise HTTPException(
+            status_code=409,
+            detail="У этого приглашения нет почты — ссылку передают вручную",
+        )
+    if inv["uses_count"] >= inv["max_uses"] or not inv["is_active"]:
+        raise HTTPException(
+            status_code=409, detail="Приглашение уже использовано или отозвано"
+        )
+
+    орг = await _org(p, user["org_id"])
+    background.add_task(
+        send_invite_notification,
+        inv["email"],
+        f"{APP_URL}/join/{token}",
+        (орг or {}).get("name") or "организацию",
+        inv["role"],
+    )
+    отправлено = datetime.now(timezone.utc)
+    await p.execute(
+        "UPDATE invite_links SET sent_at=$1 WHERE token=$2", отправлено, token
+    )
+    return {"ok": True, "email": inv["email"], "sent_at": отправлено.isoformat()}
 
 
 @router.delete("/invite/{token}")

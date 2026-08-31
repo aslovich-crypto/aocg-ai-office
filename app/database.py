@@ -308,6 +308,20 @@ async def init_db():
             ALTER TABLE invite_links ADD COLUMN IF NOT EXISTS first_name TEXT;
             ALTER TABLE invite_links ADD COLUMN IF NOT EXISTS last_name  TEXT;
             ALTER TABLE invite_links ADD COLUMN IF NOT EXISTS sent_at    TIMESTAMPTZ;
+            -- T105/T118: одна почта — один человек. До 31.08.2026 UNIQUE
+            -- на users.email не было ВООБЩЕ, и в базе жили две строки
+            -- с одним адресом в разных организациях. Вход брал ПЕРВУЮ
+            -- ПОПАВШУЮСЯ (`fetchrow` без ORDER BY): какая из двух учёток
+            -- ответит, было не определено, и верный пароль мог не подойти.
+            -- ⚠️ ИНДЕКС ЧАСТИЧНЫЙ. Пустая почта — обычное значение для базы,
+            -- а `UserCreate.email: str = ""` позволяет её записать. Обычный
+            -- UNIQUE разрешил бы РОВНО ОДНОГО безпочтового человека на всю
+            -- базу и отверг бы второго при заведении.
+            -- ⚠️ IF NOT EXISTS ОБЯЗАТЕЛЕН: init_db крутится на каждом старте,
+            -- упавшее создание индекса уронило бы запуск целиком (T89).
+            -- Валидация BEGIN/ROLLBACK на проде 31.08.2026: дублей 0,
+            -- индекс создался, после отката исчез, людей не тронуло.
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_lower ON users (lower(email)) WHERE email IS NOT NULL AND email <> '';
             CREATE TABLE IF NOT EXISTS revoked_tokens (
                 id          SERIAL PRIMARY KEY,
                 token_hash  TEXT NOT NULL,

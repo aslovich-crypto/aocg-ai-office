@@ -903,7 +903,11 @@ class FakePool:
                 None,
             )
         # ── S-31: приглашения ───────────────────────────────────────────────
-        if q.startswith("INSERT INTO invite_links (token, org_id, role"):
+        # ⚠️ ЗЕРКАЛЬНО ПРОДАКШЕН-ЛОГИКЕ (13а.8). T104: приглашение знает,
+        # кому оно выписано. Префикс сменился — теперь INSERT многострочный,
+        # и ловить его надо по "INSERT INTO invite_links", а не по началу
+        # старого списка колонок.
+        if q.startswith("INSERT INTO invite_links"):
             self._invid += 1
             row = dict(
                 id=self._invid,
@@ -913,12 +917,29 @@ class FakePool:
                 created_by=args[3],
                 expires_at=args[4],
                 max_uses=args[5],
+                email=args[6] if len(args) > 6 else None,
+                first_name=args[7] if len(args) > 7 else "",
+                last_name=args[8] if len(args) > 8 else "",
+                sent_at=None,
                 uses_count=0,
                 is_active=True,
                 created_at=datetime.now(timezone.utc),
             )
             self.invite_links.append(row)
             return dict(row)
+        # ⚠️ ЗЕРКАЛЬНО И С УСЛОВИЕМ ДОСТУПА. Ветка ниже ловит запрос БЕЗ
+        # org_id; повторная отправка (T104) читает приглашение С НИМ, и без
+        # отдельной ветки подделка игнорировала бы область видимости —
+        # тест не покраснел бы, сними мы защиту. Поймано test_no_mirror_gaps.
+        if q.startswith("SELECT * FROM invite_links WHERE token=$1 AND org_id=$2"):
+            return next(
+                (
+                    dict(i)
+                    for i in self.invite_links
+                    if i["token"] == args[0] and i.get("org_id") == args[1]
+                ),
+                None,
+            )
         if q.startswith("SELECT * FROM invite_links WHERE token=$1"):
             return next(
                 (dict(i) for i in self.invite_links if i["token"] == args[0]), None
@@ -1295,6 +1316,12 @@ class FakePool:
             )
             return "INSERT"
         # ── S-31: расход и отзыв приглашения ────────────────────────────────
+        # ⚠️ ЗЕРКАЛЬНО (13а.8). T104: отметка об отправке письма.
+        if q.startswith("UPDATE invite_links SET sent_at=$1 WHERE token=$2"):
+            for i in self.invite_links:
+                if i["token"] == args[1]:
+                    i["sent_at"] = args[0]
+            return "UPDATE 1"
         if q.startswith("UPDATE invite_links SET uses_count=$1, is_active=$2"):
             for i in self.invite_links:
                 if i["id"] == args[2]:
