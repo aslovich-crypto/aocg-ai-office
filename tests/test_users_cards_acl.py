@@ -69,6 +69,56 @@ async def test_accountant_cannot_deactivate_user(client_accountant, db, seeded):
 
 
 @pytest.mark.asyncio
+async def test_админ_не_может_отключить_самого_себя(client, db, seeded):
+    """Снявший себя не отменит своё же действие — доступа у него уже нет.
+
+    ⚠️ ДЫРА БЫЛА ЖИВОЙ (T119): `deactivate_user` проверял только роль
+    просящего и организацию. Админ мог отключить СЕБЯ, и организация
+    оставалась неуправляемой — ни завести сотрудника, ни создать
+    приглашение, ни вернуть себе роль. После T115 отключённый не может
+    даже войти, чтобы попробовать: тупик без выхода.
+    """
+    db.users.append(
+        dict(id=1, first_name="Админ", role="admin", org_id=1, is_active=True)
+    )
+    r = await client.delete("/api/users/1")
+    assert r.status_code == 409, r.text
+    assert "самого себя" in r.json()["detail"]
+    assert db.users[-1]["is_active"] is True, "строка не должна была погаснуть"
+
+
+@pytest.mark.asyncio
+async def test_нельзя_снять_последнего_активного_админа(client, db, seeded):
+    """Организация без администратора — тупик, чинится только руками в базе.
+
+    ⚠️ ЧЕСТНО О ДОСТИЖИМОСТИ: пока просящий сам активный админ СО СТРОКОЙ
+    в таблице, эта ветка не срабатывает — его собственная строка и есть
+    «ещё один админ», а себя он снять не может по проверке выше. Здесь
+    строки просящего в таблице НЕТ: так выражается край, ради которого
+    защита и написана, и так она переиспользуется сменой роли (T104),
+    где понижение админа снимает администратора другим путём.
+    """
+    db.users.append(
+        dict(id=3, first_name="Единственный", role="admin", org_id=1, is_active=True)
+    )
+    r = await client.delete("/api/users/3")
+    assert r.status_code == 409, r.text
+    assert "последний администратор" in r.json()["detail"]
+    assert db.users[-1]["is_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_обычного_сотрудника_отключить_МОЖНО(client, db, seeded):
+    """⚠️ ТРЕТЬЯ ПРОВЕРКА ОБЯЗАТЕЛЬНА, требование владельца: защита, которая
+    запрещает ВСЁ ПОДРЯД, выглядит рабочей и ломает обычную работу.
+    Отключение рядового сотрудника обязано проходить как раньше.
+    """
+    r = await client.delete("/api/users/2")
+    assert r.status_code == 200, r.text
+    assert db.users[0]["is_active"] is False, "сотрудник обязан был погаснуть"
+
+
+@pytest.mark.asyncio
 async def test_admin_still_manages_users(client, db, seeded):
     """Админ работает как раньше — иначе гейт «чинит» ценой поломки."""
     created = await client.post(

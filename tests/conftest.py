@@ -143,6 +143,20 @@ class FakePool:
         # Фикс №1 фаза A: seed_default_categories использует fetchval для idempotency-
         # проверки и для INSERT ... RETURNING id групп.
         q = _norm(query)
+        # ⚠️ ЗЕРКАЛЬНО (13а.8). T119: сколько ещё активных админов в орг,
+        # кроме той строки, которую сейчас гасят или понижают.
+        # ⚠️ ПРЕФИКС ДОСЛОВНО КАК В КОДЕ: `_norm` только схлопывает пробелы,
+        # регистр не трогает. Первая редакция была написана заглавными
+        # и не совпала бы НИ РАЗУ — ветка выглядела бы рабочей и молчала.
+        if q.startswith("SELECT count(*) FROM users WHERE org_id=$1 AND role='admin'"):
+            return sum(
+                1
+                for u in self.users
+                if u.get("org_id") == args[0]
+                and u.get("role") == "admin"
+                and u.get("is_active", True)
+                and u["id"] != args[1]
+            )
         if q.startswith("SELECT EXISTS(SELECT 1 FROM categories WHERE org_id=$1"):
             return any(c.get("org_id") == args[0] for c in self.categories)
         if q.startswith("INSERT INTO category_groups"):
@@ -1144,6 +1158,19 @@ class FakePool:
                     dict(u)
                     for u in self.users
                     if u["id"] == args[0] and (not живой or u.get("is_active", True))
+                ),
+                None,
+            )
+        # ⚠️ ЗЕРКАЛЬНО ПРОДАКШЕН-ЛОГИКЕ (13а.8). T119: проверка «останется ли
+        # в организации администратор» читает роль и активность цели.
+        # Без этой ветки проверка падала NotImplementedError, и ЛЮБОЕ
+        # отключение сотрудника валилось пятисоткой — сторож поймал сразу.
+        if q.startswith("SELECT role, is_active FROM users WHERE id=$1 AND org_id=$2"):
+            return next(
+                (
+                    dict(u)
+                    for u in self.users
+                    if u["id"] == args[0] and u.get("org_id") == args[1]
                 ),
                 None,
             )
