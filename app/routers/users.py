@@ -140,10 +140,26 @@ async def get_users(user: dict = Depends(get_current_user)):
     автора на своих же отчётах), поэтому режется не доступ, а форма ответа.
     """
     p = await get_pool()
-    rows = await p.fetch(
-        "SELECT * FROM users WHERE is_active = true AND org_id=$1 ORDER BY id",
-        user["org_id"],
-    )
+    # ⚠️ ОТКЛЮЧЁННЫЕ ВИДНЫ ТЕМ, КТО УПРАВЛЯЕТ. До 31.08.2026 список читал
+    # `WHERE is_active = true` всегда, и погашенный человек ИСЧЕЗАЛ С ЭКРАНА
+    # целиком: свайп срабатывает легко, отменить нельзя, а увидеть, кого
+    # погасил, — тоже нельзя. Это не «нет кнопки возврата», это потеря
+    # наблюдаемости: ошибку не видно даже в ту же секунду.
+    #
+    # ⚠️ ТОЛЬКО ДЛЯ admin/accountant, И ЭТО НАМЕРЕННО. У остальных ролей
+    # управляющего экрана нет, зато `users` кормит подстановку имён на
+    # других экранах — расширять выдачу всем значило бы менять поведение
+    # там, где меня не просили. Сотрудник получает прежний ответ байт в байт.
+    if user.get("role") in _FULL_VIEW_ROLES:
+        rows = await p.fetch(
+            "SELECT * FROM users WHERE org_id=$1 ORDER BY is_active DESC, id",
+            user["org_id"],
+        )
+    else:
+        rows = await p.fetch(
+            "SELECT * FROM users WHERE is_active = true AND org_id=$1 ORDER BY id",
+            user["org_id"],
+        )
     return [_by_role(r, user.get("role")) for r in rows]
 
 
@@ -313,6 +329,32 @@ async def update_user(id: int, u: UserUpdate, user: dict = Depends(get_current_u
         f"UPDATE users SET {sets} WHERE id = ${len(values) + 1} "
         f"AND org_id = ${len(values) + 2} RETURNING *",
         *values,
+        id,
+        user["org_id"],
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    return _safe(row)
+
+
+@router.post("/{id}/restore")
+async def restore_user(id: int, user: dict = Depends(get_current_user)):
+    """Возвращает погашенного сотрудника в строй.
+
+    ⚠️ ОТДЕЛЬНАЯ РУЧКА, А НЕ ПОЛЕ В PATCH. Положить `is_active` в `UPDATABLE`
+    значило бы открыть ВТОРУЮ дверь к гашению — ту, что идёт мимо
+    `проверить_что_админ_останется`, и организацию снова можно было бы
+    оставить без администратора одним PATCH. Возврат безопасен в одну
+    сторону: он админов не убавляет, поэтому гейт ему не нужен.
+
+    ⚠️ ЗАЧЕМ ВООБЩЕ (T118/④, 31.08.2026): обратного действия не было НИ
+    ОДНОГО — ни ручки `SET is_active = true` во всём `app/routers/`, ни поля
+    в PATCH. Ошибочный свайп чинился только руками в базе.
+    """
+    _require_admin(user)
+    p = await get_pool()
+    row = await p.fetchrow(
+        "UPDATE users SET is_active = true WHERE id = $1 AND org_id=$2 RETURNING *",
         id,
         user["org_id"],
     )

@@ -148,6 +148,74 @@ async def test_снять_ВТОРОГО_из_двух_уже_нельзя(clien
 
 
 @pytest.mark.asyncio
+async def test_погашенного_ВИДНО_в_списке_и_он_помечен(client, db, seeded):
+    """⚠️ T118/④: до 31.08.2026 погашенный ИСЧЕЗАЛ С ЭКРАНА целиком.
+
+    Свайп срабатывает легко, отменить нельзя было ничем, а увидеть, кого
+    погасил, — тоже нельзя: список читал `WHERE is_active = true`. Это не
+    «нет кнопки возврата», это потеря наблюдаемости — ошибку не видно даже
+    в ту же секунду. Довод владельца: защита от собственной ошибки.
+    """
+    # ⚠️ Строки самого просящего в таблице нет — так устроен двойник
+    # (см. соседний тест про последнего админа), поэтому активного коллегу
+    # заводим явно: без него «активные идут первыми» проверять не на чем.
+    db.users.append(
+        dict(id=3, first_name="Активный", role="employee", org_id=1, is_active=True)
+    )
+    await client.delete("/api/users/2")
+    r = await client.get("/api/users/")
+    assert r.status_code == 200, r.text
+    строки = {u["id"]: u for u in r.json()}
+    assert 2 in строки, "погашенный обязан остаться виден управляющему"
+    assert строки[2]["is_active"] is False, "и быть помечен как отключённый"
+    assert строки[3]["is_active"] is True
+    assert [u["id"] for u in r.json()] == [3, 2], "активные идут первыми"
+
+
+@pytest.mark.asyncio
+async def test_сотрудник_погашенных_НЕ_видит(client_employee, db, seeded):
+    """Обратная сторона: расширять выдачу ВСЕМ значило бы менять поведение
+    там, где не просили. У сотрудника управляющего экрана нет, а `users`
+    кормит подстановку имён — ответ обязан остаться прежним."""
+    db.users[0]["is_active"] = False
+    r = await client_employee.get("/api/users/")
+    assert r.status_code == 200, r.text
+    assert all(u["id"] != 2 for u in r.json()), "сотруднику погашенные не видны"
+
+
+@pytest.mark.asyncio
+async def test_погашенного_можно_ВЕРНУТЬ(client, db, seeded):
+    """Обратное действие, которого не было ни одного: ни ручки, ни поля."""
+    await client.delete("/api/users/2")
+    assert db.users[0]["is_active"] is False
+    r = await client.post("/api/users/2/restore")
+    assert r.status_code == 200, r.text
+    assert r.json()["is_active"] is True
+    assert db.users[0]["is_active"] is True, "человек вернулся в строй"
+    assert db.users[0]["id"] == 2, "та же строка — чеки и отчёты при нём"
+
+
+@pytest.mark.asyncio
+async def test_вернуть_чужого_нельзя(client, db, seeded):
+    """org-scope: возврат не должен быть дырой в чужую организацию."""
+    db.users.append(
+        dict(id=99, first_name="Чужой", role="employee", org_id=777, is_active=False)
+    )
+    r = await client.post("/api/users/99/restore")
+    assert r.status_code == 404, r.text
+    assert [u for u in db.users if u["id"] == 99][0]["is_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_возврат_только_админу(client_employee, db, seeded):
+    """Сотрудник не возвращает никого — иначе гашение обратимо кем угодно."""
+    db.users[0]["is_active"] = False
+    r = await client_employee.post("/api/users/2/restore")
+    assert r.status_code == 403, r.text
+    assert db.users[0]["is_active"] is False
+
+
+@pytest.mark.asyncio
 async def test_обычного_сотрудника_отключить_МОЖНО(client, db, seeded):
     """⚠️ ТРЕТЬЯ ПРОВЕРКА ОБЯЗАТЕЛЬНА, требование владельца: защита, которая
     запрещает ВСЁ ПОДРЯД, выглядит рабочей и ломает обычную работу.

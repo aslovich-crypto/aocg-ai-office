@@ -304,6 +304,15 @@ class FakePool:
                 key=lambda i: str(i["created_at"]),
                 reverse=True,
             )
+        # ⚠️ ЗЕРКАЛЬНО (13а.8). T118/④: управляющим ролям список отдаётся
+        # ЦЕЛИКОМ, включая погашенных, и порядок тот же — сперва активные.
+        # Порядок здесь не украшение: по нему на экране видно, что человек
+        # отключён, а не потерян.
+        if q.startswith("SELECT * FROM users WHERE org_id=$1 ORDER BY is_active DESC"):
+            return sorted(
+                [u for u in self.users if u.get("org_id") == args[0]],
+                key=lambda u: (not u.get("is_active", True), u["id"]),
+            )
         if q.startswith("SELECT * FROM users WHERE is_active = true AND org_id=$1"):
             # S-28: GET /api/users/ — до 07.08.2026 ветки не было вовсе,
             # то есть ручка не выполнялась в тестах ни разу. Отдаём СЫРУЮ
@@ -1094,6 +1103,18 @@ class FakePool:
             )
             self.users.append(row)
             return dict(row)
+        # ⚠️ ЗЕРКАЛЬНО (13а.8) И ОБЯЗАТЕЛЬНО ВЫШЕ ОБЩЕЙ ВЕТКИ. T118/④:
+        # возврат погашенного. Общая ветка ниже разбирает `SET col=$N` и
+        # раскладывает ПОЗИЦИОННЫЕ аргументы по колонкам — а здесь значение
+        # ЛИТЕРАЛЬНОЕ (`is_active = true`), аргументы же только id и org_id.
+        # Попав в общую ветку, запрос записал бы в `is_active` идентификатор
+        # пользователя: истинный, поэтому тест бы ПРОШЁЛ, а двойник врал бы.
+        if q.startswith("UPDATE users SET is_active = true"):
+            for u in self.users:
+                if u["id"] == args[0] and u.get("org_id") == args[1]:
+                    u["is_active"] = True
+                    return dict(u)
+            return None
         if q.startswith("UPDATE users SET") and "RETURNING *" in q:
             # Набор колонок динамический (UPDATABLE), значения идут по порядку,
             # последними — id и org_id.
