@@ -293,6 +293,21 @@ async def init_db():
             );
             -- Permanent (no-expiry) invite links: expires_at may be NULL.
             ALTER TABLE invite_links ALTER COLUMN expires_at DROP NOT NULL;
+            -- T104: приглашение знает, КОМУ оно выписано, и когда его
+            -- отправляли. До этого ссылка была предъявительской: в списке
+            -- нельзя было увидеть, кому она уходила, и «отправить повторно»
+            -- было некому. Валидация BEGIN/ROLLBACK на проде 31.08.2026:
+            -- колонок 10 → 14 → 10 после отката, строк 5 на всех этапах,
+            -- ни одна старая строка значений не получила.
+            -- ⚠️ ЭТИ ЧЕТЫРЕ СТРОКИ — ТРЕТЬЯ КОПИЯ ОДНОГО И ТОГО ЖЕ DDL
+            -- (первая — список МИГРАЦИЯ в scripts/validate_invite_columns.py,
+            -- вторая — SQL, прогнанный на бастионе). Разойтись молча они
+            -- не могут: tests/test_migration_invite_columns.py требует
+            -- дословного совпадения с тем списком.
+            ALTER TABLE invite_links ADD COLUMN IF NOT EXISTS email      TEXT;
+            ALTER TABLE invite_links ADD COLUMN IF NOT EXISTS first_name TEXT;
+            ALTER TABLE invite_links ADD COLUMN IF NOT EXISTS last_name  TEXT;
+            ALTER TABLE invite_links ADD COLUMN IF NOT EXISTS sent_at    TIMESTAMPTZ;
             CREATE TABLE IF NOT EXISTS revoked_tokens (
                 id          SERIAL PRIMARY KEY,
                 token_hash  TEXT NOT NULL,
