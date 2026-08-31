@@ -124,6 +124,48 @@ def собрать(текст):
     return разделы, задачи
 
 
+def порядок_выполнения(текст):
+    """Разбирает блок «▶ ПОРЯДОК ВЫПОЛНЕНИЯ»: [(номер, [ид...], текст), ...].
+
+    ⚠️ БЛОК — ЕДИНСТВЕННЫЙ ИСТОЧНИК ПОРЯДКА (решение владельца 31.08.2026).
+    Витрина обязана печатать его наверху, а номера вести НА КАРТОЧКИ, иначе
+    порядок жил бы в файле и не жил в том, что читают глазами."""
+    м = re.search(r"^## ▶ ПОРЯДОК ВЫПОЛНЕНИЯ\s*$([\s\S]*?)(?=^## )", текст, re.M)
+    if not м:
+        return []
+    пункты = []
+    for строка in м.group(1).split("\n"):
+        с = строка.strip()
+        мн = re.match(r"^(\d+)\.\s+(.*)$", с)
+        if not мн:
+            continue
+        пункты.append((мн.group(1), re.findall(r"\[\[([^\]]+)\]\]", с), мн.group(2)))
+    return пункты
+
+
+def блок_порядка(пункты):
+    """HTML-навигация порядка. Каждый [[ид]] — ссылка на карточку #ид.
+
+    ⚠️ ЭТО НЕ КАРТОЧКИ И НЕ <article> — сторож НАЙДЕНО/НАПЕЧАТАНО их не
+    считает, фильтр (T99) их не трогает: блок стоит над панелью и виден
+    при любом фильтре, как оглавление."""
+    if not пункты:
+        return ""
+    строки = []
+    for номер, иды, текст in пункты:
+        х = html.escape(текст)
+        for ид in иды:
+            бе = html.escape(ид)
+            х = х.replace(
+                f"[[{бе}]]", f'<a class="oref" href="#{бе}">{бе}</a>'
+            )
+        строки.append(f"<li>{х}</li>")
+    return (
+        '<nav class="order" aria-label="Порядок выполнения">'
+        "<h2>▶ Порядок выполнения</h2><ol>" + "".join(строки) + "</ol></nav>"
+    )
+
+
 def строка_задачи(запись):
     ид, название, пр, ст, план, факт, прим, н = запись
     полоска = КЛАСС_ПРИОРИТЕТА.get(пр, "")
@@ -152,7 +194,9 @@ def строка_задачи(запись):
     # ⚠️ Ссылка на строку файла — добавка к прежнему виду, оставлена
     # по решению владельца: видно, куда править.
     return (
-        f'<article class="task" data-pr="{html.escape(пр, quote=True)}" '
+        # ⚠️ id — ЯКОРЬ для блока порядка и любых ссылок на карточку.
+        f'<article class="task" id="{html.escape(ид, quote=True)}" '
+        f'data-pr="{html.escape(пр, quote=True)}" '
         f'data-st="{html.escape(ст, quote=True)}">'
         '<details><summary class="row">'
         f'<span class="stripe {полоска}"></span>'
@@ -437,6 +481,18 @@ code{
   border-left:2px solid var(--cherry); background:var(--cherry-soft);
   margin-left:-14px; padding:8px 10px 8px 12px;
 }
+.order{
+  background:var(--surface); border:1px solid var(--line); border-radius:10px;
+  box-shadow:var(--shadow); margin:14px 0 4px; padding:12px 18px 14px;
+}
+.order h2{font:600 13px/1.2 "IBM Plex Sans",sans-serif; color:var(--cherry);
+  letter-spacing:.06em; text-transform:uppercase; margin:0 0 8px}
+.order ol{margin:0; padding-left:22px; font:400 13.5px/1.75 "IBM Plex Sans",sans-serif}
+.order .oref{
+  font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-size:12.5px;
+  color:var(--cherry); text-decoration:none;
+  border-bottom:1px dotted color-mix(in srgb,var(--cherry) 50%,transparent);
+}
 .ref{
   font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-size:12px;
   color:var(--cherry);
@@ -527,6 +583,7 @@ def main():
         "<span>представление, а не копия — в git не хранится</span></div>"
         + блок_сводки
         + "</header>"
+        + блок_порядка(порядок_выполнения(текст))
         + панель(разделы, пр, len(задачи))
         + в_html(разделы)
         + f"<script>{СКРИПТ}</script></body></html>",
