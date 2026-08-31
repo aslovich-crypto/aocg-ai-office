@@ -108,6 +108,46 @@ async def test_нельзя_снять_последнего_активного_�
 
 
 @pytest.mark.asyncio
+async def test_при_ДВУХ_админах_одного_снять_МОЖНО(client, db, seeded):
+    """⚠️ ОБРАТНАЯ СТОРОНА ЗАЩИТЫ T119, И БЕЗ НЕЁ ЗАЩИТА НЕ ДОКАЗАНА.
+
+    Замер 31.08.2026 по требованию владельца: он заводит ВТОРОГО
+    администратора, потому что один админ — единая точка отказа на живых
+    людях (потерял телефон или почту — организацию некому вести). Значит
+    проверка обязана СЧИТАТЬ админов, а не запрещать снятие любого из них:
+    запрет «всегда» выглядел бы рабочим на прежнем тесте и заблокировал бы
+    ровно тот случай, ради которого второго админа и заводят.
+    """
+    db.users.append(
+        dict(id=3, first_name="Первый", role="admin", org_id=1, is_active=True)
+    )
+    db.users.append(
+        dict(id=4, first_name="Второй", role="admin", org_id=1, is_active=True)
+    )
+    r = await client.delete("/api/users/3")
+    assert r.status_code == 200, r.text
+    снятый = [u for u in db.users if u["id"] == 3][0]
+    оставшийся = [u for u in db.users if u["id"] == 4][0]
+    assert снятый["is_active"] is False, "при двух админах одного снять можно"
+    assert оставшийся["is_active"] is True, "второй админ обязан остаться"
+
+
+@pytest.mark.asyncio
+async def test_снять_ВТОРОГО_из_двух_уже_нельзя(client, db, seeded):
+    """И граница: сняв одного из двух, второго снять уже не дают."""
+    db.users.append(
+        dict(id=3, first_name="Первый", role="admin", org_id=1, is_active=False)
+    )
+    db.users.append(
+        dict(id=4, first_name="Второй", role="admin", org_id=1, is_active=True)
+    )
+    r = await client.delete("/api/users/4")
+    assert r.status_code == 409, r.text
+    assert "последний администратор" in r.json()["detail"]
+    assert [u for u in db.users if u["id"] == 4][0]["is_active"] is True
+
+
+@pytest.mark.asyncio
 async def test_обычного_сотрудника_отключить_МОЖНО(client, db, seeded):
     """⚠️ ТРЕТЬЯ ПРОВЕРКА ОБЯЗАТЕЛЬНА, требование владельца: защита, которая
     запрещает ВСЁ ПОДРЯД, выглядит рабочей и ломает обычную работу.
