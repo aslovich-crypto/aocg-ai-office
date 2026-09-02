@@ -308,6 +308,50 @@ class FakePool:
         # ЦЕЛИКОМ, включая погашенных, и порядок тот же — сперва активные.
         # Порядок здесь не украшение: по нему на экране видно, что человек
         # отключён, а не потерян.
+        # ⚠️ ЗЕРКАЛЬНО (13а.8). T144: общий поиск. Семантика ILIKE — регистр
+        # НЕ важен, подстрока в любом месте; область та же, что у списков:
+        # can_see_all — вся организация, иначе только свои строки.
+        # ⚠️ Зеркало ТРЕБУЕТ org_id=$1 в тексте запроса: иначе оно отвечало
+        # бы правильно и на сломанный SQL (класс T136 — двойник вернее кода),
+        # и мутация «потерян org-scope» прошла бы зелёной. Нет условия —
+        # запрос падает в NotImplementedError, тест краснеет.
+        if (
+            q.startswith("SELECT id, org, org_brand, date, amount FROM receipts")
+            and "org_id=$1" in q
+        ):
+            шаблон = args[1].strip("%").lower()
+            мои = "user_id=$3" in q
+            return sorted(
+                [
+                    r
+                    for r in self.receipts
+                    if r.get("org_id") == args[0]
+                    and (not мои or r.get("user_id") == args[2])
+                    and any(
+                        шаблон in str(r.get(к) or "").lower()
+                        for к in ("org", "org_brand", "org_legal")
+                    )
+                ],
+                key=lambda r: str(r.get("date")),
+                reverse=True,
+            )[:20]
+        if (
+            q.startswith("SELECT id, title, status, total, created FROM reports")
+            and "org_id=$1" in q
+        ):
+            шаблон = args[1].strip("%").lower()
+            мои = "user_id=$3" in q
+            return sorted(
+                [
+                    r
+                    for r in self.reports
+                    if r.get("org_id") == args[0]
+                    and (not мои or r.get("user_id") == args[2])
+                    and шаблон in str(r.get("title") or "").lower()
+                ],
+                key=lambda r: str(r.get("created")),
+                reverse=True,
+            )[:20]
         if q.startswith("SELECT * FROM users WHERE org_id=$1 ORDER BY is_active DESC"):
             return sorted(
                 [u for u in self.users if u.get("org_id") == args[0]],

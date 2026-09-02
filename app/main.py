@@ -20,6 +20,7 @@ from app.routers import (
     categories,
     organizations,
     max_relay,
+    search,
 )
 from aocg_security.middleware import AOCGSecurityMiddleware
 from app.monitoring import init_sentry, unhandled_exception_handler
@@ -121,6 +122,7 @@ app.include_router(services.router)
 app.include_router(categories.router)
 app.include_router(organizations.router)
 app.include_router(max_relay.router)
+app.include_router(search.router)
 
 
 @app.get("/")
