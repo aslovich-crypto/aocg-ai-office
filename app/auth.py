@@ -6,6 +6,7 @@ JWT_SECRET_KEY is REQUIRED — the app refuses to start without it (no insecure
 default), so production can never accidentally sign tokens with a known key.
 """
 
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
@@ -26,9 +27,62 @@ if not JWT_SECRET:
         "JWT_SECRET_KEY не задан — отказ запуска во избежание подписи токенов "
         "небезопасным дефолтом. Задайте переменную окружения JWT_SECRET_KEY."
     )
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
-REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "30"))
+# ⚠️ ПОТОЛКИ ОСЛАБЛЕНИЯ (S-49): ПАНЕЛЬ МОЖЕТ УЖЕСТОЧИТЬ, НО НЕ ОСЛАБИТЬ.
+# Значение в панели меняют руками и без ревью; ошибка там не оставляет следа
+# ни в git, ни в логе — ровно так `SECURITY_AUTH_RATE_LIMIT` простоял 50
+# при умолчании кода 5 (замер 27.08.2026, подтверждён поведением 04.09.2026).
+# Опись боевых настроек: docs/AOCG-ENV-001-2026_Opis_boevyh_nastroek.md.
+АЛГОРИТМЫ_ПОДПИСИ = ("HS256", "HS384", "HS512")
+ПОТОЛОК_ЖИЗНИ_ACCESS_МИН = 240
+ПОТОЛОК_ЖИЗНИ_REFRESH_ДНЕЙ = 90
+
+_алгоритм = os.getenv("JWT_ALGORITHM", "HS256").strip()
+if _алгоритм not in АЛГОРИТМЫ_ПОДПИСИ:
+    # ⚠️ БЕЛЫЙ СПИСОК, А НЕ ЧЁРНЫЙ, И РАЗНИЦА ЗДЕСЬ РЕШАЮЩАЯ. Запрет одного
+    # лишь «none» не спасает: у JWT семейство алгоритмов широкое, и подмена
+    # на асимметричный (RS256) с нашим секретом в роли ПУБЛИЧНОГО ключа —
+    # известный способ подделать подпись. Список разрешённого закрывает
+    # и то, чего мы ещё не знаем.
+    logging.getLogger(__name__).warning(
+        "JWT_ALGORITHM=%r вне белого списка %s — применён HS256 (S-49).",
+        _алгоритм,
+        ", ".join(АЛГОРИТМЫ_ПОДПИСИ),
+    )
+    _алгоритм = "HS256"
+JWT_ALGORITHM = _алгоритм
+
+
+def _не_дольше(имя: str, умолчание: int, потолок: int) -> int:
+    """Срок жизни токена из окружения, но не длиннее потолка.
+
+    Долгий срок — это не удобство, а окно для украденного токена: он живёт
+    ровно столько, сколько здесь написано. Отзыв (`tokens_valid_from`)
+    помогает, только если о краже УЗНАЛИ.
+    """
+    try:
+        значение = int(os.getenv(имя, str(умолчание)))
+    except (TypeError, ValueError):
+        logging.getLogger(__name__).warning(
+            "%s не число — применено умолчание %s (S-49).", имя, умолчание
+        )
+        return умолчание
+    if значение > потолок:
+        logging.getLogger(__name__).warning(
+            "%s=%s дольше потолка %s — применён ПОТОЛОК (S-49).",
+            имя,
+            значение,
+            потолок,
+        )
+        return потолок
+    return значение
+
+
+ACCESS_TOKEN_EXPIRE_MINUTES = _не_дольше(
+    "ACCESS_TOKEN_EXPIRE_MINUTES", 60, ПОТОЛОК_ЖИЗНИ_ACCESS_МИН
+)
+REFRESH_TOKEN_EXPIRE_DAYS = _не_дольше(
+    "REFRESH_TOKEN_EXPIRE_DAYS", 30, ПОТОЛОК_ЖИЗНИ_REFRESH_ДНЕЙ
+)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)

@@ -61,5 +61,10 @@ jobs:
           JWT_SECRET_KEY: ci-only-not-a-secret
         run: python tests/tools/sql_check.py --schema
 
+      # Опись боевых настроек не должна устареть молча (S-49).
+      # Ловит: код читает переменную, которой нет в описи, — и наоборот.
+      - name: Опись боевых настроек против кода
+        run: python scripts/check_env_opis.py
+
       - name: Lint with ruff
         run: ruff check app/
