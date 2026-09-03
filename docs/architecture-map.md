@@ -1,6 +1,8 @@
 # AOCG AI Офис — структурная карта (по факту из кода)
 
-> Карта построена **по фактическому коду** двух репозиториев на 2026-06-29:
+> Карта построена **по фактическому коду** двух репозиториев;
+> сверена и обновлена **2026-09-03 (T52)** — семь расхождений выправлено.
+> Первичный обход — 2026-06-29:
 > `aocg-ai-office` (бэкенд, FastAPI) и `aocg-ai-office-web` (фронтенд, React).
 > Где функциональность из ТЗ ещё не написана — это помечено стилем
 > **«план / не реализовано»**, а не нарисовано как существующее.
@@ -26,7 +28,7 @@ flowchart TB
         FE_Auth["Вход / Регистрация<br/>Login · Register · VerifyEmail · Join"]
         FE_Consent["Согласие 152-ФЗ<br/>ConsentScreen (2 чекбокса)"]
         FE_Settings["Настройки<br/>аккаунт · организация · пользователи/роли ·<br/>категории · карты · сервисы · приглашения"]
-        FE_API["API-слой: authFetch (App.jsx:119)<br/>Bearer JWT + авто-refresh на 401<br/>base = VITE_API_URL"]
+        FE_API["API-слой: src/lib/api.js — authFetch<br/>Bearer JWT + авто-refresh на 401 · base = VITE_API_URL<br/>вынесено из монолита: 11 модулей lib/ · 6 components/ · 4 pages/"]
 
         subgraph FEPLAN["План / НЕ реализовано (только названия в меню)"]
             FE_Prima["Приложение «Прима»:<br/>Авансовые отчёты · Акты · Счета"]
@@ -61,6 +63,9 @@ flowchart TB
             R_org["organizations · /api/organizations"]
             R_consent["consent · /api/consent"]
             R_services["services · /api/services"]
+            R_search["search · /api/search (T144: чеки+отчёты)"]
+            R_ocr["ocr · /api/receipts/ocr"]
+            R_max["max_relay · /internal/max (мост бота, не фронт)"]
         end
         BE_Cat["categorization.py<br/>триггер-словари (локально, без сети)"]
     end
@@ -75,7 +80,7 @@ flowchart TB
     %% ============ ДАННЫЕ ============
     subgraph DATA["ДАННЫЕ · PostgreSQL @ Timeweb Cloud, Москва (asyncpg pool, init_db)"]
         DB[("12 таблиц<br/>organizations · users · receipts ·<br/>receipt_items · reports · report_items ·<br/>cards · category_groups · categories ·<br/>invite_links · user_consents · revoked_tokens")]
-        PHOTO["Фото чека:<br/>сейчас base64 в receipts.raw_data (JSONB)<br/>поле photo_url есть, но upload НЕ реализован"]
+        PHOTO["Фото чека: photo_key → приватный бакет S3 Timeweb<br/>чтение: photo_key → photo_url → base64 (наследие)<br/>подписанная ссылка с коротким сроком"]
     end
 
     R_receipts --> DB
@@ -93,8 +98,8 @@ flowchart TB
         EX_Claude["Claude Vision · Anthropic<br/>claude-haiku-4-5 · OCR чеков<br/>ANTHROPIC_API_KEY"]
         EX_PCheck["proverkacheka.com<br/>проверка чека по QR · PROVERKACHEKA_TOKEN"]
         EX_Egrul["egrul.nalog.ru<br/>контрагент по ИНН (без ключа)"]
-        EX_Resend["Resend · письма верификации/инвайтов<br/>RESEND_API_KEY"]
-        EX_Sentry["Sentry · мониторинг ошибок<br/>(ПД маскируются before_send) · SENTRY_DSN"]
+        EX_Postbox["Yandex Cloud Postbox · письма по SMTP<br/>верификация/сброс/инвайты · POSTBOX_SMTP_* (РФ)"]
+        EX_Sentry["Sentry · мониторинг ошибок · SENTRY_DSN<br/>⚠️ маскирование НЕПОЛНОЕ: raw_data (S-69),<br/>код вокруг падения (S-70)"]
         EX_Yoo["ЮКасса / YooKassa · платежи<br/>НЕ подключено (нет кода)"]
         EX_Alfa["Альфа-Банк · только статус в /api/services<br/>интеграции нет"]
     end
@@ -102,7 +107,9 @@ flowchart TB
     R_receipts -->|"POST /ocr/"| EX_Claude
     R_fns --> EX_PCheck
     R_auth --> EX_Egrul
-    R_auth --> EX_Resend
+    R_search --> DB
+    R_ocr --> EX_Claude
+    R_auth --> EX_Postbox
     BE_MW -.-> EX_Sentry
 
     %% ============ ИНФРА ============
@@ -111,22 +118,24 @@ flowchart TB
         INF_FE["сервис: frontend (server.js)"]
         INF_PG["сервис: PostgreSQL"]
         INF_CI["GitHub Actions · pytest + ruff на push"]
-        INF_Yandex["S3 Timeweb Cloud<br/>резидентность фото в РФ · план S-06"]
+        INF_Uptime["UptimeRobot · внешний пинг /health<br/>(без ПД; ложные DOWN — T46)"]
+        INF_Yandex["S3 Timeweb Cloud · приватный бакет<br/>фото чеков по photo_key · ФАКТ (задача №3)"]
     end
 
     INF_BE -. "host" .-> BE_MW
     INF_FE -. "host" .-> FE_API
     INF_PG -. "host" .-> DB
-    PHOTO -. "целевое хранилище (S-06)" .-> INF_Yandex
+    PHOTO -- "photo_key" --> INF_Yandex
 
     %% ============ СТИЛИ ============
     classDef transborder fill:#ffe0e0,stroke:#cc0000,stroke-width:2px,color:#000;
     classDef planned fill:#f0f0f0,stroke:#999,stroke-dasharray:5 5,color:#555;
     classDef rf fill:#e0f0ff,stroke:#0066cc,color:#000;
 
-    class EX_Claude,EX_Resend,EX_Sentry transborder;
+    class EX_Claude,EX_Sentry transborder;
+    class EX_Postbox rf;
     class EX_PCheck,EX_Egrul rf;
-    class FE_Prima,FE_FinMod,EX_Yoo,EX_Alfa,INF_Yandex planned;
+    class FE_Prima,FE_FinMod,EX_Yoo,EX_Alfa planned;
 ```
 
 ### Легенда
@@ -191,7 +200,10 @@ erDiagram
         varchar org_inn "ИНН поставщика"
         bool category_manual "защита ручных правок"
         text photo_url "внешний URL (пока пусто)"
-        jsonb raw_data "вкл. photo_base64"
+        jsonb raw_data "ответ ФНС/OCR; photo_base64 больше НЕ пишется"
+        varchar fd_num "ФД — принимается и от клиента (T132)"
+        varchar fpd "ФПД — принимается и от клиента (T132)"
+        varchar photo_key "ключ в приватном бакете (№3)"
     }
     receipt_items {
         int id PK
@@ -247,7 +259,14 @@ erDiagram
         int created_by FK
         text role
         timestamptz expires_at "NULL = бессрочно"
+        text email "кому выписано (T104)"
+        text first_name "T104"
+        text last_name "T104"
+        timestamptz sent_at "когда ушло письмо (T104)"
     }
+    %% users: + tokens_valid_from (отзыв токенов без чёрного списка, S-16);
+    %% частичный уникальный индекс uq_users_email_lower (T104 этап ①)
+    %% report_items: чек живёт ровно в одном отчёте (uq_report_items_receipt_id)
     user_consents {
         int id PK
         text user_id
@@ -263,12 +282,13 @@ erDiagram
     }
 ```
 
-**Где хранятся фото чеков (по факту):**
-- Сейчас — base64 внутри `receipts.raw_data` (JSONB). Отдаётся через
-  `GET /api/receipts/{id}/photo` (декод в JPEG).
-- Поле `receipts.photo_url` под внешний URL заведено, но **upload не
-  реализован** (задача S-06). В коде остался комментарий «Cloudflare R2 etc.» —
-  ⚠️ R2 запрещён по 152-ФЗ; целевое хранилище — **S3 Timeweb Cloud** (РФ, `s3.timeweb.com`).
+**Где хранятся фото чеков (по факту, T52 03.09.2026):**
+- **Приватный бакет S3 Timeweb Cloud** (РФ): чек ссылается колонкой
+  `photo_key`; наружу отдаётся подписанная ссылка с коротким сроком.
+- Чтение по приоритету `photo_key → photo_url → base64` — два последних
+  как наследие старых строк; **новые записи base64 не содержат**
+  (OCR-ответ вычищается до записи). Это и есть «закрытое объектное
+  хранилище» из юридических текстов — карта больше им не противоречит.
 
 ---
 
@@ -291,7 +311,7 @@ flowchart TD
     %% --- Ветка ФОТО ---
     Choice -->|"Фото / PDF"| Photo["Загрузка фото/PDF (≤5 МБ)<br/>PDF: 1-я стр → JPEG (PyMuPDF)"]
     Photo --> OCR["POST /api/receipts/ocr/<br/>→ Claude Vision 🌍 США<br/>claude-haiku-4-5 (timeout 15с)"]
-    OCR --> OCRparse["parse_ocr_response → JSON<br/>+ photo_base64 в ответе"]
+    OCR --> OCRparse["parse_ocr_response → JSON<br/>снимок кладётся в бакет, ответ отдаёт photo_key<br/>(photo_base64 вычищается до записи)"]
 
     %% --- Ветка РУЧНОЙ ---
     Choice -->|"Вручную"| Manual["Ручной ввод полей"]
@@ -305,7 +325,7 @@ flowchart TD
 
     Confirm --> Create["POST /api/receipts/<br/>org-scope + user_id (автор)"]
     Create --> Dedup{"Дедуп:<br/>UNIQUE(kkt_fn, fd_num)<br/>+ мягко date+amount+org_inn (7 дн)"}
-    Dedup -->|"новый"| Insert[("INSERT в receipts<br/>raw_data хранит photo_base64")]
+    Dedup -->|"новый"| Insert[("INSERT в receipts<br/>photo_key — колонкой; raw_data без base64")]
     Dedup -->|"дубль"| Warn["warning.duplicates →<br/>предложить bulk-delete"]
 
     Insert --> Done(["Чек в списке; виден по A-ACL:<br/>admin/accountant — все, employee — свои"])
@@ -355,14 +375,23 @@ cards → ocr → consent → users → services → categories → organization
 | Сервис | Назначение | env-ключ | Страна | Канал |
 |---|---|---|---|---|
 | **Claude Vision** (Anthropic) | OCR фото чеков (`claude-haiku-4-5`) | `ANTHROPIC_API_KEY` | 🌍 США | **трансграничный** |
-| **Resend** | письма верификации/инвайтов | `RESEND_API_KEY` | 🌍 ЕС | **трансграничный** |
-| **Sentry** | мониторинг ошибок (ПД маскируются) | `SENTRY_DSN` | 🌍 ЕС | **трансграничный** |
+| **Yandex Cloud Postbox** | письма по SMTP: верификация, сброс, инвайты | `POSTBOX_SMTP_*`, `POSTBOX_FROM` | 🇷🇺 РФ | внутренний |
+| **Sentry** | мониторинг ошибок — ⚠️ маскирование НЕПОЛНОЕ (S-69: raw_data; S-70: код вокруг падения) | `SENTRY_DSN` | 🌍 ЕС | **трансграничный** |
+| **UptimeRobot** | внешний пинг `/health` (ПД не передаются; ложные DOWN — T46) | — | 🌍 США | мониторинг без ПД |
 | **proverkacheka.com** | проверка чека по QR (ФНС) | `PROVERKACHEKA_TOKEN` | 🇷🇺 РФ | внутренний |
 | **egrul.nalog.ru** | контрагент по ИНН | — (без ключа) | 🇷🇺 РФ | внутренний |
 | ЮКасса / YooKassa | платежи/подписки | — | — | **в коде отсутствует** |
 | Альфа-Банк | — | — | — | только строка статуса в `/api/services`, интеграции нет |
 
 > Категоризация, парсинг JSON и валидация ИНН — **локальная логика без сети**.
+>
+> ⚠️ **T52, юридически значимая правка (03.09.2026):** прежняя карта называла
+> Resend (ЕС) действующим трансграничным каналом писем и «base64 вместо
+> хранилища» — оба утверждения ОПРОВЕРГАЛИ юридический пакет («трансграничная
+> передача почты не осуществляется», «закрытое объектное хранилище»). Факт
+> кода: письма — Postbox (РФ), фото — приватный бакет S3 Timeweb. Из
+> трансграничных остаются Claude Vision (США, закрывается S-44/S-45)
+> и Sentry (ЕС, S-20).
 
 ---
 
@@ -394,8 +423,8 @@ cards → ocr → consent → users → services → categories → organization
   Реально работает только приложение **«Финансы»** с разделами
   **Чеки, Сводка, Отчёты, Главная**.
 - **Модули Финансов ДДС / ОПУ / Бюджет** — только подпись в меню переключателя.
-- **Загрузка фото в объектное хранилище** (S3 Timeweb Cloud) — не написана;
-  фото живут как base64 в `receipts.raw_data` (S-06).
+- **Загрузка фото в объектное хранилище** — НАПИСАНА и работает
+  (photo_key, приватный бакет; T52 03.09.2026).
 - **ЮКасса / платежи** — интеграции нет.
 - Приложения «Документы» и «Инструменты» в переключателе — заглушки `soon`.
 
