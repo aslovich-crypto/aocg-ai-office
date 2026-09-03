@@ -595,11 +595,16 @@ class FakePool:
             # (там `AND org_id=$2` из токена), и тест «подсказка не приходит
             # из чужой орг» не мог ни пройти честно, ни покраснеть.
             свой = "AND org_id=$2" in q
+            # T153 Ⓑ: подсказка ЛИЧНАЯ — по тому же приёму, что org-scope:
+            # условие БЕРЁТСЯ ИЗ ТЕКСТА запроса, иначе двойник был бы
+            # позволительнее продакшена и мутация «снят user_id» не ловилась.
+            личная = "user_id=$3" in q
             counts = {}
             for r in self.receipts:
                 if (
                     r["org"] == args[0]
                     and (not свой or r.get("org_id") == args[1])
+                    and (not личная or r.get("user_id") == args[2])
                     and r["payment"]
                     and r["payment"] != "Не указано"
                 ):

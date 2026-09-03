@@ -2058,10 +2058,40 @@ async def test_delete_card(client):
 
 
 # ─── GET /api/receipts/suggest-payment ────────────────────────────────
-async def test_suggest_payment_returns_card(client, seeded):
+async def test_suggest_payment_returns_card(client, db, seeded):
+    # T153 Ⓑ: подсказка ЛИЧНАЯ — засеянный чек приписывается спрашивающему,
+    # иначе тест проверял бы старую, организационную политику.
+    db.receipts[0]["user_id"] = 1
     resp = await client.get("/api/receipts/suggest-payment", params={"org": "Лукойл"})
     assert resp.status_code == 200
     assert resp.json()["payment"] == "Корп.карта"
+
+
+async def test_suggest_payment_личная_а_не_чужая(client, db, seeded):
+    """T153 Ⓑ: чужие привычки у продавца НЕ выбирают карту за меня.
+
+    Владелец платил личной, форма тихо ставила корпоративную — потому что
+    подсказка считалась по всей организации. Коллега с сотней чеков
+    «Корп.карта» у того же продавца не должен перевешивать мою историю."""
+    for i in range(3):
+        db.receipts.append(
+            dict(id=900 + i, org="Лукойл", payment="Личная 6645",
+                 date=__import__("datetime").date(2026, 8, 1 + i),
+                 amount=100.0, org_id=1, user_id=1,
+                 kkt_fn=None, raw_data=None, source="manual")
+        )
+    for i in range(30):
+        db.receipts.append(
+            dict(id=950 + i, org="Лукойл", payment="Корп.карта 3950",
+                 date=__import__("datetime").date(2026, 7, 1 + i % 27),
+                 amount=100.0, org_id=1, user_id=777,
+                 kkt_fn=None, raw_data=None, source="manual")
+        )
+    resp = await client.get("/api/receipts/suggest-payment", params={"org": "Лукойл"})
+    assert resp.status_code == 200
+    assert resp.json()["payment"] == "Личная 6645", (
+        "тридцать чужих чеков перевесили три моих — подсказка не личная"
+    )
 
 
 async def test_suggest_payment_returns_null_when_no_history(client):

@@ -111,15 +111,24 @@ async def get_receipts(user: dict = Depends(get_current_user)):
 
 @router.get("/suggest-payment")
 async def suggest_payment(org: str, user: dict = Depends(get_current_user)):
+    """Самая частая оплата у ЭТОГО продавца — У ЭТОГО СОТРУДНИКА (T153, Ⓑ).
+
+    ⚠️ До 03.09.2026 считалось по ВСЕЙ организации: с пятью людьми чужие
+    привычки у продавца выбирали карту за тебя — владелец платил личной,
+    форма тихо ставила корпоративную. Слово владельца: «прямая ложь в
+    документе, и она дешевле всего чинится». Подсказка — штука личная:
+    чем ЧАЩЕ ВСЕГО платил здесь Я, а не «кто-то из нас»."""
     p = await get_pool()
     row = await p.fetchrow(
         """
         SELECT payment FROM receipts
-        WHERE org=$1 AND org_id=$2 AND payment IS NOT NULL AND payment <> 'Не указано'
+        WHERE org=$1 AND org_id=$2 AND user_id=$3
+          AND payment IS NOT NULL AND payment <> 'Не указано'
         GROUP BY payment ORDER BY COUNT(*) DESC LIMIT 1
     """,
         org,
         user["org_id"],
+        user["id"],
     )
     return {"payment": row["payment"] if row else None}
 
