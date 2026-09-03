@@ -308,50 +308,11 @@ class FakePool:
         # ЦЕЛИКОМ, включая погашенных, и порядок тот же — сперва активные.
         # Порядок здесь не украшение: по нему на экране видно, что человек
         # отключён, а не потерян.
-        # ⚠️ ЗЕРКАЛЬНО (13а.8). T144: общий поиск. Семантика ILIKE — регистр
-        # НЕ важен, подстрока в любом месте; область та же, что у списков:
-        # can_see_all — вся организация, иначе только свои строки.
-        # ⚠️ Зеркало ТРЕБУЕТ org_id=$1 в тексте запроса: иначе оно отвечало
-        # бы правильно и на сломанный SQL (класс T136 — двойник вернее кода),
-        # и мутация «потерян org-scope» прошла бы зелёной. Нет условия —
-        # запрос падает в NotImplementedError, тест краснеет.
-        if (
-            q.startswith("SELECT id, org, org_brand, date, amount FROM receipts")
-            and "org_id=$1" in q
-        ):
-            шаблон = args[1].strip("%").lower()
-            мои = "user_id=$3" in q
-            return sorted(
-                [
-                    r
-                    for r in self.receipts
-                    if r.get("org_id") == args[0]
-                    and (not мои or r.get("user_id") == args[2])
-                    and any(
-                        шаблон in str(r.get(к) or "").lower()
-                        for к in ("org", "org_brand", "org_legal")
-                    )
-                ],
-                key=lambda r: str(r.get("date")),
-                reverse=True,
-            )[:20]
-        if (
-            q.startswith("SELECT id, title, status, total, created FROM reports")
-            and "org_id=$1" in q
-        ):
-            шаблон = args[1].strip("%").lower()
-            мои = "user_id=$3" in q
-            return sorted(
-                [
-                    r
-                    for r in self.reports
-                    if r.get("org_id") == args[0]
-                    and (not мои or r.get("user_id") == args[2])
-                    and шаблон in str(r.get("title") or "").lower()
-                ],
-                key=lambda r: str(r.get("created")),
-                reverse=True,
-            )[:20]
+        # Зеркала ПОИСКА (T144) отсюда СНЯТЫ 03.09.2026: поиск переведён
+        # на живую базу (tests/pg/test_search.py, T36 сессия 2), и другими
+        # тестами эти ветки не исполнялись ни разу (замер грепом: /api/search
+        # был только в test_search.py). Мёртвая ветка двойника хуже отсутствующей:
+        # она выглядит покрытием.
         if q.startswith("SELECT * FROM users WHERE org_id=$1 ORDER BY is_active DESC"):
             return sorted(
                 [u for u in self.users if u.get("org_id") == args[0]],
@@ -1268,7 +1229,9 @@ class FakePool:
         # ⚠️ ЗЕРКАЛЬНО (13а.8). T132: дозапрос в ФНС читает чек по id+org,
         # а для сотрудника — ещё и по автору. Обе формы, потому что обе живут
         # в коде: отразить одну значило бы проверять половину ACL.
-        if q.startswith("SELECT * FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3"):
+        if q.startswith(
+            "SELECT * FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3"
+        ):
             for c in self.receipts:
                 if (
                     c["id"] == args[0]

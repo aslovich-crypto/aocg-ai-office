@@ -288,21 +288,49 @@ class ЖиваяБаза:
         return await self.pool.fetchval("SELECT count(*) FROM invite_links")
 
     async def добавить_чек(
-        self, id, org, amount, date, payment=None, kkt_fn=None, org_id=1, user_id=None
+        self,
+        id,
+        org,
+        amount,
+        date,
+        payment=None,
+        kkt_fn=None,
+        fd_num=None,
+        org_id=1,
+        user_id=None,
+        org_brand=None,
+        org_legal=None,
     ):
         await self.pool.execute(
-            "INSERT INTO receipts (id, org, amount, date, payment, kkt_fn, "
-            "org_id, user_id, source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'manual')",
+            "INSERT INTO receipts (id, org, amount, date, payment, kkt_fn, fd_num, "
+            "org_id, user_id, org_brand, org_legal, source) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'manual')",
             id,
             org,
             amount,
             date,
             payment,
             kkt_fn,
+            fd_num,
             org_id,
             user_id,
+            org_brand,
+            org_legal,
         )
         await self._подвести_счётчик("receipts")
+
+    async def чек(self, id):
+        строка = await self.pool.fetchrow("SELECT * FROM receipts WHERE id=$1", id)
+        return dict(строка) if строка else None
+
+    async def чеки(self):
+        return [
+            dict(r) for r in await self.pool.fetch("SELECT * FROM receipts ORDER BY id")
+        ]
+
+    async def отчёт(self, id):
+        строка = await self.pool.fetchrow("SELECT * FROM reports WHERE id=$1", id)
+        return dict(строка) if строка else None
 
     async def добавить_отчёт(
         self, id, title, user_id, total=None, status="Черновик", org_id=1, created=None

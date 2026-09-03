@@ -1,17 +1,18 @@
-"""Чужая организация: проверки, которых не было, потому что зеркало врало (T35).
+# -*- coding: utf-8 -*-
+"""Чужая организация и живой токен — НА ЖИВОЙ БАЗЕ (T35 → T36, сессия 2).
 
-Замер `tests/tools/mirror_gaps.py` нашёл пять веток FakePool, которые
-игнорировали условия доступа, стоящие в SQL роутера. Ветки исправлены —
-но само по себе это ничего не доказывает: пока не было ТЕСТА, снятие
-защиты в роутере оставалось незамеченным. Проверено мутациями: все пять
-снимались, прогон оставался зелёным.
+ПЕРЕВЕДЕНО С FakePool 03.09.2026. История файла: замер
+`tests/tools/mirror_gaps.py` нашёл пять веток FakePool, которые
+игнорировали условия доступа, стоящие в SQL роутера (T35). Ветки тогда
+исправили и закрыли тестами — но исправленное зеркало так и осталось
+ТОЛКОВАТЕЛЕМ запроса. Здесь SQL исполняется настоящим PostgreSQL,
+и толковать больше нечего.
 
-Здесь тесты на четыре из пяти. Пятый случай (состав отчётов,
-`SELECT ri.* … JOIN reports r … WHERE r.org_id=$1`) тестом НЕ закрывается,
-и это записано честно: `report_id` глобально уникален, поэтому связи чужого
-отчёта не могут «прилипнуть» к своему — ответ не меняется, даже если фильтр
-убрать. Это защита в глубину, её снятие через API не наблюдаемо. Зеркало
-теперь честное, но красным оно не станет — так и написано в T35.
+Пятый случай T35 (состав отчётов, `SELECT ri.* … JOIN reports r …
+WHERE r.org_id=$1`) тестом НЕ закрывается, и это записано честно:
+`report_id` глобально уникален, поэтому связи чужого отчёта не могут
+«прилипнуть» к своему — ответ не меняется, даже если фильтр убрать.
+Это защита в глубину, её снятие через API не наблюдаемо.
 """
 
 import pytest
@@ -36,23 +37,6 @@ async def _без_подмены(токен=None):
     )
 
 
-def _юзер(db, *, id=7, active=True, org_id=1):
-    db.users.append(
-        dict(
-            id=id,
-            first_name="Иван",
-            last_name="Петров",
-            email=f"u{id}@example.com",
-            role="admin",
-            org_id=org_id,
-            is_active=active,
-            is_email_verified=True,
-            password_hash=None,
-        )
-    )
-    return db.users[-1]
-
-
 # ───────────── ① отключённый пользователь и его живой токен ─────────────────
 
 
@@ -62,9 +46,12 @@ async def test_deactivated_user_token_stops_working(db):
 
     Пока ветка FakePool не читала `AND is_active=true`, это НЕ проверялось
     ничем: любой тест деактивации (в том числе S-29, где мы её закрывали)
-    доказывал лишь то, что флаг в базе перевернулся.
+    доказывал лишь то, что флаг в базе перевернулся. Теперь условие
+    исполняет сам PostgreSQL.
     """
-    _юзер(db, id=7, active=False)
+    await db.добавить_пользователя(
+        id=7, first_name="Иван", role="admin", is_active=False
+    )
     async with await _без_подмены(create_access_token(7)) as c:
         r = await c.get("/api/cards/")
     assert r.status_code == 401, r.text
@@ -73,7 +60,7 @@ async def test_deactivated_user_token_stops_working(db):
 @pytest.mark.asyncio
 async def test_active_user_token_works(db):
     """Положительная половина: живой пользователь ходит как раньше."""
-    _юзер(db, id=8, active=True)
+    await db.добавить_пользователя(id=8, first_name="Иван", role="admin")
     async with await _без_подмены(create_access_token(8)) as c:
         r = await c.get("/api/cards/")
     assert r.status_code == 200, r.text
@@ -84,11 +71,12 @@ async def test_active_user_token_works(db):
 
 @pytest.mark.asyncio
 async def test_card_of_other_org_cannot_be_renamed(client, db, seeded):
-    db.cards.append(dict(id=42, name="Чужая", org_id=ЧУЖАЯ, created_at=None))
+    await db.добавить_карту(id=42, name="Чужая", org_id=ЧУЖАЯ)
     r = await client.patch("/api/cards/42", json={"name": "Переименована"})
     assert r.status_code == 404, r.text
-    (чужая,) = [c for c in db.cards if c["id"] == 42]
-    assert чужая["name"] == "Чужая", "карта чужой орг не должна была измениться"
+    assert (await db.карта(42))["name"] == "Чужая", (
+        "карта чужой орг не должна была измениться"
+    )
 
 
 # ─────────────── ③ подсказка способа оплаты из чужой орг ────────────────────
@@ -103,27 +91,24 @@ async def test_payment_hint_never_comes_from_other_org(client, db):
     """
     from datetime import date
 
-    def чек(id, org_id, payment):
-        db.receipts.append(
-            dict(
-                id=id,
-                date=date(2026, 5, 10),
-                org="Лукойл",
-                amount=100.0,
-                payment=payment,
-                org_id=org_id,
-                employee=None,
-                kkt_fn=None,
-                raw_data=None,
-                source="manual",
-                photo_url=None,
-                user_id=1,
-                created_at=None,
-            )
+    # Автор чека — настоящий FK: смотрящий (id=1) должен существовать
+    # в обеих организациях... нет — user_id один, организации у ЧЕКОВ разные
+    # (у receipts.org_id внешнего ключа нет, как и в проде).
+    await db.добавить_пользователя(id=1, first_name="Админ", role="admin")
+
+    async def чек(id, org_id, payment):
+        await db.добавить_чек(
+            id=id,
+            org="Лукойл",
+            amount=100.0,
+            date=date(2026, 5, 10),
+            payment=payment,
+            org_id=org_id,
+            user_id=1,
         )
 
-    чек(90, ЧУЖАЯ, "Чужая карта")
-    чек(91, ЧУЖАЯ, "Чужая карта")
+    await чек(90, ЧУЖАЯ, "Чужая карта")
+    await чек(91, ЧУЖАЯ, "Чужая карта")
 
     пусто = await client.get("/api/receipts/suggest-payment?org=Лукойл")
     assert пусто.status_code == 200, пусто.text
@@ -131,7 +116,7 @@ async def test_payment_hint_never_comes_from_other_org(client, db):
         "своих чеков нет — подсказки быть не должно, а не «как у соседей»"
     )
 
-    чек(1, 1, "Наличные")
+    await чек(1, 1, "Наличные")
     свой = await client.get("/api/receipts/suggest-payment?org=Лукойл")
     assert свой.json()["payment"] == "Наличные", (
         "подсказка обязана считаться по своим чекам, даже если чужих больше"
@@ -145,22 +130,25 @@ async def test_payment_hint_never_comes_from_other_org(client, db):
 async def test_status_of_other_org_report_cannot_be_changed(client, db, seeded):
     from datetime import date
 
-    db.reports.append(
-        dict(
-            id=90,
-            title="Чужой отчёт",
-            status="Черновик",
-            total=0,
-            org_id=ЧУЖАЯ,
-            created=date(2026, 5, 1),
-            created_at=None,
-            user_id=99,
-        )
+    # Автор чужого отчёта обязан существовать (reports.user_id — FK),
+    # и он живёт в чужой организации: добавить_пользователя сам заведёт орг 2.
+    await db.добавить_пользователя(
+        id=99, first_name="Чужой", role="admin", org_id=ЧУЖАЯ
+    )
+    await db.добавить_отчёт(
+        id=90,
+        title="Чужой отчёт",
+        status="Черновик",
+        total=0,
+        org_id=ЧУЖАЯ,
+        user_id=99,
+        created=date(2026, 5, 1),
     )
     # Статус берётся из списка допустимых («Одобрен», не «Утверждён») —
     # иначе 422 от валидации приходит РАНЬШЕ проверки org-scope, и тест
     # доказывал бы работу Pydantic, а не изоляции организаций.
     r = await client.patch("/api/reports/90", json={"status": "Одобрен"})
     assert r.status_code == 404, r.text
-    (чужой,) = [x for x in db.reports if x["id"] == 90]
-    assert чужой["status"] == "Черновик", "статус чужого отчёта не должен меняться"
+    assert (await db.отчёт(90))["status"] == "Черновик", (
+        "статус чужого отчёта не должен меняться"
+    )
