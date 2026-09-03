@@ -1,12 +1,14 @@
+import asyncio
 import logging
 import os
 import sys
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from app.database import init_db
+from app.database import get_pool, init_db
 from app.routers import (
     receipts,
     reports,
@@ -148,4 +150,33 @@ async def health():
 
     Под общим rate-лимитом 60/мин (не под auth 5/мин — путь не /api/auth/*).
     """
+    return {"status": "ok"}
+
+
+@app.api_route("/health/db", methods=["GET", "HEAD"])
+async def health_db():
+    """Readiness: жива ли БАЗА, а не только веб-процесс (решение владельца 04.09.2026).
+
+    Зачем вторая ручка, когда есть /health: та намеренно не трогает базу —
+    и потому смерть базы или пула для монитора невидима: health зелёный,
+    а люди видят ошибку на каждом чеке. Класс «зелёный прибор при мёртвом
+    продукте» — ровно тот, что кусал весь август (T43/T46).
+
+    ⚠️ ТОЛЬКО SELECT 1, БЕЗ ВНЕШНИХ ЗАВИСИМОСТЕЙ — и это граница по решению
+    владельца: ФНС, распознавание и почта сюда не входят, чужой сбой не должен
+    красить НАШ аптайм. Ответ без деталей: текст ошибки может содержать DSN,
+    наружу уходит только слово, причина — в журнал.
+
+    HEAD обязателен (урок T46: мониторы ходят HEAD-ом, @app.get его не даёт).
+    Таймаут свой, 5 с: зависшая база без него превращала бы ответ в вечное
+    ожидание, и монитор резал бы по своему таймауту без нашего диагноза.
+    """
+    try:
+        p = await get_pool()
+        await asyncio.wait_for(p.fetchval("SELECT 1"), timeout=5)
+    except Exception:
+        logging.getLogger("app.health").warning(
+            "health/db: база не отвечает", exc_info=True
+        )
+        return JSONResponse({"status": "db_unavailable"}, status_code=503)
     return {"status": "ok"}
