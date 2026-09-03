@@ -11,8 +11,10 @@ jobs:
     runs-on: ubuntu-latest
 
     # T36 пункт 1: НАСТОЯЩИЙ PostgreSQL — одноразовый, только для прогона.
-    # Нужен шагу «SQL через настоящий PostgreSQL» ниже; сами тесты по-прежнему
-    # идут на FakePool (полный переход — пункт 2 задачи T36).
+    # Нужен шагу «SQL через настоящий PostgreSQL» ниже И живому контуру
+    # tests/pg/ (пункт 2 T36: первая сюита переведена 03.09.2026). У pytest
+    # СВОЯ база aocg_pytest — шаг sql_check обязан получить ПУСТУЮ
+    # aocg_sqlcheck, его прибор «развёртывание с нуля» иначе слепнет.
     services:
       postgres:
         image: postgres:16
@@ -41,7 +43,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      - name: База для pytest (отдельная от sql_check)
+        run: PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c 'CREATE DATABASE aocg_pytest'
+
       - name: Run tests
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/aocg_pytest
         run: pytest tests/ -v
 
       # Ловит класс, невидимый для FakePool: опечатка в имени колонки,
