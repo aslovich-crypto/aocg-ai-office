@@ -157,3 +157,93 @@ def test_алгоритм_подписи_только_из_белого_спис
         finally:
             monkeypatch.undo()
             importlib.reload(свежий)
+
+
+# ─────────── сверка окружения с описью на старте (S-49, сторож ②) ───────────
+
+
+def test_сверка_молчит_когда_всё_сошлось(caplog):
+    """Один WARNING на старт — чтобы «прибор работал» отличалось от «молчал»."""
+    from app import env_check
+
+    хорошее = {
+        "CORS_ORIGINS": "https://app.aocgai.ru",
+        "POSTBOX_SMTP_HOST": "h",
+        "POSTBOX_SMTP_USER": "u",
+        "POSTBOX_SMTP_PASSWORD": "p",
+        "POSTBOX_FROM": "f",
+        "MAX_RELAY_TOKEN": "t",
+        "S3_BUCKET": "b",
+        "S3_ENDPOINT": "e",
+        "SECURITY_AUTH_RATE_LIMIT": "10",
+    }
+    assert env_check.сверить(хорошее) == []
+    with caplog.at_level("WARNING"):
+        assert env_check.сверить_и_сказать(хорошее) == 0
+    assert any("сошлись с описью" in з.message for з in caplog.records)
+
+
+def test_сверка_называет_каждое_расхождение(caplog):
+    """⚠️ Ровно то, чего не хватало: панель против описи, видно в журнале.
+
+    Проверяется и то, что расхождение НАЗВАНО ПОИМЕННО: строка «расхождений
+    3» без имён отправила бы владельца искать вручную по всей панели.
+    """
+    from app import env_check
+
+    плохое = {
+        "SECURITY_AUTH_RATE_LIMIT": "50",  # слабее потолка
+        "SECURITY_ENFORCE_HTTPS": "false",  # защита выключена
+        "BOOTSTRAP_ADMIN_EMAIL": "chuzhoy@example.com",  # обязана быть пустой
+        "CORS_ORIGINS": "https://app.aocgai.ru",
+        "POSTBOX_SMTP_HOST": "h",
+        "POSTBOX_SMTP_USER": "u",
+        "POSTBOX_SMTP_PASSWORD": "p",
+        "POSTBOX_FROM": "f",
+        "MAX_RELAY_TOKEN": "t",
+        "S3_BUCKET": "b",
+        "S3_ENDPOINT": "e",
+    }
+    имена = {имя for имя, _видно, _угроза in env_check.сверить(плохое)}
+    assert имена == {
+        "SECURITY_AUTH_RATE_LIMIT",
+        "SECURITY_ENFORCE_HTTPS",
+        "BOOTSTRAP_ADMIN_EMAIL",
+    }
+    with caplog.at_level("WARNING"):
+        assert env_check.сверить_и_сказать(плохое) == 3
+    # getMessage() подставляет аргументы; `.message % .args` их удваивает.
+    сказано = " ".join(з.getMessage() for з in caplog.records)
+    for имя in имена:
+        assert имя in сказано, f"{имя} не назван в журнале"
+
+
+def test_секрет_в_журнал_не_попадает():
+    """Журнал деплоя читают в панели и копируют в переписку."""
+    from app import env_check
+
+    видно = env_check.показать("MAX_RELAY_TOKEN", "очень-секретное-значение")
+    assert "очень-секретное" not in видно
+    assert "задан" in видно and "24" in видно
+
+
+def test_отсутствие_переменной_с_безопасным_умолчанием_НЕ_расхождение():
+    """⚠️ Сверка владельца 04.09.2026: половины переменных в панели нет,
+
+    и это НОРМА — умолчание кода безопасно. Прибор, кричащий на каждое
+    отсутствие, научил бы не смотреть на него вовсе.
+    """
+    from app import env_check
+
+    основа = {
+        "CORS_ORIGINS": "https://app.aocgai.ru",
+        "POSTBOX_SMTP_HOST": "h",
+        "POSTBOX_SMTP_USER": "u",
+        "POSTBOX_SMTP_PASSWORD": "p",
+        "POSTBOX_FROM": "f",
+        "MAX_RELAY_TOKEN": "t",
+        "S3_BUCKET": "b",
+        "S3_ENDPOINT": "e",
+    }
+    # Ни JWT_ALGORITHM, ни сроков, ни SECURITY_* — как в панели на 04.09.2026.
+    assert env_check.сверить(основа) == []

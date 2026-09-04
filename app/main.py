@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from app.database import get_pool, init_db
+from app import env_check
 from app.routers import (
     receipts,
     reports,
@@ -74,6 +75,13 @@ async def lifespan(app: FastAPI):
     # начинает работать. Ошибка настройки обязана выглядеть как отказ старта —
     # заметный сразу, — а не как странное письмо через неделю (T62).
     auth.проверить_адрес_фронта()
+    # ⚠️ СВЕРКА ОКРУЖЕНИЯ С ОПИСЬЮ — ЕДИНСТВЕННЫЙ СПОСОБ УВИДЕТЬ ПАНЕЛЬ
+    # СНАРУЖИ (S-49, просьба владельца 04.09.2026). Доступа внутрь
+    # контейнера нет, консоли может не быть, а журнал деплоя виден в панели
+    # всегда. Старт НЕ роняем: расхождение с документом может быть
+    # осознанным, и уронить прод из-за несогласия с текстом — цена выше
+    # пользы. Говорим — решает человек.
+    env_check.сверить_и_сказать()
     await init_db()
     yield
 
