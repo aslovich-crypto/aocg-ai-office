@@ -180,7 +180,13 @@ def test_сверка_молчит_когда_всё_сошлось(caplog):
     assert env_check.сверить(хорошее) == []
     with caplog.at_level("WARNING"):
         assert env_check.сверить_и_сказать(хорошее) == 0
-    assert any("сошлись с описью" in з.message for з in caplog.records)
+    # ⚠️ Проверяем и МАРКЕР, по которому строку ищут глазами и поиском:
+    # замер владельца 04.09.2026 — в журнале 18 тысяч строк, и без рамки
+    # с номером описи сообщение не находилось вовсе.
+    сказано = " ".join(з.getMessage() for з in caplog.records)
+    assert "СОШЛОСЬ" in сказано
+    assert "AOCG-ENV-001" in сказано, "нет маркера для поиска в журнале"
+    assert "═" in сказано, "нет рамки — строка утонет между строками uvicorn"
 
 
 def test_сверка_называет_каждое_расхождение(caplog):
@@ -310,3 +316,36 @@ def test_незаданная_переменная_не_открывает_сх�
     finally:
         monkeypatch.undo()
         importlib.reload(importlib.import_module("app.main"))
+
+
+def test_нестандартное_написание_среды_не_открывает_схему(monkeypatch):
+    """⚠️ «prod», «PROD-2», опечатка — всё это боевой сервер.
+
+    Первая редакция сравнивала с «production» точно, и любое другое
+    написание открывало схему молча. Направление проверки выбрано так,
+    чтобы НЕПОНЯТНОЕ значение закрывало, а не открывало (S-49).
+    """
+    import importlib
+
+    for написание in ("prod", "PROD-2", "productoin", "боевой"):
+        monkeypatch.setenv("ENVIRONMENT", написание)
+        приложение = importlib.reload(importlib.import_module("app.main")).app
+        try:
+            assert приложение.docs_url is None, f"«{написание}» открыло схему"
+        finally:
+            monkeypatch.undo()
+            importlib.reload(importlib.import_module("app.main"))
+
+
+def test_явно_названная_не_прод_среда_схему_открывает(monkeypatch):
+    """Обратная сторона: на стенде и локально схема нужна."""
+    import importlib
+
+    for написание in ("local", "dev", "test", "staging"):
+        monkeypatch.setenv("ENVIRONMENT", написание)
+        приложение = importlib.reload(importlib.import_module("app.main")).app
+        try:
+            assert приложение.docs_url == "/docs", f"«{написание}» закрыло схему"
+        finally:
+            monkeypatch.undo()
+            importlib.reload(importlib.import_module("app.main"))

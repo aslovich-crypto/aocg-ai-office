@@ -99,7 +99,12 @@ async def lifespan(app: FastAPI):
 #
 # Умолчание выбрано «закрыто на проде», а не «открыто, пока не запретили»:
 # это ровно правило S-49 — незаданная переменная не должна ослаблять защиту.
-_прод = os.environ.get("ENVIRONMENT", "production").strip().lower() == "production"
+# ⚠️ ПРОД — ЭТО ВСЁ, ЧТО НЕ НАЗВАНО НЕ-ПРОДОМ ЯВНО (S-49). Первая редакция
+# сравнивала с «production» точно, и любое другое написание («prod», «PROD-2»,
+# опечатка) открывало схему на боевом сервере молча. Направление проверки
+# выбрано так, чтобы непонятное значение ЗАКРЫВАЛО, а не открывало.
+_НЕ_ПРОД = frozenset({"local", "dev", "development", "test", "ci", "staging"})
+_прод = os.environ.get("ENVIRONMENT", "").strip().lower() not in _НЕ_ПРОД
 _схема_открыта = (
     os.environ.get("API_DOCS_PUBLIC", "").strip().lower() in ("1", "true", "yes", "on")
     or not _прод
