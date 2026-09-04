@@ -55,8 +55,39 @@ _EMPLOYEE_VISIBLE = ("id", "first_name", "last_name", "patronymic")
 _FULL_VIEW_ROLES = ("admin", "accountant")
 
 
+# ⚠️ БЕЛЫЙ СПИСОК, А НЕ ЧЁРНЫЙ (S-72, 04.09.2026). Раньше здесь стоял
+# чёрный: «отдать всё, кроме пароля и токена подтверждения». Это не одна
+# утечка, а КЛАСС: любая новая колонка в `users` уезжает наружу сама собой,
+# и заметить это можно только вручную. Так наружу уходили `failed_attempts`
+# и `locked_until` — состояние защиты, видимое тому, от кого защищаются.
+#
+# Что осталось за списком намеренно: счётчики неудачных входов и блокировка
+# (состояние защиты), `email_verify_expires_at` и `tokens_valid_from`
+# (внутренние отметки), `password_hash` и `email_verify_token` (секреты).
+# Управляющему нужна кадровая карточка, а не внутренняя механика.
+_MANAGER_VISIBLE = (
+    "id",
+    "first_name",
+    "last_name",
+    "patronymic",
+    "email",
+    "phone",
+    "inn",
+    "region",
+    "employee_id",
+    "employee_number",
+    "role",
+    "is_active",
+    "is_email_verified",
+    "org_id",
+    "created_at",
+    "last_login_at",
+)
+
+
 def _safe(row) -> dict:
-    return {k: v for k, v in dict(row).items() if k not in _HIDDEN}
+    d = dict(row)
+    return {k: d.get(k) for k in _MANAGER_VISIBLE}
 
 
 def _by_role(row, viewer_role: Optional[str]) -> dict:
