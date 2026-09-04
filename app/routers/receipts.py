@@ -839,6 +839,38 @@ async def _drop_photo_objects(p, ids: list, user: dict) -> list:
     return failed
 
 
+async def _отчёты_чеков(
+    conn, ids: List[int], org_id: int, user_id: Optional[int] = None
+):
+    """Чек → отчёт, в котором он лежит. ОДНО место на оба пути удаления.
+
+    ⚠️ ПОЧЕМУ ОБЩАЯ, А НЕ ВТОРАЯ ТАКАЯ ЖЕ (решение владельца 04.09.2026,
+    «готовое прежде своего»). Массовое удаление блокировало чек в отчёте с
+    самого начала, одиночное — нет, и одиночное молча выкидывало чек из
+    отчёта, не пересчитывая `reports.total`. Улика с прода: отчёт id 10
+    «Проверка» — total 1.00 при пустом составе. Две копии правила разошлись
+    бы снова, поэтому проверка здесь одна и зовут её оба пути.
+
+    `user_id` — тот же охват, что у самого удаления: admin смотрит по всей
+    орг, остальные только свои чеки. Без этого чужой чек в отчёте выдал бы
+    себя названием отчёта в тексте отказа, а до сих пор чужой чек был
+    неотличим от несуществующего (anti-enumeration).
+    """
+    if not ids:
+        return {}
+    условие = "rc.org_id = $2" + (" AND rc.user_id = $3" if user_id is not None else "")
+    значения = [ids, org_id] + ([user_id] if user_id is not None else [])
+    rows = await conn.fetch(
+        f"""SELECT ri.receipt_id, rep.id AS report_id, rep.title, rep.status
+            FROM report_items ri
+            JOIN reports rep ON rep.id = ri.report_id
+            JOIN receipts rc ON rc.id = ri.receipt_id
+            WHERE ri.receipt_id = ANY($1::int[]) AND {условие}""",
+        *значения,
+    )
+    return {row["receipt_id"]: dict(row) for row in rows}
+
+
 @router.post("/bulk-delete")
 async def bulk_delete_receipts(
     body: BulkDeleteIn, user: dict = Depends(get_current_user)
@@ -861,25 +893,26 @@ async def bulk_delete_receipts(
     # Кандидаты — только чеки текущей орг; чужие id в выборку не попадают (изоляция).
     # A-ACL: admin может удалять любые в орг; employee/accountant — только свои (по
     # автору) — чужие молча отсеиваются из кандидатов, как и чужие org_id.
-    if can_delete_any(user["role"]):
+    свои_только = None if can_delete_any(user["role"]) else user["id"]
+    if свои_только is None:
         rows = await p.fetch(
-            """SELECT id, kkt_fn,
-                      EXISTS(SELECT 1 FROM report_items ri WHERE ri.receipt_id = receipts.id) AS in_report
-               FROM receipts WHERE id = ANY($1::int[]) AND org_id = $2""",
+            "SELECT id, kkt_fn FROM receipts WHERE id = ANY($1::int[]) AND org_id = $2",
             body.ids,
             org_id,
         )
     else:
         rows = await p.fetch(
-            """SELECT id, kkt_fn,
-                      EXISTS(SELECT 1 FROM report_items ri WHERE ri.receipt_id = receipts.id) AS in_report
-               FROM receipts WHERE id = ANY($1::int[]) AND org_id = $2 AND user_id = $3""",
+            "SELECT id, kkt_fn FROM receipts "
+            "WHERE id = ANY($1::int[]) AND org_id = $2 AND user_id = $3",
             body.ids,
             org_id,
-            user["id"],
+            свои_только,
         )
+    # ⚠️ «ЛЕЖИТ В ОТЧЁТЕ» СЧИТАЕТ ОДНА ФУНКЦИЯ НА ОБА ПУТИ УДАЛЕНИЯ. Раньше
+    # знание жило здесь подзапросом EXISTS, и одиночное удаление о нём не знало.
+    в_отчёте = await _отчёты_чеков(p, body.ids, org_id, свои_только)
     for row in rows:
-        if row["in_report"]:
+        if row["id"] in в_отчёте:
             blocked_in_report.append(row["id"])  # блок ВСЕГДА
         elif row["kkt_fn"] is not None and not body.force:
             blocked_fns.append(row["id"])  # ФНС-защита, пробивается force
@@ -970,6 +1003,29 @@ async def patch_receipt(
 async def delete_receipt(id: int, user: dict = Depends(get_current_user)):
     p = await get_pool()
     org_id = user["org_id"]
+    # ⚠️ ЧЕК, ЛЕЖАЩИЙ В ОТЧЁТЕ, НЕ УДАЛЯЕТСЯ — НИ В КАКОМ СТАТУСЕ ОТЧЁТА И
+    # НИКАКОЙ РОЛЬЮ, ВКЛЮЧАЯ admin (решение владельца 04.09.2026). Правило одно
+    # на всех намеренно: сумма отчёта не может зависеть от того, кто нажал
+    # «Удалить». До этой правки одиночное удаление чистило `report_items` и
+    # уходило, не трогая `reports.total`, — отчёт оставался с суммой исчезнувших
+    # чеков. Улика с прода: отчёт id 10 «Проверка», total 1.00, состав пустой.
+    # Проверка стоит ПЕРВОЙ, до удаления снимка: иначе фото уже убрано, а чек
+    # остался — «отказ» с потерей данных хуже отказа.
+    занят = (
+        await _отчёты_чеков(
+            p, [id], org_id, None if can_delete_any(user["role"]) else user["id"]
+        )
+    ).get(id)
+    if занят:
+        # Текст НАЗЫВАЕТ отчёт: человек должен знать, откуда вынимать чек,
+        # а не гадать, в каком из отчётов он лежит.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Чек входит в отчёт «{занят['title']}» — сначала уберите "
+                "его из отчёта, потом удаляйте"
+            ),
+        )
     # Снимок убираем ДО строки. Не вышло — чек НЕ удаляем и говорим об этом:
     # иначе в бакете останутся персональные данные, на которые больше ничто
     # не ссылается (S-48). Пользователь может повторить.

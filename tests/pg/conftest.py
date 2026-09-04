@@ -350,6 +350,24 @@ class ЖиваяБаза:
         )
         await self._подвести_счётчик("reports")
 
+    async def положить_в_отчёт(self, report_id, receipt_id):
+        """Связь чек→отчёт. На живой базе оба конца — настоящие FK, поэтому
+        связь без отчёта или без чека здесь не заводится (у двойника заводилась,
+        и тесты описывали состояние, которого не бывает)."""
+        await self.pool.execute(
+            "INSERT INTO report_items (report_id, receipt_id) VALUES ($1,$2)",
+            report_id,
+            receipt_id,
+        )
+
+    async def сумма_состава(self, report_id):
+        """Сколько на самом деле лежит в отчёте — по чекам, а не по снимку."""
+        return await self.pool.fetchval(
+            "SELECT COALESCE(SUM(rc.amount), 0) FROM report_items ri "
+            "JOIN receipts rc ON rc.id = ri.receipt_id WHERE ri.report_id = $1",
+            report_id,
+        )
+
 
 @pytest_asyncio.fixture
 async def db(живая_схема):

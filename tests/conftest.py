@@ -477,26 +477,56 @@ class FakePool:
                 key=lambda r: str(r["date"]),
                 reverse=True,
             )
-        if "id = ANY($1" in q and "EXISTS" in q:
-            # Bulk-delete кандидаты (фаза C): чеки своей орг из списка id + in_report.
+        if q.startswith("SELECT id, kkt_fn FROM receipts"):
+            # Bulk-delete кандидаты (фаза C): чеки своей орг из списка id.
             # Чужие id не попадают в выборку (изоляция по org_id).
             # A-ACL: для не-admin добавляется user_id=$3 — чужие по автору отсеиваются.
+            # ⚠️ `in_report` отсюда УШЁЛ 04.09.2026: «лежит ли чек в отчёте»
+            # считает общая функция `_отчёты_чеков`, одна на оба пути удаления
+            # (ветка ниже). Раньше знание жило подзапросом EXISTS здесь, и
+            # одиночное удаление о нём не знало.
             ids = args[0]
             org_id = args[1]
             user_id = args[2] if len(args) > 2 else None
             return [
-                {
-                    "id": r["id"],
-                    "kkt_fn": r.get("kkt_fn"),
-                    "in_report": any(
-                        ri["receipt_id"] == r["id"] for ri in self.report_items
-                    ),
-                }
+                {"id": r["id"], "kkt_fn": r.get("kkt_fn")}
                 for r in self.receipts
                 if r["id"] in ids
                 and r.get("org_id") == org_id
                 and (user_id is None or r.get("user_id") == user_id)
             ]
+        if q.startswith("SELECT ri.receipt_id, rep.id AS report_id"):
+            # Общая проверка «чек лежит в отчёте» — одна на одиночное и на
+            # массовое удаление. ⚠️ Охват по автору читаем ИЗ ТЕКСТА запроса,
+            # а не из длины args: зеркало, знающее условие «само», перестаёт
+            # ловить его снятие в роутере (урок M94/M95, T136).
+            ids, org_id = args[0], args[1]
+            свой = args[2] if "rc.user_id = $3" in q else None
+            найдено = []
+            for ri in self.report_items:
+                if ri["receipt_id"] not in ids:
+                    continue
+                чек = next(
+                    (r for r in self.receipts if r["id"] == ri["receipt_id"]), None
+                )
+                if not чек or чек.get("org_id") != org_id:
+                    continue
+                if свой is not None and чек.get("user_id") != свой:
+                    continue
+                отчёт = next(
+                    (x for x in self.reports if x["id"] == ri["report_id"]), None
+                )
+                if not отчёт:
+                    continue
+                найдено.append(
+                    {
+                        "receipt_id": ri["receipt_id"],
+                        "report_id": отчёт["id"],
+                        "title": отчёт.get("title"),
+                        "status": отчёт.get("status"),
+                    }
+                )
+            return найдено
         if "org_inn = $3" in q and "7 days" in q:
             # Ветка 2 — сильный composite (фаза C): ВСЕ совпадения, created_at ASC.
             # Динамический fn-фильтр: при has_reliable_fn матчим только fn-less чеки.

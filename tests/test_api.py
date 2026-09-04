@@ -1101,6 +1101,21 @@ async def test_bulk_delete_cross_org_ignored(client, db):
 async def test_bulk_delete_blocks_in_report(client, db):
     # Чек в отчёте блокируется ВСЕГДА, даже с force=true.
     _mk(db, 1, source="qr_scan", kkt_fn="FN-1")
+    # ⚠️ ОТЧЁТ ЗАВОДИМ НАСТОЯЩИЙ, А НЕ ОДНУ СВЯЗЬ. На живой базе report_items
+    # ссылается на reports внешним ключом, и связь без отчёта не существует;
+    # двойник её допускал, и тест описывал состояние, которого не бывает.
+    db.reports.append(
+        dict(
+            id=1,
+            title="Отчёт с чеком",
+            status="Черновик",
+            total=0,
+            org_id=1,
+            user_id=1,
+            created=date(2026, 7, 1),
+            created_at=datetime.utcnow(),
+        )
+    )
     db.report_items.append({"report_id": 1, "receipt_id": 1})
     resp = await client.post(
         "/api/receipts/bulk-delete", json={"ids": [1], "force": True}
@@ -1135,6 +1150,19 @@ async def test_bulk_delete_mixed_response(client, db):
     _mk(db, 1, source="manual")
     _mk(db, 2, source="qr_scan", kkt_fn="F2")
     _mk(db, 3, source="photo_ocr")
+    # Тот же довод: связь живёт только при существующем отчёте (FK на живой базе).
+    db.reports.append(
+        dict(
+            id=1,
+            title="Отчёт с чеком",
+            status="Черновик",
+            total=0,
+            org_id=1,
+            user_id=1,
+            created=date(2026, 7, 1),
+            created_at=datetime.utcnow(),
+        )
+    )
     db.report_items.append({"report_id": 1, "receipt_id": 3})
     resp = await client.post("/api/receipts/bulk-delete", json={"ids": [1, 2, 3]})
     assert resp.status_code == 200
