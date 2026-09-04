@@ -475,6 +475,28 @@ async def init_db():
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS fd_num         VARCHAR(20);
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS fpd            VARCHAR(20);
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS cashier        VARCHAR(200);
+            -- ⚠️ РАСПОЗНАННЫЕ ФД И ФПД — ПРИЗНАК ДУБЛЯ, А НЕ РЕКВИЗИТЫ (№25, Б).
+            -- Решение владельца дословно: «разрешить распознаванию читать ФД
+            -- и ФПД и использовать их ТОЛЬКО как признак дубля, НЕ как
+            -- реквизиты; ошибка в цифре тогда даёт „не дубль", а не порчу
+            -- данных».
+            --
+            -- ПОЧЕМУ ОТДЕЛЬНЫЕ КОЛОНКИ, А НЕ fd_num/fpd. Те показываются
+            -- в карточке чека как ФИСКАЛЬНЫЕ РЕКВИЗИТЫ (ReceiptDetailModal
+            -- строки «ФД №» и «ФПД»). Модель ошибается в цифре — и человек
+            -- увидит в документе неверный реквизит, не зная, что он угадан.
+            -- Это тот же класс, что подставленная карта оплаты (T153):
+            -- пометка честнее подмены, а отдельное поле честнее пометки.
+            --
+            -- В уникальный индекс (kkt_fn, fd_num) эти колонки НЕ входят —
+            -- жёсткого запрета по распознанному не будет никогда, только
+            -- предупреждение.
+            -- Откат: ALTER TABLE receipts DROP COLUMN ocr_fd, DROP COLUMN ocr_fpd;
+            --        DROP INDEX idx_receipts_ocr_fpd;
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS ocr_fd         VARCHAR(20);
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS ocr_fpd        VARCHAR(20);
+            CREATE INDEX IF NOT EXISTS idx_receipts_ocr_fpd
+                ON receipts(org_id, ocr_fpd) WHERE ocr_fpd IS NOT NULL;
 
             -- Позиции чека (1 чек → N позиций). Каскадно удаляются с чеком.
             CREATE TABLE IF NOT EXISTS receipt_items (

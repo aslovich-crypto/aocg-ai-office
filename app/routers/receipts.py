@@ -59,6 +59,12 @@ class ReceiptIn(BaseModel):
     # всё равно нужны для дедупликации и сверки с бумагой.
     fd_num: Optional[str] = None  # ФД — номер фискального документа
     fpd: Optional[str] = None  # ФПД — фискальный признак документа
+    # ⚠️ РАСПОЗНАННЫЕ ФД/ФПД — ТОЛЬКО ПРИЗНАК ДУБЛЯ (№25, мера Б). В карточку
+    # чека они не попадают и реквизитами не считаются: модель ошибается
+    # в цифре, и неверный реквизит в документе хуже отсутствующего. Ошибка
+    # в цифре даёт «не дубль» — то есть худший исход здесь безобиден.
+    ocr_fd: Optional[str] = None
+    ocr_fpd: Optional[str] = None
     raw_data: Optional[dict] = None
     source: Optional[str] = None  # 'manual' | 'qr_scan' | 'photo_ocr' | 'fns'
     photo_url: Optional[str] = None  # external URL (Cloudflare R2 etc.) when set
@@ -476,7 +482,45 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
 
     dup_confidence = dup_message = None
     similar_rows = []
-    if effective_org_inn:
+
+    # ── Ветка 1б — ПРИЗНАК ДОКУМЕНТА, РАСПОЗНАННЫЙ С КАРТИНКИ (№25, мера Б).
+    #
+    # ⚠️ ЗАЧЕМ ОНА, ЕСЛИ ЕСТЬ МЯГКИЕ ВЕТКИ НИЖЕ. Живой случай 12.08.2026:
+    # один чек сохранён ТРИЖДЫ. Мера А отвязала ключ от точной даты и закрыла
+    # первую половину случая; вторая осталась — у чеков 72 и 73 разошлась
+    # ОРГАНИЗАЦИЯ («РЕСТОРАН „САД"» против «Бар», ошибка распознавания),
+    # а мягкие ветки требуют совпадения ИНН либо суммы при одной организации.
+    # Название читает модель, и на него опираться нельзя. ФПД — не читается
+    # моделью «по смыслу»: это цифры, и у ОДНОГО документа они одни и те же,
+    # как бы модель ни прочла вывеску.
+    #
+    # ⚠️ ПРЕДУПРЕЖДЕНИЕ, А НЕ ЗАПРЕТ, И ЭТО РЕШЕНИЕ ВЛАДЕЛЬЦА. Распознанной
+    # цифре нельзя доверять настолько, чтобы отказывать человеку: ошибка
+    # в цифре даёт «не дубль» (безобидно), а вот ложный ЗАПРЕТ по угаданному
+    # числу отнял бы у человека настоящий чек.
+    #
+    # ⚠️ СРАВНИВАЕМ И С НАСТОЯЩИМ `fpd` ТОЖЕ: чек мог быть заведён по QR
+    # (реквизит настоящий), а потом сфотографирован — это тот же документ,
+    # и человеку надо про это сказать.
+    if r.ocr_fpd:
+        similar_rows = await p.fetch(
+            """SELECT id, org, amount, date, source, kkt_fn,
+                      EXISTS(SELECT 1 FROM report_items ri WHERE ri.receipt_id = receipts.id) AS in_report
+               FROM receipts
+               WHERE org_id = $1 AND (ocr_fpd = $2 OR fpd = $2)
+               ORDER BY created_at ASC""",
+            org_id,
+            r.ocr_fpd,
+        )
+        if similar_rows:
+            dup_confidence = "high"
+            dup_message = _сообщение_о_дубле(
+                similar_rows, "совпадает признак документа на чеке"
+            )
+
+    if similar_rows:
+        pass  # признак документа сильнее прочих: другие ветки не нужны
+    elif effective_org_inn:
         similar_rows = await p.fetch(
             """SELECT id, org, amount, date, source, kkt_fn,
                       EXISTS(SELECT 1 FROM report_items ri WHERE ri.receipt_id = receipts.id) AS in_report
@@ -555,11 +599,13 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                         tax_system, address, vat_0, vat_total,
                         kkt_serial, kkt_rn, fd_num, fpd, cashier, category_id, user_id,
                         vat_breakdown, photo_key,
-                        sum_vat_0, sum_no_vat
+                        sum_vat_0, sum_no_vat,
+                        ocr_fd, ocr_fpd
                     ) VALUES (
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
                         $12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
-                        $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34
+                        $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,
+                        $35,$36
                     ) RETURNING *""",
                     user["org_id"],
                     r.date,
@@ -599,6 +645,11 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                     r.photo_key,
                     parsed.get("sum_vat_0"),
                     parsed.get("sum_no_vat"),
+                    # ⚠️ ТОЛЬКО ОТ КЛИЕНТА И ТОЛЬКО ДЛЯ ДЕДУПА (№25, Б).
+                    # Из `parsed` их не берём принципиально: там данные ФНС,
+                    # и для них есть настоящие fd_num/fpd — реквизиты.
+                    r.ocr_fd,
+                    r.ocr_fpd,
                 )
                 # Позиции — best-effort: вложенная транзакция (SAVEPOINT), чтобы
                 # сбой вставки/парсинга позиций откатывал ТОЛЬКО их, а чек оставался.
@@ -924,6 +975,7 @@ async def delete_receipt(id: int, user: dict = Depends(get_current_user)):
                 )
     # Всегда 200 {"ok": True} — не палим существование чужих чеков (anti-enumeration).
     return {"ok": True}
+
 
 # ─── T132: ДОЗАПРОС В ФНС ПО СОХРАНЁННОМУ ЧЕКУ ───────────────────────────
 #

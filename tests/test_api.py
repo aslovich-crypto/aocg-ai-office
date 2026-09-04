@@ -2075,17 +2075,33 @@ async def test_suggest_payment_личная_а_не_чужая(client, db, seede
     «Корп.карта» у того же продавца не должен перевешивать мою историю."""
     for i in range(3):
         db.receipts.append(
-            dict(id=900 + i, org="Лукойл", payment="Личная 6645",
-                 date=__import__("datetime").date(2026, 8, 1 + i),
-                 amount=100.0, org_id=1, user_id=1,
-                 kkt_fn=None, raw_data=None, source="manual")
+            dict(
+                id=900 + i,
+                org="Лукойл",
+                payment="Личная 6645",
+                date=__import__("datetime").date(2026, 8, 1 + i),
+                amount=100.0,
+                org_id=1,
+                user_id=1,
+                kkt_fn=None,
+                raw_data=None,
+                source="manual",
+            )
         )
     for i in range(30):
         db.receipts.append(
-            dict(id=950 + i, org="Лукойл", payment="Корп.карта 3950",
-                 date=__import__("datetime").date(2026, 7, 1 + i % 27),
-                 amount=100.0, org_id=1, user_id=777,
-                 kkt_fn=None, raw_data=None, source="manual")
+            dict(
+                id=950 + i,
+                org="Лукойл",
+                payment="Корп.карта 3950",
+                date=__import__("datetime").date(2026, 7, 1 + i % 27),
+                amount=100.0,
+                org_id=1,
+                user_id=777,
+                kkt_fn=None,
+                raw_data=None,
+                source="manual",
+            )
         )
     resp = await client.get("/api/receipts/suggest-payment", params={"org": "Лукойл"})
     assert resp.status_code == 200
@@ -2376,7 +2392,19 @@ async def test_ocr_partial_response_fallback(client, monkeypatch):
 
 
 async def test_ocr_no_fiscal_fields_requested(client, monkeypatch):
-    """The prompt must NOT ask Claude for fiscal identifiers (OCR-unreliable)."""
+    """Промпт не просит РЕКВИЗИТЫ — но просит признак документа (№25, Б).
+
+    ⚠️ УТВЕРЖДЕНИЕ ИЗМЕНИЛОСЬ 04.09.2026, И ЭТО РЕШЕНИЕ ВЛАДЕЛЬЦА, А НЕ
+    ПОСЛАБЛЕНИЕ. Было: «не проси ничего фискального». Стало: ФН, ЗН и РН
+    по-прежнему нельзя — опечатка в них портит реквизит; а ФД и ФПД просим
+    ОТДЕЛЬНЫМИ ключами `ocr_fd`/`ocr_fpd`, которые в карточку чека не
+    попадают и реквизитами не считаются. Ошибка в цифре тогда даёт
+    «не дубль», а не ложь в документе.
+
+    Сторож остался сторожем: он всё так же требует, чтобы модель НЕ
+    заполняла настоящие `fd_num`/`fpd` — иначе распознанное поехало бы
+    в реквизиты той же дорогой, что и раньше.
+    """
     captured = {}
 
     def capture(kw):
@@ -2387,8 +2415,14 @@ async def test_ocr_no_fiscal_fields_requested(client, monkeypatch):
     files = {"file": ("r.png", io.BytesIO(_PNG_1x1), "image/png")}
     await client.post("/api/receipts/ocr/", files=files)
     prompt = captured["prompt"]
-    for key in ("kkt_fn", "kkt_rn", "kkt_serial", "fd_num", "fpd", "fiscalDriveNumber"):
-        assert key not in prompt
+    for key in ("kkt_fn", "kkt_rn", "kkt_serial", "fiscalDriveNumber"):
+        assert key not in prompt, f"{key} — реквизит, распознаванию не отдаём"
+    for реквизит in ('"fd_num"', '"fpd"'):
+        assert реквизит not in prompt, (
+            f"{реквизит} — колонка реквизита; модель заполнять её не должна"
+        )
+    for признак in ('"ocr_fd"', '"ocr_fpd"'):
+        assert признак in prompt, f"{признак} нужен для поиска повторного фото"
 
 
 # ─── POST /api/consent/ ───────────────────────────────────────────────
