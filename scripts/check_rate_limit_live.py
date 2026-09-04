@@ -59,6 +59,23 @@ def _попытка(база: str, номер: int) -> int:
         return e.code
     except Exception as e:  # noqa: BLE001 — владельцу нужна причина, не трейс
         print(f"  ✗ ПРОВЕРКА НЕ ВЫПОЛНЕНА: сеть не ответила — {type(e).__name__}: {e}")
+        # ⚠️ «Connection reset by peer» с рабочей машины — обычно НЕ прод виноват.
+        # На машине владельца включён туннель (utun6/198.18.0.1), который рвёт
+        # российские хосты; замер 04.09.2026 споткнулся ровно об это. Обход —
+        # ходить через физический интерфейс.
+        print("     Если это рабочая машина с туннелем — он рвёт российские")
+        print("     хосты. Обход тем же замером, но через физический интерфейс:")
+        print(
+            '       for i in $(seq 1 25); do curl -s -o /dev/null -w "$i:%{http_code} " \\'
+        )
+        print(
+            "         --interface en0 -X POST '%s/api/auth/login' \\"
+            % АДРЕС_ПО_УМОЛЧАНИЮ
+        )
+        print("         -H 'Content-Type: application/json' \\")
+        print(
+            '         -d "{\\"phone_or_email\\":\\"probe-$i@example.invalid\\",\\"password\\":\\"x\\"}"; done'
+        )
         sys.exit(3)
 
 
