@@ -86,7 +86,32 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="AOCG AI Офис API", lifespan=lifespan)
+# ⚠️ СХЕМА API ЗАКРЫТА НА ПРОДЕ (S-64). `/docs`, `/redoc` и `/openapi.json`
+# отдавали 200 кому угодно (замер 04.09.2026, все три). Данных это не отдаёт
+# и «утечкой» звать неверно — отдаёт СТРУКТУРУ: имена всех ручек, формы
+# запросов и ответов, включая `/internal/max/*`, вся защита которых держится
+# на одном статическом токене. Сканеру это оглавление, выданное бесплатно.
+#
+# ⚠️ ЗАКРЫТО ПЕРЕКЛЮЧАТЕЛЕМ, А НЕ НАСМЕРТЬ: схема — рабочий инструмент,
+# и отнимать его у разработки нельзя. По умолчанию ОТКРЫТО там, где
+# ENVIRONMENT не «production»; на проде закрыто. Открыть на проде можно
+# явным API_DOCS_PUBLIC=true — временно и осознанно.
+#
+# Умолчание выбрано «закрыто на проде», а не «открыто, пока не запретили»:
+# это ровно правило S-49 — незаданная переменная не должна ослаблять защиту.
+_прод = os.environ.get("ENVIRONMENT", "production").strip().lower() == "production"
+_схема_открыта = (
+    os.environ.get("API_DOCS_PUBLIC", "").strip().lower() in ("1", "true", "yes", "on")
+    or not _прод
+)
+
+app = FastAPI(
+    title="AOCG AI Офис API",
+    lifespan=lifespan,
+    docs_url="/docs" if _схема_открыта else None,
+    redoc_url="/redoc" if _схема_открыта else None,
+    openapi_url="/openapi.json" if _схема_открыта else None,
+)
 
 # Rate limiting (slowapi) — used by the login endpoint.
 app.state.limiter = auth.limiter

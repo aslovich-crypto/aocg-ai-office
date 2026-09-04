@@ -247,3 +247,66 @@ def test_отсутствие_переменной_с_безопасным_ум�
     }
     # Ни JWT_ALGORITHM, ни сроков, ни SECURITY_* — как в панели на 04.09.2026.
     assert env_check.сверить(основа) == []
+
+
+# ─────────────── схема API закрыта на проде (S-64) ───────────────────────────
+
+
+def _поднять_приложение(monkeypatch, **переменные):
+    """Пересобирает app с заданным окружением: решение принимается на импорте."""
+    import importlib
+
+    for имя, значение in переменные.items():
+        monkeypatch.setenv(имя, значение)
+    return importlib.reload(importlib.import_module("app.main")).app
+
+
+def test_схема_api_закрыта_на_проде(monkeypatch):
+    """⚠️ Оглавление всех ручек, выданное сканеру бесплатно (S-64).
+
+    Замер 04.09.2026: /docs, /redoc и /openapi.json отвечали 200 кому
+    угодно, включая формы `/internal/max/*` — тех самых, чья защита
+    держится на одном статическом токене.
+    """
+    приложение = _поднять_приложение(monkeypatch, ENVIRONMENT="production")
+    try:
+        assert приложение.docs_url is None
+        assert приложение.redoc_url is None
+        assert приложение.openapi_url is None
+    finally:
+        monkeypatch.undo()
+        import importlib
+
+        importlib.reload(importlib.import_module("app.main"))
+
+
+def test_вне_прода_схема_открыта(monkeypatch):
+    """Обратная сторона: отнимать схему у разработки нельзя."""
+    приложение = _поднять_приложение(monkeypatch, ENVIRONMENT="local")
+    try:
+        assert приложение.docs_url == "/docs"
+        assert приложение.openapi_url == "/openapi.json"
+    finally:
+        monkeypatch.undo()
+        import importlib
+
+        importlib.reload(importlib.import_module("app.main"))
+
+
+def test_незаданная_переменная_не_открывает_схему(monkeypatch):
+    """⚠️ ПРАВИЛО S-49 В ДЕЙСТВИИ: умолчание не ослабляет защиту.
+
+    ENVIRONMENT не задана — считаем, что это прод, и закрываем. Обратное
+    умолчание («открыто, пока не запретили») и есть тот класс, ради
+    которого заведена S-49.
+    """
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("API_DOCS_PUBLIC", raising=False)
+    import importlib
+
+    приложение = importlib.reload(importlib.import_module("app.main")).app
+    try:
+        assert приложение.docs_url is None
+    finally:
+        monkeypatch.undo()
+        importlib.reload(importlib.import_module("app.main"))
