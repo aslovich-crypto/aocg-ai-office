@@ -338,6 +338,25 @@ class FakePool:
         #
         # ⚠️ Условия ВЫВОДЯТСЯ ИЗ ТЕКСТА ЗАПРОСА, а не зашиты: иначе зеркало
         # фильтровало бы правильно даже на сломанном SQL (класс T136).
+        # ⚠️ ВРЕМЕННОЕ ЗЕРКАЛО (T162): чеки, ждущие ответа ФНС. Условия
+        # ВЫВОДЯТСЯ ИЗ ТЕКСТА запроса, а не зашиты, — иначе зеркало отбирало
+        # бы правильно даже на сломанном SQL. Уйдёт с переводом test_api.py.
+        if q.startswith("SELECT * FROM receipts WHERE org_id=$1 AND user_id=$2"):
+            свой = "user_id=$2" in q
+            ждут_фнс = "raw_data IS NULL" in q
+            есть_реквизиты = "kkt_fn IS NOT NULL" in q
+            отобранные = [
+                r
+                for r in self.receipts
+                if r.get("org_id") == args[0]
+                and (not свой or r.get("user_id") == args[1])
+                and (not ждут_фнс or r.get("raw_data") is None)
+                and (
+                    not есть_реквизиты
+                    or (r.get("kkt_fn") and r.get("fd_num") and r.get("fpd"))
+                )
+            ]
+            return отобранные[:5]
         if q.startswith("SELECT id FROM users WHERE org_id=$1 AND role = ANY"):
             живой = "is_active = true" in q
             кроме = "id <> COALESCE($3" in q

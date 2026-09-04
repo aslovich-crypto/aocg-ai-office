@@ -6,7 +6,7 @@ from datetime import date
 from typing import List, Optional
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import RedirectResponse, Response
 from pydantic import BaseModel
 
@@ -15,6 +15,12 @@ from app.categorization import DEFAULT_FALLBACK, categorize
 from app.database import get_pool
 from app.sql_builder import собрать_set
 from app.parsers.fns_parser import parse_fns_response
+from app.email_service import send_fns_data_email
+from app.notifications import (
+    ДАННЫЕ_ФНС_ПОЛУЧЕНЫ,
+    почты as почты_адресатов,
+    записать as записать_событие,
+)
 from app.routers.fns import спросить_фнс
 from app.parsers.items_parser import parse_fns_items, parse_ocr_items
 from app.parsers.ocr_parser import parse_ocr_response
@@ -26,6 +32,26 @@ from app.storage import s3
 PHOTO_URL_TTL_SECONDS = 300
 
 logger = logging.getLogger(__name__)
+
+
+def _фоновая_почта(отправить, *аргументы) -> None:
+    """Письмо в фоне: отказ SMTP не отменяет уже полученные данные.
+
+    ⚠️ ЗДЕСЬ НЕТ `BackgroundTasks`, И ЭТО НЕ УПРОЩЕНИЕ. Дозапрос сам живёт
+    в фоновой задаче — вложить в неё ещё одну нельзя, объект задач принадлежит
+    запросу, который уже ответил. Поток даёт то же: отправка не задерживает
+    прогон и не может его уронить.
+    """
+    import threading
+
+    def _тихо():
+        try:
+            отправить(*аргументы)
+        except Exception:  # noqa: BLE001 — чужой SMTP не наша беда
+            logger.warning("письмо не ушло: %s", отправить.__name__)
+
+    threading.Thread(target=_тихо, daemon=True).start()
+
 
 # Что PATCH /receipts/{id} вправе менять. Имя колонки в SQL берётся ТОЛЬКО
 # отсюда: пользовательская строка идентификатором не станет (T38).
@@ -72,8 +98,15 @@ class ReceiptIn(BaseModel):
 
 
 @router.get("/")
-async def get_receipts(user: dict = Depends(get_current_user)):
+async def get_receipts(
+    background: BackgroundTasks, user: dict = Depends(get_current_user)
+):
     p = await get_pool()
+    # ⚠️ ДОЗАПРОС ФНС ФОНОМ, ПОСЛЕ ОТВЕТА (T162). Человек открыл «Чеки» —
+    # заодно спрашиваем налоговую по тем чекам, что ждут её ответа. Именно
+    # фоном: список не должен ждать чужой сервер, а результат придёт
+    # событием и письмом, а не задержкой этого ответа.
+    background.add_task(дозапросить_ожидающие, p, user["org_id"], user["id"])
     # A-ACL: accountant/admin видят все чеки орг; employee — только свои (по автору).
     # Карточке чека нужно не только «занят ли», но и КУДА идти: чек лежит ровно
     # в одном отчёте (uq_report_items_receipt_id), отцепить его из карточки
@@ -1103,7 +1136,18 @@ async def refetch_fns(id: int, user: dict = Depends(get_current_user)):
     код, тело = await спросить_фнс(_строка_qr(строка))
     if код != 200:
         raise HTTPException(status_code=код, detail=тело.get("message", "Отказ ФНС"))
+    обновлённый = await _записать_ответ_фнс(p, строка, тело, user["org_id"])
+    return с_признаком_дозапроса(обновлённый)
 
+
+async def _записать_ответ_фнс(p, строка: dict, тело: dict, org_id: int):
+    """Кладёт ответ ФНС в чек. Одно место для кнопки и для автодозапроса.
+
+    ⚠️ ОБЩЕЕ ЯДРО, А НЕ КОПИЯ: ручная кнопка «Запросить ещё раз» и
+    автоматический дозапрос при заходе делают ОДНО И ТО ЖЕ. Разведи их —
+    и одна половина однажды начнёт заполнять поля иначе, а разойдутся они
+    молча (тот же довод, что у одного модуля событий на два канала).
+    """
     разобранное = parse_fns_response(тело.get("raw") or {})
     правки = {
         к: разобранное.get(к)
@@ -1115,11 +1159,67 @@ async def refetch_fns(id: int, user: dict = Depends(get_current_user)):
     правки["raw_data"] = json.dumps(тело.get("raw") or {})
 
     sets, values = собрать_set(правки, (*_ДОЗАПОЛНЯЕМЫЕ, "raw_data"))
-    обновлённый = await p.fetchrow(
+    return await p.fetchrow(
         f"UPDATE receipts SET {sets} WHERE id = ${len(values) + 1} "
         f"AND org_id = ${len(values) + 2} RETURNING *",
         *values,
-        id,
-        user["org_id"],
+        строка["id"],
+        org_id,
     )
-    return с_признаком_дозапроса(обновлённый)
+
+
+async def дозапросить_ожидающие(p, org_id: int, user_id: int) -> int:
+    """Дозапрос чеков, ждущих ответа ФНС, — фоном при заходе человека (T162).
+
+    ⚠️ ПОЧЕМУ ПРИ ЗАХОДЕ, А НЕ ПО РАСПИСАНИЮ. Планировщика в проекте нет
+    (замер 04.09.2026: ни cron, ни apscheduler), а заводить службу ради
+    задачи, которая совпадает с ритмом человека, дорого: чек ждёт данных
+    налоговой, и человек всё равно открывает приложение почти каждый день.
+    Обещание «мы сообщим» держится не на его заходе, а на ПИСЬМЕ: письмо
+    уходит из события и приходит, даже если приложение больше не открывали.
+
+    ⚠️ ФОНОМ И МОЛЧА: список чеков не должен ждать чужой сервер. Отказ ФНС
+    здесь — обычное состояние (данные ещё не появились), а не беда; в журнал
+    он идёт, наружу — нет.
+
+    ⚠️ ПОТОЛОК НА ПРОГОН: за один заход трогаем не больше пяти чеков. Иначе
+    человек с двадцатью зависшими чеками устроил бы двадцать обращений
+    к чужому сервису на каждое открытие списка.
+    """
+    ждут = await p.fetch(
+        "SELECT * FROM receipts WHERE org_id=$1 AND user_id=$2 "
+        "AND kkt_fn IS NOT NULL AND fd_num IS NOT NULL AND fpd IS NOT NULL "
+        "AND raw_data IS NULL "
+        # Не дёргаем ФНС по чеку, который только что завели: она и не успела
+        # бы его увидеть. Пятнадцать минут — та же граница, что у экрана.
+        "AND created_at < NOW() - INTERVAL '15 minutes' "
+        "ORDER BY created_at LIMIT 5",
+        org_id,
+        user_id,
+    )
+    получено = 0
+    for строка_бд in ждут:
+        строка = dict(строка_бд)
+        if not _можно_дозапросить(строка):
+            continue
+        try:
+            код, тело = await спросить_фнс(_строка_qr(строка))
+        except Exception:  # noqa: BLE001 — чужой сервис не роняет наш заход
+            logger.warning("дозапрос ФНС не состоялся, чек %s", строка["id"])
+            continue
+        if код != 200:
+            continue
+        await _записать_ответ_фнс(p, строка, тело, org_id)
+        получено += 1
+        продавец = строка.get("org") or "чек"
+        await записать_событие(
+            p,
+            адресаты=[user_id],
+            org_id=org_id,
+            вид=ДАННЫЕ_ФНС_ПОЛУЧЕНЫ,
+            заголовок=f"Данные из налоговой получены: {продавец}",
+            текст="Чек заполнен полностью — проверять руками не нужно",
+        )
+        for адрес in await почты_адресатов(p, [user_id]):
+            _фоновая_почта(send_fns_data_email, адрес, продавец)
+    return получено

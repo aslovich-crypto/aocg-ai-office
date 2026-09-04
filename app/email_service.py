@@ -209,6 +209,23 @@ def send_invite_accepted_email(to_email: str, кто: str, ссылка: str = "
     return _send(to_email, "Сотрудник принял приглашение — AOCG AI Офис", html)
 
 
+def send_fns_data_email(to_email: str, продавец: str, ссылка: str = "") -> bool:
+    """Данные по чеку пришли из налоговой (T162).
+
+    ⚠️ ПИСЬМО ДЕРЖИТ ОБЕЩАНИЕ «мы сообщим». Дозапрос идёт при заходе
+    человека в приложение, но узнать о результате он должен и НЕ заходя —
+    иначе обещание держалось бы на том, что он и так откроет приложение,
+    то есть не держалось бы вовсе.
+    """
+    кнопка = f'<p><a href="{ссылка}">Открыть чек</a></p>' if ссылка else ""
+    html = f"""<div style="font-family:Arial,sans-serif;color:#111318">
+      <h2 style="color:#15803D">Данные из налоговой получены</h2>
+      <p>Чек <b>{продавец}</b> заполнен полностью — проверять руками не нужно.</p>
+      {кнопка}
+    </div>"""
+    return _send(to_email, f"Чек дополнен данными ФНС: {продавец} — AOCG AI Офис", html)
+
+
 def send_invite_notification(
     to_email: str, invite_url: str, org_name: str, role: str
 ) -> bool:
