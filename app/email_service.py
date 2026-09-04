@@ -129,6 +129,86 @@ def send_password_reset_email(to_email: str, reset_url: str) -> bool:
     return _send(to_email, "Смена пароля — AOCG AI Офис", html)
 
 
+def send_report_status_email(
+    to_email: str, отчёт: str, статус: str, причина: str = "", ссылка: str = ""
+) -> bool:
+    """Письмо о смене статуса отчёта — второй канал того же события (T159).
+
+    ⚠️ ПРИЧИНА ОТКАЗА В ПИСЬМЕ ОБЯЗАТЕЛЬНА — требование владельца 04.09.2026:
+    «без причины человек всё равно идёт выяснять, и уведомление не экономит
+    ему ничего». Письмо без причины хуже отсутствия письма: оно тревожит
+    и не отвечает.
+
+    ⚠️ ОТКЛОНЁН — ГЛАВНОЕ ИЗ ТРЁХ ПИСЕМ, и текст это отражает: одобрение
+    приятно, но отказ означает, что человеку НЕ ВЕРНУЛИ ДЕНЬГИ, и до сих пор
+    он узнавал об этом, только зайдя в приложение по своей воле.
+    """
+    отклонён = статус == "Отклонён"
+    заголовок = "Отчёт отклонён" if отклонён else "Отчёт одобрен"
+    цвет = "#B45309" if отклонён else "#15803D"
+    объяснение = (
+        f'<p style="background:#FEF3C7;padding:12px 14px;border-radius:8px">'
+        f"<b>Причина:</b> {причина}</p>"
+        if отклонён
+        else "<p>Расходы приняты к возмещению.</p>"
+    )
+    что_делать = (
+        "<p>Исправьте отчёт и отправьте снова — он останется на месте, "
+        "заново собирать чеки не нужно.</p>"
+        if отклонён
+        else ""
+    )
+    кнопка = (
+        f'<p><a href="{ссылка}" style="background:#A4161A;color:#fff;padding:12px 22px;'
+        f'border-radius:8px;text-decoration:none;display:inline-block">Открыть отчёт</a></p>'
+        if ссылка
+        else ""
+    )
+    html = f"""<div style="font-family:Arial,sans-serif;color:#111318">
+      <h2 style="color:{цвет}">{заголовок}</h2>
+      <p>Отчёт <b>{отчёт}</b> — {статус.lower()}.</p>
+      {объяснение}
+      {что_делать}
+      {кнопка}
+    </div>"""
+    return _send(to_email, f"{заголовок}: {отчёт} — AOCG AI Офис", html)
+
+
+def send_report_submitted_email(
+    to_email: str, отчёт: str, автор: str, сумма: str = "", ссылка: str = ""
+) -> bool:
+    """Управляющему: отчёт пришёл на проверку (T159).
+
+    Без него бухгалтер узнаёт о новом отчёте, только открыв приложение, —
+    то есть проверяет вручную каждый день на случай, вдруг что-то пришло.
+    """
+    строка_суммы = f"<p>Сумма: <b>{сумма}</b></p>" if сумма else ""
+    кнопка = (
+        f'<p><a href="{ссылка}" style="background:#A4161A;color:#fff;padding:12px 22px;'
+        f'border-radius:8px;text-decoration:none;display:inline-block">Посмотреть отчёт</a></p>'
+        if ссылка
+        else ""
+    )
+    html = f"""<div style="font-family:Arial,sans-serif;color:#111318">
+      <h2 style="color:#A4161A">Отчёт на проверку</h2>
+      <p><b>{автор}</b> отправил отчёт <b>{отчёт}</b>.</p>
+      {строка_суммы}
+      {кнопка}
+    </div>"""
+    return _send(to_email, f"Отчёт на проверку: {отчёт} — AOCG AI Офис", html)
+
+
+def send_invite_accepted_email(to_email: str, кто: str, ссылка: str = "") -> bool:
+    """Управляющему: приглашённый завёл учётную запись (T159)."""
+    кнопка = f'<p><a href="{ссылка}">Список сотрудников</a></p>' if ссылка else ""
+    html = f"""<div style="font-family:Arial,sans-serif;color:#111318">
+      <h2 style="color:#A4161A">Сотрудник в организации</h2>
+      <p><b>{кто}</b> принял приглашение и завёл учётную запись.</p>
+      {кнопка}
+    </div>"""
+    return _send(to_email, "Сотрудник принял приглашение — AOCG AI Офис", html)
+
+
 def send_invite_notification(
     to_email: str, invite_url: str, org_name: str, role: str
 ) -> bool:

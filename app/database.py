@@ -493,6 +493,44 @@ async def init_db():
             -- предупреждение.
             -- Откат: ALTER TABLE receipts DROP COLUMN ocr_fd, DROP COLUMN ocr_fpd;
             --        DROP INDEX idx_receipts_ocr_fpd;
+            -- ⚠️ ПРИЧИНА ОТКАЗА — ОБЯЗАТЕЛЬНАЯ ЧАСТЬ ОТКЛОНЕНИЯ (T159).
+            -- Требование владельца 04.09.2026: «без причины человек всё равно
+            -- идёт выяснять, и уведомление не экономит ему ничего». Колонка
+            -- живёт у ОТЧЁТА, а не только в тексте письма: письмо человек
+            -- удалит, а причина нужна ему и через месяц, когда он откроет
+            -- отчёт и спросит «а что было не так».
+            -- Откат: ALTER TABLE reports DROP COLUMN reject_reason;
+            ALTER TABLE reports ADD COLUMN IF NOT EXISTS reject_reason TEXT;
+
+            -- ⚠️ СОБЫТИЯ ДЛЯ КОЛОКОЛЬЧИКА (T159). Одна строка — ОДИН АДРЕСАТ,
+            -- и это решение, а не деталь: адресат вычисляется В МОМЕНТ ЗАПИСИ,
+            -- а не при показе. Иначе сотрудник, ставший бухгалтером, увидел бы
+            -- чужую историю, а прочитанность у двух управляющих была бы общей —
+            -- «бухгалтер прочёл» гасило бы точку у администратора.
+            --
+            -- read_at, а не булев флаг: «когда прочитал» отвечает и на вопрос
+            -- «прочитал ли», и на вопрос «сколько провисело непрочитанным».
+            -- Обратное неверно, а стоит одинаково.
+            --
+            -- Откат: DROP TABLE notifications;
+            CREATE TABLE IF NOT EXISTS notifications (
+                id          SERIAL PRIMARY KEY,
+                user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                org_id      INTEGER NOT NULL,
+                kind        TEXT NOT NULL,
+                title       TEXT NOT NULL,
+                body        TEXT,
+                report_id   INTEGER REFERENCES reports(id) ON DELETE SET NULL,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                read_at     TIMESTAMPTZ
+            );
+            -- Список читается всегда одним запросом «мои непрочитанные сверху»,
+            -- поэтому индекс составной и по нему же считается точка.
+            CREATE INDEX IF NOT EXISTS idx_notifications_user
+                ON notifications(user_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_notifications_unread
+                ON notifications(user_id) WHERE read_at IS NULL;
+
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS ocr_fd         VARCHAR(20);
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS ocr_fpd        VARCHAR(20);
             CREATE INDEX IF NOT EXISTS idx_receipts_ocr_fpd

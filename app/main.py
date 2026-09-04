@@ -23,6 +23,7 @@ from app.routers import (
     categories,
     organizations,
     max_relay,
+    notifications,
     search,
 )
 from aocg_security.middleware import AOCGSecurityMiddleware
@@ -163,6 +164,7 @@ app.include_router(categories.router)
 app.include_router(organizations.router)
 app.include_router(max_relay.router)
 app.include_router(search.router)
+app.include_router(notifications.router)
 
 
 @app.get("/")

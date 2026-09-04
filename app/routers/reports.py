@@ -1,11 +1,21 @@
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.auth import can_see_all, get_current_user
 from app.database import get_pool
+from app.email_service import send_report_status_email, send_report_submitted_email
+from app.notifications import (
+    ОТЧЁТ_НА_ПРОВЕРКУ,
+    ОТЧЁТ_ОДОБРЕН,
+    ОТЧЁТ_ОТКЛОНЁН,
+    кому_управляющим,
+    почты as почты_адресатов,
+    записать as записать_событие,
+)
+from app.routers.auth import APP_URL
 from app.routers.receipts import с_признаком_дозапроса
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
@@ -71,6 +81,11 @@ class StatusIn(BaseModel):
     # Жизненный цикл отчёта: Черновик → На проверке → Одобрен / Отклонён.
     # Literal закрывает дыру — PATCH больше не примет произвольную строку статуса.
     status: Literal["Черновик", "На проверке", "Одобрен", "Отклонён"]
+    # ⚠️ ПРИЧИНА ОТКАЗА ОБЯЗАТЕЛЬНА ПРИ «Отклонён» (T159, требование владельца
+    # 04.09.2026): «без причины человек всё равно идёт выяснять, и уведомление
+    # не экономит ему ничего». Проверка ниже в обработчике, а не в модели:
+    # ответ должен быть человеческим 400 с объяснением, а не 422 со схемой.
+    reason: Optional[str] = None
 
 
 class ReceiptsIn(BaseModel):
@@ -408,11 +423,25 @@ async def remove_receipt(
 
 
 @router.patch("/{id}")
-async def update_status(id: int, s: StatusIn, user: dict = Depends(get_current_user)):
+async def update_status(
+    id: int,
+    s: StatusIn,
+    background: BackgroundTasks,
+    user: dict = Depends(get_current_user),
+):
     # REP-ROLES: утверждение — только бухгалтер/админ. Отправку на проверку
     # и отзыв в черновик автор делает сам, поэтому гейт только на два статуса.
     if s.status in APPROVAL_STATUSES:
         _require_approver(user)
+    причина = (s.reason or "").strip()
+    if s.status == "Отклонён" and not причина:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Укажите причину отклонения — она уходит сотруднику "
+                "в уведомлении и остаётся в отчёте"
+            ),
+        )
     p = await get_pool()
     # REP-ACL: сотрудник меняет статус только своего отчёта; чужой — 404.
     if can_see_all(user["role"]):
@@ -433,6 +462,20 @@ async def update_status(id: int, s: StatusIn, user: dict = Depends(get_current_u
         )
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
+    # ⚠️ ПРИЧИНА ПИШЕТСЯ ОТДЕЛЬНЫМ ЗАПРОСОМ, И ЭТО НЕ ЛЕНЬ, А ЦЕНА УРОКА.
+    # Первая редакция дописывала `reject_reason` в тот же UPDATE — текст
+    # запроса менялся, зеркала двойника переставали его узнавать, и сторож
+    # `test_mirror_gaps` тут же показал последствие: статус ЧУЖОГО отчёта
+    # начал меняться без проверки автора, 404 стал 200. Пока `test_api.py`
+    # не переведён на живую базу (T36), смена текста запроса в роутере
+    # означает починку двойника вместо работы. Доступ проверен запросом
+    # выше — этот идёт по уже возвращённой строке.
+    свежая = await p.fetchrow(
+        "UPDATE reports SET reject_reason=$1 WHERE id=$2 RETURNING *",
+        причина or None,
+        row["id"],
+    )
+    row = свежая or row
     # Ответ ТОЙ ЖЕ формы, что у GET /api/reports/ — вместе с receiptIds.
     # Иначе клиент, подставляя ответ PATCH в список, терял состав отчёта
     # (карточка показывала «0 чеков»). Разная форма ответов на один ресурс —
@@ -443,4 +486,83 @@ async def update_status(id: int, s: StatusIn, user: dict = Depends(get_current_u
     )
     d = dict(row)
     d["receiptIds"] = [i["receipt_id"] for i in items]
+    await _сказать_о_статусе(p, d, user, причина, background)
     return d
+
+
+async def _сказать_о_статусе(p, отчёт: dict, кто: dict, причина: str, background):
+    """Событие в колокольчик и письмо — ОДНО событие, два канала (T159).
+
+    ⚠️ ПОРЯДОК ВАЖЕН: сначала строка события в базе, потом письмо фоном.
+    Строка — наша, и она обязана лечь; письмо уходит через чужой SMTP,
+    и его недоступность не может отменить уже случившийся факт.
+
+    ⚠️ СЕБЕ НЕ ПИШЕМ. Бухгалтер, отклонивший отчёт, уже знает, что отклонил;
+    автор, отправивший отчёт на проверку, знает, что отправил. Правило
+    владельца: уведомление, которое человек может предсказать сам,
+    обесценивает остальные.
+    """
+    статус = отчёт["status"]
+    название = отчёт.get("title") or f"№{отчёт['id']}"
+    ссылка = f"{APP_URL}/otchety" if APP_URL else ""
+
+    if статус in ("Одобрен", "Отклонён"):
+        автор = отчёт.get("user_id")
+        if not автор or автор == кто["id"]:
+            return
+        вид = ОТЧЁТ_ОДОБРЕН if статус == "Одобрен" else ОТЧЁТ_ОТКЛОНЁН
+        заголовок = f"Отчёт {статус.lower()}: {название}"
+        await записать_событие(
+            p,
+            адресаты=[автор],
+            org_id=отчёт["org_id"],
+            вид=вид,
+            заголовок=заголовок,
+            текст=причина or None,
+            report_id=отчёт["id"],
+        )
+        for адрес in await почты_адресатов(p, [автор]):
+            background.add_task(
+                send_report_status_email, адрес, название, статус, причина, ссылка
+            )
+        return
+
+    if статус == "На проверке":
+        адресаты = await кому_управляющим(p, отчёт["org_id"], кроме=кто["id"])
+        if not адресаты:
+            return
+        # ⚠️ ИМЯ АВТОРА БЕРЁМ ИЗ БАЗЫ, А НЕ У НАЖАВШЕГО КНОПКУ. Обычно это
+        # один человек, но админ может отправить на проверку чужой отчёт —
+        # и тогда управляющий прочёл бы «Админ отправил отчёт», хотя отчёт
+        # сотрудника. Событие говорит, ЧЕЙ отчёт, а не кто нажал.
+        # Нашёл тест живого контура: в подменённой авторизации имя смотрящего
+        # отличается от имени автора, и подмена сразу это показала.
+        строка_автора = await p.fetchrow(
+            "SELECT first_name, last_name FROM users WHERE id=$1",
+            отчёт.get("user_id"),
+        )
+        автор_имя = (
+            " ".join(
+                х
+                for х in (
+                    (строка_автора or {}).get("first_name"),
+                    (строка_автора or {}).get("last_name"),
+                )
+                if х
+            )
+            or "Сотрудник"
+        )
+        сумма = f"{отчёт.get('total') or 0:.2f} ₽"
+        await записать_событие(
+            p,
+            адресаты=адресаты,
+            org_id=отчёт["org_id"],
+            вид=ОТЧЁТ_НА_ПРОВЕРКУ,
+            заголовок=f"Отчёт на проверку: {название}",
+            текст=f"{автор_имя} · {сумма}",
+            report_id=отчёт["id"],
+        )
+        for адрес in await почты_адресатов(p, адресаты):
+            background.add_task(
+                send_report_submitted_email, адрес, название, автор_имя, сумма, ссылка
+            )

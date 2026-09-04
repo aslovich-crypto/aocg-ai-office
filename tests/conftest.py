@@ -139,6 +139,7 @@ class FakePool:
         # попытки считаются отдельно от выданных ссылок, потому что попытка
         # заводится и на несуществующий адрес (иначе пороги неравны и выдают
         # наши адреса).
+        self.notifications = []  # T159, временно — до перевода test_api.py
         self.password_resets = []
         self.reset_attempts = []
         self._prid = 0
@@ -328,6 +329,35 @@ class FakePool:
         # тестами эти ветки не исполнялись ни разу (замер грепом: /api/search
         # был только в test_search.py). Мёртвая ветка двойника хуже отсутствующей:
         # она выглядит покрытием.
+        # ⚠️ ЗЕРКАЛА УВЕДОМЛЕНИЙ (T159) — ВРЕМЕННЫЕ, И ЭТО НАЗВАНО ЧЕСТНО.
+        # Мы уходим от двойника (T36): новые тесты уведомлений живут в живом
+        # контуре tests/pg, где SQL исполняется, а не толкуется. Эти две ветки
+        # нужны ровно затем, чтобы 146 тестов test_api.py, ещё не переведённых,
+        # не падали на запросах, которых двойник не знает. Уйдут вместе
+        # с переводом test_api.py.
+        #
+        # ⚠️ Условия ВЫВОДЯТСЯ ИЗ ТЕКСТА ЗАПРОСА, а не зашиты: иначе зеркало
+        # фильтровало бы правильно даже на сломанном SQL (класс T136).
+        if q.startswith("SELECT id FROM users WHERE org_id=$1 AND role = ANY"):
+            живой = "is_active = true" in q
+            кроме = "id <> COALESCE($3" in q
+            return [
+                {"id": u["id"]}
+                for u in self.users
+                if u.get("org_id") == args[0]
+                and u.get("role") in list(args[1])
+                and (not живой or u.get("is_active", True))
+                and (not кроме or u["id"] != args[2])
+            ]
+        if q.startswith("SELECT email FROM users WHERE id = ANY"):
+            живой = "is_active = true" in q
+            return [
+                {"email": u.get("email")}
+                for u in self.users
+                if u["id"] in list(args[0])
+                and (u.get("email") or "")
+                and (not живой or u.get("is_active", True))
+            ]
         if q.startswith("SELECT * FROM users WHERE org_id=$1 ORDER BY is_active DESC"):
             return sorted(
                 [u for u in self.users if u.get("org_id") == args[0]],
@@ -624,6 +654,16 @@ class FakePool:
                     r["status"] = args[0]
                     return dict(r)
             return None
+        # ⚠️ ВРЕМЕННОЕ ЗЕРКАЛО (T159): причина отказа пишется ОТДЕЛЬНЫМ
+        # запросом — так текст запроса статуса остался прежним и зеркала
+        # выше продолжают ловить доступ (см. комментарий в роутере).
+        # Уйдёт вместе с переводом test_api.py на живую базу.
+        if q.startswith("UPDATE reports SET reject_reason=$1 WHERE id=$2"):
+            for r in self.reports:
+                if r["id"] == args[1]:
+                    r["reject_reason"] = args[0]
+                    return dict(r)
+            return None
         if q.startswith("SELECT status FROM reports WHERE id=$1 AND org_id=$2"):
             return next(
                 (
@@ -897,6 +937,10 @@ class FakePool:
                 user_id=args[2] if len(args) > 2 else None,  # REP-AUTHOR
                 created=date.today(),
                 created_at=datetime.utcnow(),
+                # T159: колонка есть у всех отчётов, значит и у нового —
+                # иначе формы POST и PATCH разъезжаются, а контракт
+                # «одна форма на один ресурс» это стережёт.
+                reject_reason=None,
             )
             self.reports.append(row)
             return dict(row)
@@ -1268,6 +1312,23 @@ class FakePool:
         raise NotImplementedError(f"fetchrow: {q}")
 
     async def execute(self, query, *args):
+        # ⚠️ ВРЕМЕННОЕ ЗЕРКАЛО (T159): события уведомлений. Настоящие тесты
+        # живут в живом контуре tests/pg; здесь ветка нужна, чтобы 146 ещё
+        # не переведённых тестов не падали на незнакомом запросе.
+        if _norm(query).startswith("INSERT INTO notifications"):
+            self.notifications.append(
+                {
+                    "id": len(self.notifications) + 1,
+                    "user_id": args[0],
+                    "org_id": args[1],
+                    "kind": args[2],
+                    "title": args[3],
+                    "body": args[4],
+                    "report_id": args[5],
+                    "read_at": None,
+                }
+            )
+            return "INSERT 0 1"
         q = _norm(query)
         # ─── S-56, восстановление пароля ───
         if q.startswith("DELETE FROM reset_attempts WHERE created_at <"):

@@ -1322,7 +1322,9 @@ async def test_delete_report_rejected_ok(client, db):
     )
     rid = created.json()["id"]
     await client.patch(f"/api/reports/{rid}", json={"status": "На проверке"})
-    await client.patch(f"/api/reports/{rid}", json={"status": "Отклонён"})
+    await client.patch(
+        f"/api/reports/{rid}", json={"status": "Отклонён", "reason": "чек без НДС"}
+    )
 
     resp = await client.delete(f"/api/reports/{rid}")
     assert resp.status_code == 204
