@@ -65,7 +65,7 @@ async def test_employee_cannot_invite(client_employee, db, seeded):
     # Тест НЕ УДАЛЁН, а переведён: гейт тот же, дверь другая.
     r = await client_employee.post(
         "/api/invite/create",
-        json={"role": "admin", "email": "p@example.com"},
+        json={"role": "admin", "email": "p@example.com", "expires_hours": 24},
     )
     assert r.status_code == 403, r.text
     assert await db.число_пользователей() == 1, "пользователь не должен был создаться"
@@ -76,7 +76,8 @@ async def test_employee_cannot_invite(client_employee, db, seeded):
 async def test_accountant_cannot_invite(client_accountant, db, seeded):
     # ⚠️ Та же дверь, что у сотрудника (T104, этап ④).
     r = await client_accountant.post(
-        "/api/invite/create", json={"role": "employee", "email": "p@example.com"}
+        "/api/invite/create",
+        json={"role": "employee", "email": "p@example.com", "expires_hours": 24},
     )
     assert r.status_code == 403, r.text
 
@@ -390,7 +391,12 @@ async def test_admin_still_manages_users(client, db, seeded):
     # заводит людей, но выписывая ссылку, а не строку без пароля.
     created = await client.post(
         "/api/invite/create",
-        json={"role": "employee", "email": "p@example.com", "first_name": "Пётр"},
+        json={
+            "role": "employee",
+            "email": "p@example.com",
+            "first_name": "Пётр",
+            "expires_hours": 24,
+        },
     )
     assert created.status_code == 200, created.text
     assert created.json()["first_name"] == "Пётр"
@@ -477,7 +483,8 @@ async def test_invite_with_unknown_role_is_rejected(client, db, seeded):
     # ⚠️ S-24 ЖИВ, ТОЛЬКО ДВЕРЬ ОДНА (T104, этап ④): белый список `Role` стоит
     # на приглашении, и вторая дверь к `users.role` больше не существует.
     r = await client.post(
-        "/api/invite/create", json={"role": "суперадмин", "email": "p@example.com"}
+        "/api/invite/create",
+        json={"role": "суперадмин", "email": "p@example.com", "expires_hours": 24},
     )
     assert r.status_code == 422, r.text
     assert await db.число_пользователей() == 1, (

@@ -103,9 +103,18 @@ async def test_accountant_cannot_create_invite(client_accountant, орг):
 @pytest.mark.asyncio
 async def test_admin_creates_invite_in_own_org(client, орг):
     """Положительный случай + org_id берётся из ТОКЕНА, а не из тела."""
+    # Почта и срок здесь не украшение: без почты ссылка ОБЩАЯ, а у общей роль
+    # принудительно employee (05.09.2026) — тест про org_id проверял бы тогда
+    # не то, что заявляет.
     r = await client.post(
         "/api/invite/create",
-        json={"role": "accountant", "max_uses": 3, "org_id": ЧУЖАЯ_ОРГ},
+        json={
+            "role": "accountant",
+            "max_uses": 3,
+            "org_id": ЧУЖАЯ_ОРГ,
+            "email": "buh@example.com",
+            "expires_hours": 24,
+        },
     )
     assert r.status_code == 200, r.text
     выдано = r.json()
@@ -372,9 +381,21 @@ async def test_invite_with_unknown_role_is_rejected(client, орг):
 
 @pytest.mark.asyncio
 async def test_invite_roles_from_whitelist_still_work(client, орг):
-    """Положительная половина: все три настоящие роли выдаются как раньше."""
+    """Положительная половина: все три настоящие роли выдаются как раньше.
+
+    ⚠️ ТОЛЬКО У ИМЕННОЙ ССЫЛКИ. С 05.09.2026 роль из тела читается лишь когда
+    указана почта; общая ссылка получает employee принудительно — про неё
+    отдельный тест в tests/pg/test_invites_nature.py.
+    """
     for роль in ("employee", "accountant", "admin"):
-        r = await client.post("/api/invite/create", json={"role": роль})
+        r = await client.post(
+            "/api/invite/create",
+            json={
+                "role": роль,
+                "email": f"{роль}@example.com",
+                "expires_hours": 24,
+            },
+        )
         assert r.status_code == 200, r.text
         assert r.json()["role"] == роль
     assert [i["role"] for i in орг.invite_links] == ["employee", "accountant", "admin"]
@@ -415,7 +436,12 @@ async def test_приглашение_с_почтой_шлёт_письмо_и_�
     )
     r = await client.post(
         "/api/invite/create",
-        json={"role": "employee", "email": "Novyi@Example.COM", "first_name": "Пётр"},
+        json={
+            "role": "employee",
+            "email": "Novyi@Example.COM",
+            "first_name": "Пётр",
+            "expires_hours": 24,
+        },
     )
     assert r.status_code == 200, r.text
     d = r.json()
@@ -454,7 +480,8 @@ async def test_повторная_отправка_шлёт_ТОТ_ЖЕ_токе
     )
     создано = (
         await client.post(
-            "/api/invite/create", json={"role": "employee", "email": "a@b.ru"}
+            "/api/invite/create",
+            json={"role": "employee", "email": "a@b.ru", "expires_hours": 24},
         )
     ).json()
     ушло.clear()
@@ -480,7 +507,12 @@ async def test_повторная_отправка_без_почты_отказ�
 async def test_список_показывает_статус_и_получателя(client, db):
     await client.post(
         "/api/invite/create",
-        json={"role": "employee", "email": "kto@example.com", "first_name": "Анна"},
+        json={
+            "role": "employee",
+            "email": "kto@example.com",
+            "first_name": "Анна",
+            "expires_hours": 24,
+        },
     )
     r = await client.get("/api/invite/list")
     assert r.status_code == 200, r.text

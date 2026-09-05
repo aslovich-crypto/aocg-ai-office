@@ -221,6 +221,12 @@ async def _auth_payload(p, user_row) -> dict:
 # мало, а тупиков добавляет заметно.
 ЖИЗНЬ_ПОДТВЕРЖДЕНИЯ_ЧАСОВ = 72
 
+# Срок ОБЩЕЙ ссылки — не настройка, а часть её природы (решение владельца
+# 05.09.2026): её берёт кто угодно, кто её увидел, поэтому она живёт сутки
+# и даёт наименьшие права. Именная ссылка — другое дело: у неё есть адресат,
+# и срок ей назначает тот, кто приглашает.
+ОБЩАЯ_ССЫЛКА_ЧАСОВ = 24
+
 
 def _срок_подтверждения(auto_verify: bool):
     """Когда протухнет ссылка подтверждения. None — если её нет вовсе.
@@ -822,11 +828,32 @@ async def invite_create(
 ):
     _require_admin(user)
     token = secrets.token_urlsafe(32)
-    expires = (
-        None
-        if body.expires_hours is None
-        else datetime.now(timezone.utc) + timedelta(hours=body.expires_hours)
-    )
+    почта = (body.email or "").strip().lower() or None
+    сейчас = datetime.now(timezone.utc)
+    # ⚠️ ПРИРОДА ССЫЛКИ ВЫБИРАЕТСЯ ОДИН РАЗ, ЗДЕСЬ, И РЕШАЕТ ЕЁ ПОЧТА
+    # (решение владельца 05.09.2026). Раньше природу определяла НАЖАТАЯ
+    # КНОПКА: «Скопировать ссылку» слала `email: null`, и введённый адрес
+    # молча отбрасывался — человек этого не видел.
+    if почта is None:
+        # ОБЩАЯ ссылка: её берёт кто угодно, поэтому права наименьшие и срок
+        # короткий — оба значения ПРИНУДИТЕЛЬНЫЕ, из тела не читаются вовсе.
+        # S-24 не нарушен: `employee` в белом списке, проверка на приёме
+        # (ниже, в register_by_invite) остаётся как была.
+        роль = ROLE_EMPLOYEE
+        expires = сейчас + timedelta(hours=ОБЩАЯ_ССЫЛКА_ЧАСОВ)
+    else:
+        # ⚠️ СРОК ОБЯЗАТЕЛЕН — И ПРОВЕРЯЕТСЯ В API, А НЕ В БАЗЕ. `NOT NULL`
+        # упёрся бы в пять старых строк с пустым сроком, а трогать прод-данные
+        # — отдельное решение владельца. Замер прода 04.09.2026: 5 бессрочных
+        # ссылок из 8, включая последнюю выпущенную; вечная ссылка — это дверь,
+        # которую забыли закрыть, и никто не знает, что она открыта.
+        if body.expires_hours is None or body.expires_hours <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Укажите срок действия приглашения — бессрочных ссылок не бывает",
+            )
+        роль = body.role
+        expires = сейчас + timedelta(hours=body.expires_hours)
     p = await get_pool()
     row = await p.fetchrow(
         """INSERT INTO invite_links
@@ -835,11 +862,11 @@ async def invite_create(
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *""",
         token,
         user["org_id"],
-        body.role,
+        роль,
         user["id"],
         expires,
         body.max_uses,
-        (body.email or "").strip().lower() or None,
+        почта,
         body.first_name.strip(),
         body.last_name.strip(),
     )
@@ -858,7 +885,7 @@ async def invite_create(
             row["email"],
             ссылка,
             (орг or {}).get("name") or "организацию",
-            body.role,
+            роль,
         )
         отправлено = datetime.now(timezone.utc)
         await p.execute(
@@ -868,7 +895,10 @@ async def invite_create(
     return {
         "token": token,
         "invite_url": ссылка,
-        "role": body.role,
+        # ⚠️ ОТВЕЧАЕМ ТЕМ, ЧТО ЛЕГЛО В БАЗУ, А НЕ ТЕМ, ЧТО ПРИСЛАЛИ. У общей
+        # ссылки роль принудительная, и вернуть присланную значило бы сказать
+        # человеку неправду о только что созданном приглашении.
+        "role": row["role"],
         "max_uses": body.max_uses,
         "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
         "email": row["email"],

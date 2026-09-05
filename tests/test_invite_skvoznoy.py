@@ -100,7 +100,12 @@ async def test_ссылка_сгорела_после_прохода(client, db,
     """
     создано = await client.post(
         "/api/invite/create",
-        json={"role": "employee", "email": "first@example.com", "max_uses": 1},
+        json={
+            "role": "employee",
+            "email": "first@example.com",
+            "max_uses": 1,
+            "expires_hours": 24,
+        },
     )
     токен = создано.json()["token"]
     первый = await client.post(
