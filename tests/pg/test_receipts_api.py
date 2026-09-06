@@ -233,7 +233,6 @@ async def test_dedup_branch_0_after_90s_allows(client, db):
         kkt_fn=None,
         org_id=1,
         source="manual",
-        category="Питание",
         org_inn=None,
         created_at=old,
     )
@@ -268,7 +267,6 @@ async def test_dedup_strong_warning_photo_then_qr(client, db):
         kkt_fn=None,
         org_id=1,
         source="photo_ocr",
-        category="Питание",
         org_inn="7813679582",
         created_at=await db.момент(),
     )
@@ -309,7 +307,6 @@ async def test_dedup_strong_warning_qr_then_photo(client, db):
         kkt_fn="7380440902249741",
         org_id=1,
         source="qr_scan",
-        category="Питание",
         org_inn="7813679582",
         created_at=await db.момент(),
     )
@@ -348,7 +345,6 @@ async def test_dedup_window_7_days_strong_warning(client, db):
         kkt_fn=None,
         org_id=1,
         source="photo_ocr",
-        category="Питание",
         org_inn="7813679582",
         created_at=await db.момент(days=6),
     )
@@ -379,7 +375,6 @@ async def test_dedup_outside_7_days_no_warning(client, db):
         kkt_fn=None,
         org_id=1,
         source="photo_ocr",
-        category="Питание",
         org_inn="7813679582",
         created_at=await db.момент(days=8),
     )
@@ -411,7 +406,6 @@ async def test_dedup_weak_warning_no_inn(client, db):
         kkt_fn=None,
         org_id=1,
         source="manual",
-        category="Прочее",
         org_inn=None,
         created_at=old,
     )
@@ -445,7 +439,6 @@ async def test_dedup_invalid_inn_falls_to_weak(client, db):
         kkt_fn=None,
         org_id=1,
         source="photo_ocr",
-        category="Питание",
         org_inn=None,
         created_at=await db.момент(hours=1),
     )
@@ -479,7 +472,6 @@ async def test_dedup_category_and_payment_not_in_key(client, db):
         kkt_fn="FN-1",
         org_id=1,
         source="qr_scan",
-        category="Прочее",
         org_inn="7813679582",
         created_at=await db.момент(),
     )
@@ -513,7 +505,6 @@ async def test_dedup_patch_change_doesnt_break_dedup(client, db):
         kkt_fn=None,
         org_id=1,
         source="photo_ocr",
-        category="Не указано",
         org_inn="7813679582",
         created_at=await db.момент(),
     )
@@ -555,7 +546,6 @@ async def test_warning_similar_receipt_includes_all_fields(client, db):
         kkt_fn=None,
         org_id=1,
         source="photo_ocr",
-        category="Питание",
         org_inn="7813679582",
         created_at=await db.момент(),
     )
@@ -592,7 +582,6 @@ async def test_warning_backward_compat_id_field(client, db):
         kkt_fn=None,
         org_id=1,
         source="manual",
-        category="Прочее",
         org_inn=None,
         created_at=await db.момент(hours=2),
     )
@@ -623,7 +612,6 @@ async def _seed_photo_dup(db, *, in_report=False):
         kkt_fn=None,
         org_id=1,
         source="photo_ocr",
-        category="Питание",
         org_inn="7813679582",
         created_at=await db.момент(minutes=5),
     )
@@ -715,7 +703,6 @@ async def test_unique_violation_kkt_fn_cross_org_returns_409(client, db):
         fd_num="555",
         org_id=2,
         source="qr_scan",
-        category="Прочее",
         created_at=await db.момент(),
     )
 
@@ -885,10 +872,14 @@ async def test_photo_ocr_parses_raw_data_into_columns_and_items(client, db):
     # Двойник возвращал ровно ту строку, что положили, и проверка
     # `startswith("2026-05-26T12:41")` была зелёной по построению. Колонка
     # `receipts.datetime` — TIMESTAMPTZ, распознавание отдаёт время БЕЗ ПОЯСА
-    # («12:41» на бумажном чеке), и PostgreSQL толкует его в поясе СВОЕЙ
-    # сессии. На машине в Москве тот же чек читается как 09:41+00:00.
-    # Поэтому проверяем то, что верно везде: ответ ручки совпадает с тем, что
-    # лежит в колонке, а по часам сервера на чеке действительно 12:41.
+    # («12:41» на бумажном чеке), и PostgreSQL толкует его в поясе СВОЕЙ сессии.
+    #
+    # ⚠️ НА ПРОДЕ ЭТО НЕ ДЕФЕКТ: кластер там в UTC (замер 06.09 через бастион),
+    # и 12:41 читается как 12:41. Расходится ЛОКАЛЬНЫЙ кластер, поднятый в поясе
+    # системы: в Europe/Moscow тот же чек читается как 09:41+00:00. Проверка
+    # обязана быть верна в ОБЕИХ средах, поэтому проверяем не текст, а суть:
+    # ответ ручки совпадает с тем, что лежит в колонке, а по часам сервера на
+    # чеке действительно 12:41.
     из_базы = (await db.чек(body["id"]))["datetime"]
     assert body["datetime"] == из_базы.isoformat()
     по_часам_сервера = await db.pool.fetchval(
@@ -943,7 +934,6 @@ async def _append_receipt(db, **over):
         id=1,
         date=date(2026, 5, 20),
         org="Some Org",
-        category="Не указано",
         payment="Наличные",
         amount=500.0,
         org_id=1,
@@ -983,7 +973,7 @@ async def test_patch_category_unknown_name_falls_back_id(client, db):
 async def test_patch_payment_keeps_category_manual_and_id(client, db):
     await seed_default_categories(db.pool, ORG)
     cid = await db.id_категории("Топливо")
-    await _append_receipt(db, category="Топливо", category_id=cid)
+    await _append_receipt(db, category_id=cid)
     resp = await client.patch("/api/receipts/1", json={"payment": "Личная карта"})
     body = resp.json()
     assert body["payment"] == "Личная карта"
