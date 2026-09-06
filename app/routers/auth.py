@@ -1007,10 +1007,20 @@ async def register_by_invite(body: RegisterByInviteIn, background: BackgroundTas
                 _срок_подтверждения(auto_verify),
             )
             new_uses = inv["uses_count"] + 1
+            # ⚠️ ОТМЕТКА «КОГО ЗАВЕЛИ» ПИШЕТСЯ ТЕМ ЖЕ ЗАПРОСОМ, что и счётчик,
+            # и внутри ТОЙ ЖЕ транзакции, что создание пользователя. Отдельный
+            # запрос — даже рядом — это лишний шанс разъехаться при будущей
+            # правке; вне транзакции получился бы пользователь без отметки или
+            # отметка без пользователя.
+            # `used_at` берём NOW() БАЗЫ: это отметка о факте в самой базе, и
+            # часы базы здесь правильный источник. (У токенов наоборот — там
+            # время подписи приложения; путать эти два случая нельзя.)
             await conn.execute(
-                "UPDATE invite_links SET uses_count=$1, is_active=$2 WHERE id=$3",
+                "UPDATE invite_links SET uses_count=$1, is_active=$2, "
+                "used_by_user_id=$3, used_at=NOW() WHERE id=$4",
                 new_uses,
                 new_uses < inv["max_uses"],
+                user["id"],
                 inv["id"],
             )
 
@@ -1029,8 +1039,20 @@ async def register_by_invite(body: RegisterByInviteIn, background: BackgroundTas
 async def invite_list(user: dict = Depends(get_current_user)):
     _require_admin(user)
     p = await get_pool()
+    # ⚠️ ПОГАШЕННЫЕ ПОКАЗЫВАЕМ ТОЖЕ (решение владельца 06.09.2026). Одноразовая
+    # ссылка гаснет сразу после регистрации — при фильтре `is_active = true`
+    # колонку «кого завели» не увидеть НИКОГДА, сколько её ни заполняй, и
+    # истории приглашений не существует вовсе.
+    # ⚠️ ЖИВЫЕ ВПЕРЕДИ, ОТРАБОТАВШИЕ НИЖЕ: на проде 8 погашенных строк, и
+    # вперемешку они завалили бы собой те, с которыми ещё работают.
+    # Имя вошедшего берём JOIN-ом, а не копией в строке приглашения: имя
+    # поправят в профиле — список покажет новое, копия соврала бы.
     rows = await p.fetch(
-        "SELECT * FROM invite_links WHERE org_id=$1 AND is_active=true ORDER BY created_at DESC",
+        """SELECT il.*, u.first_name AS вошёл_имя, u.last_name AS вошёл_фамилия
+             FROM invite_links il
+             LEFT JOIN users u ON u.id = il.used_by_user_id
+            WHERE il.org_id = $1
+            ORDER BY il.is_active DESC, il.created_at DESC""",
         user["org_id"],
     )
     return [
@@ -1052,6 +1074,16 @@ async def invite_list(user: dict = Depends(get_current_user)):
             "статус": "зарегистрировался"
             if r["uses_count"] > 0
             else "приглашён, ожидает",
+            # T168, этап 4: КТО вошёл по этой ссылке. `отработала` — признак
+            # для экрана: живые ссылки и отработавшие не должны смешиваться
+            # в одну кучу.
+            "отработала": not r["is_active"],
+            "used_by_user_id": r["used_by_user_id"],
+            "used_at": r["used_at"].isoformat() if r["used_at"] else None,
+            "вошёл": (
+                " ".join(x for x in (r["вошёл_имя"], r["вошёл_фамилия"]) if x).strip()
+                or None
+            ),
         }
         for r in rows
     ]

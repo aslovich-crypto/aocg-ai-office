@@ -36,8 +36,25 @@ import asyncpg
     f"ALTER TABLE {ТАБЛИЦА} ADD COLUMN IF NOT EXISTS first_name TEXT",
     f"ALTER TABLE {ТАБЛИЦА} ADD COLUMN IF NOT EXISTS last_name  TEXT",
     f"ALTER TABLE {ТАБЛИЦА} ADD COLUMN IF NOT EXISTS sent_at    TIMESTAMPTZ",
+    # T168, этап 4: КОГО завели по этой ссылке. Связи не было вовсе — по
+    # приглашению нельзя было сказать, кто именно по нему вошёл.
+    # ⚠️ REFERENCES БЕЗ КАСКАДА (NO ACTION): база откажет в удалении человека,
+    # на которого ссылается приглашение, — висячей ссылки не будет. Настоящего
+    # DELETE FROM users в коде нет ни одного (только мягкое погашение), поэтому
+    # цена нулевая, а страховка работает: удалять придётся осознанно.
+    # ON DELETE SET NULL дешевле в моменте и хуже по сути — строка пережила бы
+    # удаление, молча потеряв единственную улику.
+    f"ALTER TABLE {ТАБЛИЦА} ADD COLUMN IF NOT EXISTS used_by_user_id INTEGER REFERENCES users(id)",
+    f"ALTER TABLE {ТАБЛИЦА} ADD COLUMN IF NOT EXISTS used_at         TIMESTAMPTZ",
 ]
-ОЖИДАЕМЫЕ = {"email", "first_name", "last_name", "sent_at"}
+ОЖИДАЕМЫЕ = {
+    "email",
+    "first_name",
+    "last_name",
+    "sent_at",
+    "used_by_user_id",
+    "used_at",
+}
 
 # ⚠️ ИНДЕКСЫ ЛЕЖАТ ЗДЕСЬ ЖЕ, И ЭТО НЕ РАСШИРЕНИЕ ОБЛАСТИ ФАЙЛА, А ЕЁ СУТЬ:
 # один список — один источник для валидации, для init_db и для теста

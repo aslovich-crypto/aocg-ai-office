@@ -308,6 +308,17 @@ async def init_db():
             ALTER TABLE invite_links ADD COLUMN IF NOT EXISTS first_name TEXT;
             ALTER TABLE invite_links ADD COLUMN IF NOT EXISTS last_name  TEXT;
             ALTER TABLE invite_links ADD COLUMN IF NOT EXISTS sent_at    TIMESTAMPTZ;
+            -- T168, этап 4: кого завели по этой ссылке. До 06.09.2026 связи
+            -- не было вовсе: по приглашению нельзя было сказать, кто по нему
+            -- вошёл, и восстановить это задним числом нечем — сопоставление
+            -- по времени на проде дало НЕВЕРНЫЙ ответ (приглашение №6 звало
+            -- одного, по времени подставлялся другой). Старые строки остаются
+            -- пустыми намеренно: догадка в базе хуже пустоты, потому что
+            -- пустоту видно, а догадку нет.
+            -- Откат: ALTER TABLE invite_links DROP COLUMN used_at;
+            --        ALTER TABLE invite_links DROP COLUMN used_by_user_id;
+            ALTER TABLE invite_links ADD COLUMN IF NOT EXISTS used_by_user_id INTEGER REFERENCES users(id);
+            ALTER TABLE invite_links ADD COLUMN IF NOT EXISTS used_at         TIMESTAMPTZ;
             -- T105/T118: одна почта — один человек. До 31.08.2026 UNIQUE
             -- на users.email не было ВООБЩЕ, и в базе жили две строки
             -- с одним адресом в разных организациях. Вход брал ПЕРВУЮ

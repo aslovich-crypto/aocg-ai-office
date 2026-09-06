@@ -78,6 +78,12 @@ def _приглашение(
         first_name="",
         last_name="",
         sent_at=None,
+        # T168, этап 4: колонки «кого завели». Как и с колонками получателя
+        # выше — без них выдача списка падала бы KeyError, и это правильно:
+        # строка приглашения обязана быть полной, иначе фикстура описывает
+        # состояние, которого в базе не бывает.
+        used_by_user_id=None,
+        used_at=None,
     )
     db.invite_links.append(row)
     return row
@@ -501,6 +507,35 @@ async def test_повторная_отправка_без_почты_отказ�
     r = await client.post(f"/api/invite/{создано['token']}/resend")
     assert r.status_code == 409, r.text
     assert "нет почты" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_отметка_кого_завели_ставится_ТЕМ_ЖЕ_запросом(client, db, орг):
+    """⚠️ ОДИН ФАКТ — ОДИН ЗАПРОС (T168, этап 4).
+
+    На живой базе «отметка в той же транзакции» и «отметка отдельным запросом
+    следом» дают одинаковый результат — различить их поведением нельзя.
+    Различает текст: двойник знает ровно те запросы, которые роутер шлёт, и
+    отдельный `UPDATE invite_links SET used_by_user_id=…` зеркала не имеет —
+    попытка его выполнить упрётся в NotImplementedError. Тот же приём, каким
+    ловили M94/M95: мутацию видно по тексту запроса, а не по итогу.
+    """
+    _приглашение(орг, token="имен", role="employee")
+    r = await client.post(
+        "/api/auth/register-by-invite",
+        json={
+            "token": "имен",
+            "email": "novyi@example.com",
+            "password": "парольдлинный",
+            "first_name": "Иван",
+        },
+    )
+    assert r.status_code == 200, r.text
+    (новый,) = [u for u in орг.users if u["email"] == "novyi@example.com"]
+    (строка,) = орг.invite_links
+    assert строка["used_by_user_id"] == новый["id"]
+    assert строка["used_at"] is not None
+    assert строка["uses_count"] == 1, "счётчик правится у ТОЙ ЖЕ строки"
 
 
 @pytest.mark.asyncio

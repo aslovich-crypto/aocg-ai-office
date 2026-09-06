@@ -303,6 +303,54 @@ class FakePool:
                 for k, ids in группы.items()
                 if len(ids) > 1
             ]
+        # ⚠️ ОТДЕЛЬНАЯ ВЕТКА, А НЕ `or` В ОДНОЙ. Двойник выбирает первую
+        # подходящую ветку, и `mirror_gaps` требует, чтобы ВСЕ литералы условия
+        # совпали: ветка с двумя `startswith` через `or` не выигрывает ни разу,
+        # запрос уходит соседней — и сторож честно сказал, что та не смотрит
+        # org_id. Один запрос — одна ветка.
+        if q.startswith("SELECT il.*, u.first_name AS"):
+            # T168, этап 4: список приглашений с именем вошедшего.
+            # ⚠️ УСЛОВИЯ ИЗ ТЕКСТА ЗАПРОСА, как и в соседней ветке: зашей
+            # org-scope здесь — и тест «не вижу чужие приглашения» станет
+            # вечнозелёным. То же и с погашенными: признак «только живые»
+            # читаем из текста, иначе мутация «список снова прячет
+            # погашенные» осталась бы зелёной.
+            свой = "il.org_id = $1" in q
+            живой = "il.is_active = true" in q
+            подобранные = [
+                i
+                for i in self.invite_links
+                if (not свой or i.get("org_id") == args[0])
+                and (not живой or i.get("is_active"))
+            ]
+            # LEFT JOIN users: имя вошедшего добираем по `used_by_user_id`,
+            # а не копией в строке приглашения — имя поправят в профиле,
+            # список обязан показать новое.
+            собранные = []
+            for i in подобранные:
+                ч = next(
+                    (u for u in self.users if u["id"] == i.get("used_by_user_id")),
+                    None,
+                )
+                собранные.append(
+                    {
+                        **i,
+                        "вошёл_имя": (ч or {}).get("first_name"),
+                        "вошёл_фамилия": (ч or {}).get("last_name"),
+                    }
+                )
+            # Живые впереди, отработавшие ниже — как в ORDER BY роутера.
+            # ⚠️ БЕЗ `if "is_active DESC" in q`: разбор двойника ходит по ВСЕМ
+            # `if` внутри метода и принял бы вложенное условие за отдельную
+            # ветку — а «is_active DESC» встречается и в запросе СПИСКА ЛЮДЕЙ.
+            # Сторожа `test_fakepool_order` и `mirror_gaps` показали это сразу:
+            # общая ветка перехватывала бы чужой запрос, и тест про org-scope
+            # людей стал бы зелёным по случайности.
+            return sorted(
+                собранные,
+                key=lambda i: (bool(i.get("is_active")), str(i["created_at"])),
+                reverse=True,
+            )
         if q.startswith("SELECT * FROM invite_links"):
             # S-31: список приглашений. ФИЛЬТРЫ БЕРУТСЯ ИЗ ТЕКСТА ЗАПРОСА,
             # а не зашиты: зашитый org-scope сделал бы тест «не вижу чужие
@@ -1051,6 +1099,11 @@ class FakePool:
                 uses_count=0,
                 is_active=True,
                 created_at=datetime.now(timezone.utc),
+                # T168, этап 4: новая строка приглашения пустая по этим полям —
+                # их заполняет только регистрация. Без них выдача списка падала
+                # KeyError: строка обязана быть полной, как в базе.
+                used_by_user_id=None,
+                used_at=None,
             )
             self.invite_links.append(row)
             return dict(row)
@@ -1503,10 +1556,19 @@ class FakePool:
                     i["sent_at"] = args[0]
             return "UPDATE 1"
         if q.startswith("UPDATE invite_links SET uses_count=$1, is_active=$2"):
+            # ⚠️ ПОРЯДОК ПАРАМЕТРОВ ЧИТАЕМ ИЗ ТЕКСТА, А НЕ ПОМНИМ. С T168/этап 4
+            # тем же запросом пишется отметка «кого завели», и `id` приглашения
+            # уехал с $3 на $4. Зеркало, помнившее старые места, молча правило
+            # бы не ту строку — сравнивало `i["id"]` с идентификатором ЧЕЛОВЕКА.
+            сотметкой = "used_by_user_id" in q
+            ид = args[3] if сотметкой else args[2]
             for i in self.invite_links:
-                if i["id"] == args[2]:
+                if i["id"] == ид:
                     i["uses_count"] = args[0]
                     i["is_active"] = args[1]
+                    if сотметкой:
+                        i["used_by_user_id"] = args[2]
+                        i["used_at"] = datetime.now(timezone.utc)
             return "UPDATE 1"
         if q.startswith("UPDATE invite_links SET is_active=false WHERE token=$1"):
             # org-scope БЕРЁТСЯ ИЗ ТЕКСТА, а не зашит (см. такую же ветку
