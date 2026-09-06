@@ -81,6 +81,30 @@ def _dup_fakerow(r, pool):
     }
 
 
+# ⚠️ ЗАХОД 4 T36, 06.09.2026: СНЯТО 38 ВЕТОК (451 строка). Двойник больше не
+# обслуживает чеки, отчёты, карты, согласия и уведомления — они переехали на
+# живой PostgreSQL (`tests/pg/`), и звать эти ветки стало некому.
+#
+# КАК ДОКАЗЫВАЛОСЬ, ЧТО ВЫЗЫВАТЬ НЕКОМУ (а не «в этот раз не вызвали»):
+#   ① прогон двойника под `sys.settrace` — тело ветки не исполнялось;
+#   ② сопоставление каждого литерального SQL приложения с ВЫИГРЫВАЮЩЕЙ веткой
+#      тем же правилом, что у самого двойника (первое совпадение);
+#   ③ прогон ЖИВОГО контура под трассировкой по `app/` — обслуживаемый веткой
+#      запрос обязан исполняться на настоящей базе. Тогда предмет переехал.
+# Веток стало 124 → 86, исполняется по-прежнему 81, пустых 43 → 5.
+#
+# ⚠️ ЧЕТЫРЕ ВЕТКИ СНЯТЫ ПО ДРУГОЙ ПРИЧИНЕ — ЗЕРКАЛО ПЕРЕЖИЛО СВОЙ ЗАПРОС:
+# `UPDATE users SET password_hash=$1 WHERE id=$2` (в коде все три запроса шире),
+# `SELECT * FROM invite_links` (список давно идёт с LEFT JOIN), `SELECT status
+# FROM reports` (в приложении нет вовсе) и `INSERT INTO users (first_name,
+# last_name, patronymic` — ручка `POST /api/users/` снесена 31.08.2026 (T104),
+# а её зеркало прожило здесь ещё неделю.
+#
+# ⚠️ ЧЕГО ТРАССИРОВКА НЕ ДОКАЗЫВАЕТ. «Никто не звал» — не то же, что «снимать
+# безопасно»: порядок веток общий, и удаление специфичной передаёт её запрос
+# более общей, у которой условий меньше. Две ветки пришлось вернуть именно
+# поэтому — сторож зеркал (T35) покраснел на снятом `user_id` и `org_id`.
+# Пять оставшихся пустых веток помечены по месту, каждая со своим доводом.
 class FakePool:
     """In-memory stand-in for the asyncpg pool.
 
@@ -159,20 +183,6 @@ class FakePool:
         # Фикс №1 фаза A: seed_default_categories использует fetchval для idempotency-
         # проверки и для INSERT ... RETURNING id групп.
         q = _norm(query)
-        # ⚠️ ЗЕРКАЛЬНО (13а.8). T119: сколько ещё активных админов в орг,
-        # кроме той строки, которую сейчас гасят или понижают.
-        # ⚠️ ПРЕФИКС ДОСЛОВНО КАК В КОДЕ: `_norm` только схлопывает пробелы,
-        # регистр не трогает. Первая редакция была написана заглавными
-        # и не совпала бы НИ РАЗУ — ветка выглядела бы рабочей и молчала.
-        if q.startswith("SELECT count(*) FROM users WHERE org_id=$1 AND role='admin'"):
-            return sum(
-                1
-                for u in self.users
-                if u.get("org_id") == args[0]
-                and u.get("role") == "admin"
-                and u.get("is_active", True)
-                and u["id"] != args[1]
-            )
         if q.startswith("SELECT EXISTS(SELECT 1 FROM categories WHERE org_id=$1"):
             return any(c.get("org_id") == args[0] for c in self.categories)
         if q.startswith("INSERT INTO category_groups"):
@@ -219,64 +229,6 @@ class FakePool:
                 ],
                 key=lambda r: str(r["date"]),
                 reverse=True,
-            )
-        if "WHERE receipts.org_id=$1 AND receipts.user_id=$2" in q:
-            # A-ACL: employee видит только свои чеки (org_id + автор).
-            return sorted(
-                [
-                    _with_in_report(r, self)
-                    for r in self.receipts
-                    if r.get("org_id") == args[0] and r.get("user_id") == args[1]
-                ],
-                key=lambda r: str(r["date"]),
-                reverse=True,
-            )
-        if q.startswith("SELECT * FROM reports WHERE org_id=$1 ORDER BY created DESC"):
-            return sorted(
-                [r for r in self.reports if r.get("org_id") == args[0]],
-                key=lambda r: str(r["created"]),
-                reverse=True,
-            )
-        # REP-ACL: сотрудник видит только свои отчёты (org + автор).
-        if q.startswith(
-            "SELECT * FROM reports WHERE org_id=$1 AND user_id=$2 ORDER BY created DESC"
-        ):
-            return sorted(
-                [
-                    r
-                    for r in self.reports
-                    if r.get("org_id") == args[0] and r.get("user_id") == args[1]
-                ],
-                key=lambda r: str(r["created"]),
-                reverse=True,
-            )
-        if q.startswith(
-            "SELECT ri.* FROM report_items ri JOIN reports r ON r.id = ri.report_id "
-            "WHERE r.org_id=$1 AND r.user_id=$2"
-        ):
-            own = {
-                r["id"]
-                for r in self.reports
-                if r.get("org_id") == args[0] and r.get("user_id") == args[1]
-            }
-            return [ri for ri in self.report_items if ri["report_id"] in own]
-        if q.startswith("SELECT ri.* FROM report_items"):
-            # T35: JOIN с reports по org БЕРЁТСЯ ИЗ ТЕКСТА. Раньше ветка
-            # отдавала состав ВСЕХ отчётов всех организаций.
-            свой = "r.org_id=$1" in q
-            свои_отчёты = {
-                r["id"] for r in self.reports if not свой or r.get("org_id") == args[0]
-            }
-            return [ri for ri in self.report_items if ri["report_id"] in свои_отчёты]
-        if q.startswith("SELECT receipt_id FROM report_items WHERE report_id=$1"):
-            return sorted(
-                [ri for ri in self.report_items if ri["report_id"] == args[0]],
-                key=lambda ri: ri["receipt_id"],
-            )
-        if q.startswith("SELECT * FROM cards WHERE org_id=$1 ORDER BY id"):
-            return sorted(
-                [c for c in self.cards if c.get("org_id") == args[0]],
-                key=lambda c: c["id"],
             )
         if q.startswith(
             "SELECT MIN(id) AS keep_id, date, amount, org, COUNT(*) AS cnt"
@@ -351,23 +303,6 @@ class FakePool:
                 key=lambda i: (bool(i.get("is_active")), str(i["created_at"])),
                 reverse=True,
             )
-        if q.startswith("SELECT * FROM invite_links"):
-            # S-31: список приглашений. ФИЛЬТРЫ БЕРУТСЯ ИЗ ТЕКСТА ЗАПРОСА,
-            # а не зашиты: зашитый org-scope сделал бы тест «не вижу чужие
-            # приглашения» ВЕЧНОЗЕЛЁНЫМ — фильтровал бы FakePool, даже если
-            # из роутера убрать «AND org_id=$1». Проверено мутацией.
-            свой = "org_id=$1" in q
-            живой = "is_active=true" in q
-            return sorted(
-                [
-                    i
-                    for i in self.invite_links
-                    if (not свой or i.get("org_id") == args[0])
-                    and (not живой or i.get("is_active"))
-                ],
-                key=lambda i: str(i["created_at"]),
-                reverse=True,
-            )
         # ⚠️ ЗЕРКАЛЬНО (13а.8). T118/④: управляющим ролям список отдаётся
         # ЦЕЛИКОМ, включая погашенных, и порядок тот же — сперва активные.
         # Порядок здесь не украшение: по нему на экране видно, что человек
@@ -405,26 +340,6 @@ class FakePool:
                 )
             ]
             return отобранные[:5]
-        if q.startswith("SELECT id FROM users WHERE org_id=$1 AND role = ANY"):
-            живой = "is_active = true" in q
-            кроме = "id <> COALESCE($3" in q
-            return [
-                {"id": u["id"]}
-                for u in self.users
-                if u.get("org_id") == args[0]
-                and u.get("role") in list(args[1])
-                and (not живой or u.get("is_active", True))
-                and (not кроме or u["id"] != args[2])
-            ]
-        if q.startswith("SELECT email FROM users WHERE id = ANY"):
-            живой = "is_active = true" in q
-            return [
-                {"email": u.get("email")}
-                for u in self.users
-                if u["id"] in list(args[0])
-                and (u.get("email") or "")
-                and (not живой or u.get("is_active", True))
-            ]
         if q.startswith("SELECT * FROM users WHERE org_id=$1 ORDER BY is_active DESC"):
             return sorted(
                 [u for u in self.users if u.get("org_id") == args[0]],
@@ -459,6 +374,9 @@ class FakePool:
                 [dict(c) for c in self.categories if c.get("org_id") == args[0]],
                 key=lambda c: (c["position"], c["id"]),
             )
+        # ⚠️ ПУСТАЯ НА ОБОИХ КОНТУРАХ (T36, заход 4). Обслуживает ручку чистки
+        # дублей (`app/routers/receipts.py:772`), которая в тестах не
+        # выполнялась никогда — замер покрытия давал у неё «только 403».
         if q.startswith("SELECT MIN(id)"):
             groups = {}
             for r in self.receipts:
@@ -473,16 +391,6 @@ class FakePool:
                 )
                 for (d, a, o), rows in groups.items()
                 if len(rows) > 1
-            ]
-        # REP-CRUD ЧП3: где уже лежат эти чеки (свой отчёт / чужой → 409).
-        if q.startswith(
-            "SELECT report_id, receipt_id FROM report_items WHERE receipt_id = ANY($1"
-        ):
-            ids = args[0]
-            return [
-                {"report_id": ri["report_id"], "receipt_id": ri["receipt_id"]}
-                for ri in self.report_items
-                if ri["receipt_id"] in ids
             ]
         if q.startswith("SELECT id, photo_key FROM receipts WHERE id = ANY($1"):
             # S-48: какие из удаляемых чеков несут снимок в хранилище.
@@ -499,32 +407,6 @@ class FakePool:
                 and (org_id is None or r.get("org_id") == org_id)
                 and (user_id is None or r.get("user_id") == user_id)
             ]
-        if q.startswith("SELECT id, user_id FROM receipts WHERE id = ANY($1"):
-            # S-15 IDOR-проверка создания отчёта: какие из запрошенных id реально
-            # принадлежат орг пользователя (чужие/несуществующие сюда не попадут).
-            # user_id — для инварианта REP-AUTHOR ЧП3 (все чеки одного автора).
-            ids, org_id = args
-            return [
-                {"id": r["id"], "user_id": r.get("user_id")}
-                for r in self.receipts
-                if r["id"] in ids and r.get("org_id") == org_id
-            ]
-        # REP-CRUD ЧП2: развёрнутые чеки в деталях отчёта. SELECT * — та же
-        # форма, что у списка чеков; A-ACL user_id=$3 для employee.
-        if "WHERE receipts.id = ANY($1" in q:
-            ids, org_id = args[0], args[1]
-            user_id = args[2] if len(args) > 2 else None
-            return sorted(
-                [
-                    _with_in_report(r, self)
-                    for r in self.receipts
-                    if r["id"] in ids
-                    and r.get("org_id") == org_id
-                    and (user_id is None or r.get("user_id") == user_id)
-                ],
-                key=lambda r: str(r["date"]),
-                reverse=True,
-            )
         if q.startswith("SELECT id, kkt_fn FROM receipts"):
             # Bulk-delete кандидаты (фаза C): чеки своей орг из списка id.
             # Чужие id не попадают в выборку (изоляция по org_id).
@@ -692,84 +574,6 @@ class FakePool:
             if new_tax is not None:
                 o["tax_system"] = new_tax
             return dict(o)
-        if q.startswith("SELECT payment FROM receipts WHERE org=$1"):
-            # T35: org-scope БЕРЁТСЯ ИЗ ТЕКСТА. Раньше ветка считала подсказку
-            # по чекам ВСЕХ организаций — то есть была позволительнее продакшена
-            # (там `AND org_id=$2` из токена), и тест «подсказка не приходит
-            # из чужой орг» не мог ни пройти честно, ни покраснеть.
-            свой = "AND org_id=$2" in q
-            # T153 Ⓑ: подсказка ЛИЧНАЯ — по тому же приёму, что org-scope:
-            # условие БЕРЁТСЯ ИЗ ТЕКСТА запроса, иначе двойник был бы
-            # позволительнее продакшена и мутация «снят user_id» не ловилась.
-            личная = "user_id=$3" in q
-            counts = {}
-            for r in self.receipts:
-                if (
-                    r["org"] == args[0]
-                    and (not свой or r.get("org_id") == args[1])
-                    and (not личная or r.get("user_id") == args[2])
-                    and r["payment"]
-                    and r["payment"] != "Не указано"
-                ):
-                    counts[r["payment"]] = counts.get(r["payment"], 0) + 1
-            return {"payment": max(counts, key=counts.get)} if counts else None
-        # REP-ACL: отчёт с author-scope (для не-can_see_all). ВАЖНО: проверка
-        # стоит ДО org-scope-варианта ниже — тот более общий по префиксу
-        # и иначе перехватил бы этот запрос, «потеряв» фильтр по автору.
-        if q.startswith(
-            "SELECT * FROM reports WHERE id=$1 AND org_id=$2 AND user_id=$3"
-        ):
-            return next(
-                (
-                    dict(r)
-                    for r in self.reports
-                    if r["id"] == args[0]
-                    and r.get("org_id") == args[1]
-                    and r.get("user_id") == args[2]
-                ),
-                None,
-            )
-        # REP-CRUD ЧП2: детали отчёта / гейт удаления (org-scope в самом SQL).
-        if q.startswith("SELECT * FROM reports WHERE id=$1 AND org_id=$2"):
-            return next(
-                (
-                    dict(r)
-                    for r in self.reports
-                    if r["id"] == args[0] and r.get("org_id") == args[1]
-                ),
-                None,
-            )
-        if q.startswith(
-            "UPDATE reports SET status=$1 WHERE id=$2 AND org_id=$3 AND user_id=$4"
-        ):
-            for r in self.reports:
-                if (
-                    r["id"] == args[1]
-                    and r.get("org_id") == args[2]
-                    and r.get("user_id") == args[3]
-                ):
-                    r["status"] = args[0]
-                    return dict(r)
-            return None
-        # ⚠️ ВРЕМЕННОЕ ЗЕРКАЛО (T159): причина отказа пишется ОТДЕЛЬНЫМ
-        # запросом — так текст запроса статуса остался прежним и зеркала
-        # выше продолжают ловить доступ (см. комментарий в роутере).
-        # Уйдёт вместе с переводом test_api.py на живую базу.
-        if q.startswith("UPDATE reports SET reject_reason=$1 WHERE id=$2"):
-            for r in self.reports:
-                if r["id"] == args[1]:
-                    r["reject_reason"] = args[0]
-                    return dict(r)
-            return None
-        if q.startswith("SELECT status FROM reports WHERE id=$1 AND org_id=$2"):
-            return next(
-                (
-                    {"status": r["status"]}
-                    for r in self.reports
-                    if r["id"] == args[0] and r.get("org_id") == args[1]
-                ),
-                None,
-            )
         if "WHERE receipts.id=$1 AND receipts.org_id=$2" in q:
             # A-ACL: enforce org_id (и user_id для employee), а не только id.
             rid = args[0]
@@ -810,19 +614,6 @@ class FakePool:
                 )
                 if r
                 else None
-            )
-        if q.startswith("SELECT id FROM receipts WHERE kkt_fn=$1 AND fd_num=$2"):
-            # Дедуп по документу — per-org, пара (kkt_fn=ФН, fd_num=ФД):
-            # WHERE kkt_fn=$1 AND fd_num=$2 AND org_id=$3.
-            return next(
-                (
-                    {"id": r["id"]}
-                    for r in self.receipts
-                    if r.get("kkt_fn") == args[0]
-                    and r.get("fd_num") == args[1]
-                    and r.get("org_id") == args[2]
-                ),
-                None,
             )
         if q.startswith("SELECT id FROM categories WHERE org_id=$1 AND name=$2"):
             # Фикс №1 фаза B: resolve_category_id — имя статьи → id per-org.
@@ -1023,60 +814,6 @@ class FakePool:
                         r[field] = args[idx]
                     return dict(r)
             return None
-        if q.startswith("INSERT INTO reports"):
-            self._repid += 1
-            row = dict(
-                id=self._repid,
-                title=args[0],
-                status="Черновик",
-                total=0,  # проставит _recalc_total, как в проде
-                org_id=args[1] if len(args) > 1 else None,
-                user_id=args[2] if len(args) > 2 else None,  # REP-AUTHOR
-                created=date.today(),
-                created_at=datetime.utcnow(),
-                # T159: колонка есть у всех отчётов, значит и у нового —
-                # иначе формы POST и PATCH разъезжаются, а контракт
-                # «одна форма на один ресурс» это стережёт.
-                reject_reason=None,
-            )
-            self.reports.append(row)
-            return dict(row)
-        # Зеркало _recalc_total: сумма чеков состава, org-scope как в SQL.
-        if q.startswith("UPDATE reports SET total"):
-            for r in self.reports:
-                if r["id"] == args[0] and r.get("org_id") == args[1]:
-                    ids = [
-                        i["receipt_id"]
-                        for i in self.report_items
-                        if i["report_id"] == r["id"]
-                    ]
-                    r["total"] = sum(
-                        float(rc["amount"])
-                        for rc in self.receipts
-                        if rc["id"] in ids and rc.get("org_id") == args[1]
-                    )
-                    return dict(r)
-            return None
-        if q.startswith("UPDATE reports SET status=$1"):
-            # T35: org-scope из текста — раньше статус менялся у отчёта
-            # ЛЮБОЙ организации по одному id. Ветка с author-scope
-            # («AND user_id=$4») стоит ВЫШЕ, эта — общая для org-варианта.
-            свой = "AND org_id=$3" in q
-            for r in self.reports:
-                if r["id"] == args[1] and (not свой or r.get("org_id") == args[2]):
-                    r["status"] = args[0]
-                    return dict(r)
-            return None
-        if q.startswith("SELECT id FROM cards WHERE id=$1 AND org_id=$2"):
-            # PATCH /api/cards/{id}/default сначала убеждается, что карта своя.
-            return next(
-                (
-                    {"id": c["id"]}
-                    for c in self.cards
-                    if c["id"] == args[0] and c.get("org_id") == args[1]
-                ),
-                None,
-            )
         # ── S-31: приглашения ───────────────────────────────────────────────
         # ⚠️ ЗЕРКАЛЬНО ПРОДАКШЕН-ЛОГИКЕ (13а.8). T104: приглашение знает,
         # кому оно выписано. Префикс сменился — теперь INSERT многострочный,
@@ -1257,73 +994,6 @@ class FakePool:
             )
             self.users.append(row)
             return dict(row)
-        if q.startswith("INSERT INTO users (first_name, last_name, patronymic"):
-            # S-29: POST /api/users/ — только admin, но FakePool про роли не знает,
-            # его дело — повторить SQL. Гейт проверяется тестами через 403.
-            self._uid += 1
-            row = dict(
-                id=self._uid,
-                first_name=args[0],
-                last_name=args[1],
-                patronymic=args[2],
-                email=args[3],
-                role=args[4],
-                org_id=args[5],
-                is_active=True,
-                password_hash=None,
-            )
-            self.users.append(row)
-            return dict(row)
-        # ⚠️ ЗЕРКАЛЬНО (13а.8) И ОБЯЗАТЕЛЬНО ВЫШЕ ОБЩЕЙ ВЕТКИ. T118/④:
-        # возврат погашенного. Общая ветка ниже разбирает `SET col=$N` и
-        # раскладывает ПОЗИЦИОННЫЕ аргументы по колонкам — а здесь значение
-        # ЛИТЕРАЛЬНОЕ (`is_active = true`), аргументы же только id и org_id.
-        # Попав в общую ветку, запрос записал бы в `is_active` идентификатор
-        # пользователя: истинный, поэтому тест бы ПРОШЁЛ, а двойник врал бы.
-        if q.startswith("UPDATE users SET is_active = true"):
-            for u in self.users:
-                if u["id"] == args[0] and u.get("org_id") == args[1]:
-                    u["is_active"] = True
-                    return dict(u)
-            return None
-        if q.startswith("UPDATE users SET") and "RETURNING *" in q:
-            # Набор колонок динамический (UPDATABLE), значения идут по порядку,
-            # последними — id и org_id.
-            cols = [
-                # T38: имя колонки берём до «=» БЕЗ оглядки на пробелы вокруг.
-                # Раньше стояло split(" = ") — двойник умел читать только один
-                # стиль записи, и переход роутеров на общий сборщик (`col=$1`)
-                # молча перестал что-либо обновлять: тесты падали не там, где
-                # была причина.
-                c.split("=")[0].strip()
-                for c in q.split("SET ", 1)[1].split(" WHERE ")[0].split(",")
-            ]
-            uid, org = args[-2], args[-1]
-            for u in self.users:
-                if u["id"] == uid and u.get("org_id") == org:
-                    for i, c in enumerate(cols):
-                        u[c] = args[i]
-                    return dict(u)
-            return None
-        if q.startswith("INSERT INTO cards"):
-            self._cid += 1
-            row = dict(
-                id=self._cid,
-                name=args[0],
-                org_id=args[1] if len(args) > 1 else None,
-                created_at=datetime.utcnow(),
-            )
-            self.cards.append(row)
-            return dict(row)
-        if q.startswith("UPDATE cards SET name=$1"):
-            # T35: org-scope из текста — раньше переименовывалась карта
-            # ЛЮБОЙ организации по одному id.
-            свой = "AND org_id=$3" in q
-            for c in self.cards:
-                if c["id"] == args[1] and (not свой or c.get("org_id") == args[2]):
-                    c["name"] = args[0]
-                    return dict(c)
-            return None
         if q.startswith("INSERT INTO user_consents"):
             self._consid += 1
             row = dict(
@@ -1374,22 +1044,14 @@ class FakePool:
                 ),
                 None,
             )
-        # ⚠️ ЗЕРКАЛЬНО ПРОДАКШЕН-ЛОГИКЕ (13а.8). T119: проверка «останется ли
-        # в организации администратор» читает роль и активность цели.
-        # Без этой ветки проверка падала NotImplementedError, и ЛЮБОЕ
-        # отключение сотрудника валилось пятисоткой — сторож поймал сразу.
-        if q.startswith("SELECT role, is_active FROM users WHERE id=$1 AND org_id=$2"):
-            return next(
-                (
-                    dict(u)
-                    for u in self.users
-                    if u["id"] == args[0] and u.get("org_id") == args[1]
-                ),
-                None,
-            )
         # ⚠️ ЗЕРКАЛЬНО (13а.8). T132: дозапрос в ФНС читает чек по id+org,
         # а для сотрудника — ещё и по автору. Обе формы, потому что обе живут
         # в коде: отразить одну значило бы проверять половину ACL.
+        # ⚠️ ПУСТАЯ НА ОБОИХ КОНТУРАХ (T36, заход 4), и это находка, а не
+        # мусор: запрос живой (`app/routers/receipts.py:1180`, дозапрос в ФНС
+        # для сотрудника), но его не исполняет НИ двойник, НИ живой контур.
+        # Снимать нельзя — «вызывать некому» здесь не доказано, доказано
+        # обратное: путь есть, а прибора на нём нет.
         if q.startswith(
             "SELECT * FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3"
         ):
@@ -1414,23 +1076,6 @@ class FakePool:
         raise NotImplementedError(f"fetchrow: {q}")
 
     async def execute(self, query, *args):
-        # ⚠️ ВРЕМЕННОЕ ЗЕРКАЛО (T159): события уведомлений. Настоящие тесты
-        # живут в живом контуре tests/pg; здесь ветка нужна, чтобы 146 ещё
-        # не переведённых тестов не падали на незнакомом запросе.
-        if _norm(query).startswith("INSERT INTO notifications"):
-            self.notifications.append(
-                {
-                    "id": len(self.notifications) + 1,
-                    "user_id": args[0],
-                    "org_id": args[1],
-                    "kind": args[2],
-                    "title": args[3],
-                    "body": args[4],
-                    "report_id": args[5],
-                    "read_at": None,
-                }
-            )
-            return "INSERT 0 1"
         q = _norm(query)
         # ─── S-56, восстановление пароля ───
         if q.startswith("DELETE FROM reset_attempts WHERE created_at <"):
@@ -1468,6 +1113,9 @@ class FakePool:
                     стр["used_at"] = args[0]
             return "UPDATE"
         if (
+            # ⚠️ ПУСТАЯ ВСЕГДА (T36, заход 4). Двойник не выполняет `init_db`, и
+            # DDL до него не доходит — ветка была пустой и до перевода. Оставлена:
+            # её предмет НЕ переезжал на живую базу, он просто не проверяется здесь.
             q.startswith(
                 ("CREATE TABLE", "ALTER TABLE", "CREATE UNIQUE INDEX", "CREATE INDEX")
             )
@@ -1481,6 +1129,9 @@ class FakePool:
         # дублей ни разу не выполнялась в тестах: замер покрытия показывал
         # у неё «только 403». Рабочая ветка — ниже, рядом с остальными
         # запросами чистки, и org-scope в ней берётся из текста запроса.
+        # ⚠️ ПУСТАЯ, НО ОСТАВЛЕНА (T36, заход 4) — тот же довод, что у ветки
+        # `UPDATE users SET is_active = false`: без неё запрос перехватывает
+        # общая ветка удаления, теряя `user_id=$3`.
         if q.startswith(
             "DELETE FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3"
         ):
@@ -1525,16 +1176,6 @@ class FakePool:
                 if not (ri["receipt_id"] == rid and ri["receipt_id"] in own)
             ]
             return "DELETE"
-        if q.startswith("INSERT INTO report_items"):
-            # Зеркало uq_report_items_receipt_id: чек живёт ровно в одном отчёте
-            # (один чек в двух авансовых отчётах = двойное возмещение).
-            if any(ri["receipt_id"] == args[1] for ri in self.report_items):
-                raise asyncpg.exceptions.UniqueViolationError(
-                    "duplicate key value violates unique constraint "
-                    '"uq_report_items_receipt_id"'
-                )
-            self.report_items.append({"report_id": args[0], "receipt_id": args[1]})
-            return "INSERT"
         if q.startswith("INSERT INTO receipt_items"):
             self.receipt_items.append(
                 {
@@ -1701,11 +1342,11 @@ class FakePool:
                     u["email_verify_token"] = args[0]
                     u["email_verify_expires_at"] = args[1]
             return "UPDATE 1"
-        if q.startswith("UPDATE users SET password_hash=$1 WHERE id=$2"):
-            for u in self.users:
-                if u["id"] == args[1]:
-                    u["password_hash"] = args[0]
-            return "UPDATE 1"
+        # ⚠️ ПУСТАЯ, НО ОСТАВЛЕНА (T36, заход 4). Трассировка показала, что
+        # тело не исполняется ни одним тестом двойника. Снять нельзя: без неё
+        # запрос уходит НИЖЕ, в общую ветку «UPDATE users SET», и та теряет
+        # `org_id=$2` — сторож зеркал (T35) на этом краснеет. Порядок веток —
+        # общий ресурс: удаление специфичной ПОВЫШАЕТ права соседней.
         if q.startswith("UPDATE users SET is_active = false"):
             for u in self.users:
                 if u["id"] == args[0] and u.get("org_id") == args[1]:
@@ -1735,24 +1376,6 @@ class FakePool:
                     for i, c in enumerate(cols):
                         u[c] = args[i]
             return "UPDATE 1"
-        if q.startswith("UPDATE cards SET is_default = (id = $1)"):
-            for c in self.cards:
-                if c.get("org_id") == args[1]:
-                    c["is_default"] = c["id"] == args[0]
-            return "UPDATE 1"
-        if q.startswith("DELETE FROM cards WHERE id=$1"):
-            # org-scope БЕРЁТСЯ ИЗ ТЕКСТА (см. правило в шапке класса): раньше
-            # ветка удаляла карту по одному id, игнорируя org_id, — то есть
-            # была ПОЗВОЛИТЕЛЬНЕЕ продакшена. Тест «чужую карту не удалили»
-            # с таким двойником не мог бы пройти, а снятие org-scope
-            # в роутере не заметил бы никто.
-            свой = "AND org_id=$2" in q
-            self.cards = [
-                c
-                for c in self.cards
-                if not (c["id"] == args[0] and (not свой or c.get("org_id") == args[1]))
-            ]
-            return "DELETE"
         if q.startswith("DELETE FROM categories WHERE id=$1 AND org_id=$2"):
             # Фаза C DELETE: только своя орг (роутер уже проверил is_default и чеки).
             cat_id, org_id = args
@@ -1762,37 +1385,6 @@ class FakePool:
                 if not (c["id"] == cat_id and c.get("org_id") == org_id)
             ]
             return "DELETE"
-        # REP-CRUD ЧП2: удаление отчёта. Состав уходит каскадом — зеркалим
-        # ON DELETE CASCADE на report_id, чеки при этом не трогаем.
-        if q.startswith("DELETE FROM reports WHERE id=$1 AND org_id=$2"):
-            before = len(self.reports)
-            self.reports = [
-                r
-                for r in self.reports
-                if not (r["id"] == args[0] and r.get("org_id") == args[1])
-            ]
-            if before != len(self.reports):
-                self.report_items = [
-                    ri for ri in self.report_items if ri["report_id"] != args[0]
-                ]
-            return f"DELETE {before - len(self.reports)}"
-        # REP-CRUD ЧП3: убрать один чек из отчёта (org-scope по чеку).
-        if q.startswith(
-            "DELETE FROM report_items WHERE report_id=$1 AND receipt_id=$2"
-        ):
-            report_id, receipt_id, org_id = args
-            own = {r["id"] for r in self.receipts if r.get("org_id") == org_id}
-            before = len(self.report_items)
-            self.report_items = [
-                ri
-                for ri in self.report_items
-                if not (
-                    ri["report_id"] == report_id
-                    and ri["receipt_id"] == receipt_id
-                    and receipt_id in own
-                )
-            ]
-            return f"DELETE {before - len(self.report_items)}"
         if q.startswith("DELETE FROM report_items WHERE receipt_id = ANY($1"):
             # Bulk (фаза C): org-безопасно — только связи чеков СВОЕЙ орг.
             ids, org_id = args
