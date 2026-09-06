@@ -269,6 +269,13 @@ class ЖиваяБаза:
         if not есть:
             await self.добавить_пользователя(id=id, **поля)
 
+    async def согласия(self):
+        """Журнал согласий (`user_consents`), в порядке записи."""
+        return [
+            dict(r)
+            for r in await self.pool.fetch("SELECT * FROM user_consents ORDER BY id")
+        ]
+
     async def отчёты(self):
         return [
             dict(r) for r in await self.pool.fetch("SELECT * FROM reports ORDER BY id")

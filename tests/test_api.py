@@ -15,46 +15,19 @@ DELETE, массовое удаление, подсказка оплаты, ис
 видимость по ролям, состав, производный `total`, скоуп receiptIds по орг.
 Живут в `tests/pg/test_reports_api.py`.
 
-Здесь остались согласия и карты (заход 3) и ручка распознавания. Ручка OCR
-оставлена намеренно: она про разбор ответа модели, базы почти не касается,
-и платить за неё подъёмом кластера незачем.
+06.09.2026, ЗАХОД 3 — сняты КАРТЫ и ЖУРНАЛ СОГЛАСИЙ (10 тестов). Живут в
+`tests/pg/test_cards_consent_api.py`.
+
+⚠️ ЧТО ОСТАЁТСЯ ЗДЕСЬ НАВСЕГДА И ПОЧЕМУ — ЧТОБЫ ЧЕРЕЗ МЕСЯЦ НЕ СОЧЛИ ЗАБЫТЫМ.
+Пятнадцать тестов ручки распознавания (`POST /api/receipts/ocr/`) на живую базу
+НЕ переводятся — решение владельца 06.09.2026. Ручка разбирает ответ модели:
+клиент Anthropic подменён целиком, ручка ничего не пишет и ничего не читает,
+база ей нужна только потому, что её требует фикстура клиента. Живой контур
+стоит подъёма кластера на прогон; платить его за проверку разбора JSON
+незачем. Это НЕ остаток перевода — это его граница.
 """
 
 from datetime import date
-
-
-from app.routers.consent import POLICY_VERSION
-
-
-# ─── GET /api/cards/ ──────────────────────────────────────────────────
-async def test_get_cards_returns_list(client, seeded):
-    resp = await client.get("/api/cards/")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert isinstance(data, list)
-    assert data[0]["name"] == "Корп.карта"
-
-
-# ─── POST /api/cards/ ─────────────────────────────────────────────────
-async def test_create_card(client):
-    resp = await client.post("/api/cards/", json={"name": "Личная Сбер"})
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["id"] > 0
-    assert body["name"] == "Личная Сбер"
-
-
-# ─── DELETE /api/cards/{id} ───────────────────────────────────────────
-async def test_delete_card(client):
-    created = await client.post("/api/cards/", json={"name": "Временная"})
-    cid = created.json()["id"]
-
-    resp = await client.delete(f"/api/cards/{cid}")
-    assert resp.status_code == 200
-    assert resp.json() == {"ok": True}
-
-    remaining = (await client.get("/api/cards/")).json()
-    assert all(c["id"] != cid for c in remaining)
 
 
 # ─── POST /api/receipts/ocr/ ──────────────────────────────────────────
@@ -362,83 +335,6 @@ async def test_ocr_no_fiscal_fields_requested(client, monkeypatch):
         )
     for признак in ('"ocr_fd"', '"ocr_fpd"'):
         assert признак in prompt, f"{признак} нужен для поиска повторного фото"
-
-
-# ─── POST /api/consent/ ───────────────────────────────────────────────
-# СТРОКА 9: субъект берётся ИЗ ТОКЕНА, адрес — ИЗ ЗАПРОСА. Клиент не может
-# быть источником доказательства о самом себе, поэтому тела эти поля больше
-# не несут (а если старый фронт их пришлёт — они игнорируются).
-async def test_post_consent_records_row(client, db):
-    resp = await client.post("/api/consent/", json={})
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["id"] > 0
-    # S-34: версия берётся из ИСТОЧНИКА, а не литералом — иначе тест
-    # становится третьей копией того же значения и расходится с ним.
-    assert body["policy_version"] == POLICY_VERSION
-    assert body["consent_at"] is not None
-    assert len(db.consents) == 1
-    # id=1 — это подменённый get_current_user в фикстуре client.
-    assert db.consents[0]["user_id"] == "1"
-    assert "Шукалович" in db.consents[0]["consent_text"]
-
-
-async def test_post_consent_ignores_subject_from_body(client, db):
-    """Подсунуть чужой user_id через тело нельзя — иначе запись подделывается.
-
-    Именно так и появились девятнадцать легаси-строк «local_user»: значение
-    приходило от клиента, и журнал не опознаёт по ним никого.
-    """
-    resp = await client.post(
-        "/api/consent/",
-        json={"user_id": "local_user", "ip_address": "203.0.113.4"},
-    )
-    assert resp.status_code == 200
-    assert db.consents[0]["user_id"] == "1", "субъект обязан приходить из токена"
-    assert db.consents[0]["ip_address"] != "203.0.113.4", (
-        "адрес обязан браться из запроса, а не из тела"
-    )
-
-
-async def test_post_consent_records_client_address(client, db):
-    """Адрес пишется сервером. В тестах соединение локальное — важно, что
-    поле ЗАПОЛНЕНО и взято не из тела."""
-    await client.post("/api/consent/", json={})
-    assert db.consents[0]["ip_address"], "адрес обязан проставиться"
-
-
-async def test_post_consent_appends_on_reagree(client, db):
-    """Re-agreement is intentional — we append rather than upsert."""
-    await client.post("/api/consent/", json={})
-    await client.post("/api/consent/", json={})
-    assert len(db.consents) == 2
-
-
-# ─── GET /api/consent/{user_id} ───────────────────────────────────────
-async def test_get_consent_returns_null_when_none(client):
-    resp = await client.get("/api/consent/never_consented")
-    assert resp.status_code == 200
-    assert resp.json() is None
-
-
-async def test_get_consent_returns_latest(client, db):
-    await client.post("/api/consent/", json={})
-    second = await client.post("/api/consent/", json={})
-    resp = await client.get("/api/consent/1")
-    assert resp.status_code == 200
-    body = resp.json()
-    # 'latest' = highest id, which the POST returned
-    assert body["id"] == second.json()["id"]
-    # S-34: версия берётся из ИСТОЧНИКА, а не литералом — иначе тест
-    # становится третьей копией того же значения и расходится с ним.
-    assert body["policy_version"] == POLICY_VERSION
-
-
-async def test_get_consent_isolates_users(client, db):
-    await client.post("/api/consent/", json={})
-    resp = await client.get("/api/consent/bob")
-    assert resp.status_code == 200
-    assert resp.json() is None
 
 
 # ─── строка 24: неправдоподобная дата попадает в warnings ручки OCR ───
