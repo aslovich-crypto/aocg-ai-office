@@ -206,6 +206,78 @@ def сверить(имя: str, факт, ждём) -> bool:
     return False
 
 
+# ─── КОНТРАКТ: наборы, у которых источник — САМ КОД, а не JSON (T39) ──────
+#
+# ⚠️ ПОЧЕМУ НЕ ВТОРОЙ JSON-ИСТОЧНИК. У статусов отчёта источник уже есть и
+# единственный — `Literal` в модели `StatusIn` (`reports.py`), по нему сервер
+# ОТВЕРГАЕТ запрос. У источников чека канон заведён кортежем `SOURCES`
+# (`receipts.py`, T42). Завести рядом JSON значило бы создать ВТОРОЙ источник
+# того же смысла — ровно то, от чего лечимся: решение владельца по ролям
+# 06.09.2026 звучит «словарь сверяет, а не копирует».
+#
+# ⚠️ ОТДЕЛЬНЫЙ ФАЙЛ НА КАЖДЫЙ НАБОР, А НЕ РАЗДЕЛЫ В ОДНОМ. Довод владельца
+# (06.09.2026, по налогам): разделы однажды перепутают, и ошибка будет
+# молчаливой. Здесь то же: статусы отчёта и источники чека — разные контракты.
+КОНТРАКТ_JS_ОТН = os.path.join("lib", "contract.js")
+
+
+def контрактные_наборы() -> dict:
+    """Каноны ИЗ КОДА бэкенда: импортом, а не разбором текста."""
+    os.environ.setdefault("JWT_SECRET_KEY", "gen-dictionaries-only")
+    # Генератор лежит в tools/, а пакет `app` — в корне: путь добавляем явно,
+    # иначе импорт работает только при запуске из корня.
+    if КОРЕНЬ not in sys.path:
+        sys.path.insert(0, КОРЕНЬ)
+    from typing import get_args
+
+    from app.routers.receipts import DEFAULT_SOURCE, SOURCES
+    from app.routers.reports import StatusIn
+
+    статусы = list(get_args(StatusIn.model_fields["status"].annotation))
+    return {
+        "report_statuses": статусы,
+        "receipt_sources": list(SOURCES),
+        "default_source": DEFAULT_SOURCE,
+    }
+
+
+def собрать_контракт_js(наборы: dict, штамп: str) -> str:
+    строки = [
+        "// СГЕНЕРИРОВАНО tools/gen_dictionaries.py — РУКАМИ НЕ ПРАВИТЬ.",
+        "// Источник: КОД БЭКЕНДА — Literal StatusIn (reports.py) и SOURCES",
+        "// (receipts.py). Не JSON: второй источник того же смысла заводить",
+        "// нельзя, копия обязана порождаться из того, по чему сервер решает.",
+        f"// {ШТАМП_МЕТКА} {штамп}",
+        "// Правка руками будет потеряна при следующей генерации и КРАСНЕЕТ",
+        "// у сторожа scripts/check-contract.mjs.",
+        "",
+        "// Статусы отчёта. ⚠️ В базе они лежат РУССКИМИ СЛОВАМИ, поэтому",
+        "// переименование — миграция данных, а не правка словаря.",
+        "export const REPORT_STATUSES = [",
+        *[f'  "{з}",' for з in наборы["report_statuses"]],
+        "];",
+        "",
+        "// Каналы, которыми чек попадает в систему.",
+        "export const RECEIPT_SOURCES = [",
+        *[f'  "{з}",' for з in наборы["receipt_sources"]],
+        "];",
+        "",
+        f'export const DEFAULT_RECEIPT_SOURCE = "{наборы["default_source"]}";',
+        "",
+    ]
+    return "\n".join(строки)
+
+
+def штамп_контракта(наборы: dict) -> str:
+    # ⚠️ КОМПАКТНЫЙ JSON БЕЗ ПРОБЕЛОВ: сторож на фронте считает тот же штамп
+    # через JSON.stringify, а он пробелов не ставит. Разные разделители дают
+    # разные хеши при одинаковых данных — сторож краснел бы на верной копии.
+    сырое = json.dumps(
+        наборы, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(сырое).hexdigest()
+
+
 def main() -> int:
     проверка = "--check" in sys.argv
     данные, штамп = прочитать_источник()
@@ -237,6 +309,12 @@ def main() -> int:
             os.makedirs(os.path.dirname(путь_js), exist_ok=True)
             open(путь_js, "w", encoding="utf-8").write(собрать_js(данные, штамп))
             print(f"  записано: {путь_js}")
+            наборы = контрактные_наборы()
+            путь_контракта = os.path.join(ФРОНТ_SRC, КОНТРАКТ_JS_ОТН)
+            open(путь_контракта, "w", encoding="utf-8").write(
+                собрать_контракт_js(наборы, штамп_контракта(наборы))
+            )
+            print(f"  записано: {путь_контракта}")
         else:
             print("  ⚠ ФРОНТ НЕДОСТУПЕН — его копия НЕ ЗАПИСАНА, а не «не нужна»")
             return 2

@@ -59,11 +59,20 @@ def _фоновая_почта(отправить, *аргументы) -> None:
 
 router = APIRouter(prefix="/api/receipts", tags=["receipts"])
 
-# Enumerable values for `source` — the channel a receipt arrived via.
-#   manual    — user typed it in
-#   qr_scan   — scanned a fiscal QR; FNS lookup succeeded
-#   photo_ocr — OCR'd a photo via Claude Vision
-#   fns       — created from FNS data through some other flow (reserved)
+# ⚠️ КАНОН ИСТОЧНИКОВ ЧЕКА — КОДОМ, А НЕ КОММЕНТАРИЕМ (T42, 06.09.2026).
+# До этой правки четыре значения `source` были перечислены ТОЛЬКО в
+# комментарии: сверять фронт было НЕ С ЧЕМ в принципе — ни замером, ни
+# человеком. Комментарий не участвует ни в одной проверке и расходится
+# с кодом молча.
+#
+#   manual    — человек ввёл руками
+#   qr_scan   — считан фискальный QR, ответ ФНС получен
+#   photo_ocr — распознано фото через Claude Vision
+#   fns       — заведено из данных ФНС другим путём (зарезервировано)
+#
+# Отсюда же берётся копия для фронта: `tools/gen_dictionaries.py` читает
+# ЭТОТ кортеж, а не переписывает список руками (T39).
+SOURCES = ("manual", "qr_scan", "photo_ocr", "fns")
 DEFAULT_SOURCE = "manual"
 
 
