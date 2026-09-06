@@ -12,13 +12,21 @@
 
 PY := venv/bin/python
 
-.PHONY: tracker tracker-check tracker-look help
+.PHONY: tracker tracker-check tracker-forms tracker-look help
 
 ## tracker — собрать витрину трекера и открыть в браузере
 tracker:
 	@$(PY) tests/tools/tracker_html.py
 	@open /tmp/aocg-tracker.html 2>/dev/null || \
 	 echo "  открыть вручную: /tmp/aocg-tracker.html"
+
+# ⚠️ ОТДЕЛЬНОЙ ЦЕЛЬЮ И ОТДЕЛЬНЫМ ФАЙЛОМ: регулярка ID — место, где слепота
+# случалась дважды (T188), и каждая из семи форм обязана проверяться СВОИМ
+# прогоном. Один общий прогон превращает «не видна форма с решёткой» в
+# «что-то не так».
+## tracker-forms — семь форм ID, каждая отдельным прогоном
+tracker-forms:
+	@$(PY) tests/tools/tracker_id_forms.py
 
 ## tracker-check — сверить, что до витрины доехали ВСЕ задачи
 tracker-check:
