@@ -38,6 +38,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from datetime import timedelta
 
 import asyncpg
 import pytest
@@ -300,11 +301,24 @@ class ЖиваяБаза:
         user_id=None,
         org_brand=None,
         org_legal=None,
+        source="manual",
+        category=None,
+        org_inn=None,
+        created_at=None,
+        category_id=None,
+        category_manual=False,
     ):
+        # ⚠️ `source`, `category`, `org_inn` и `created_at` — не украшение:
+        # дедуп чеков решает ИМЕННО по ним. Ветка 0 («двойной тап») смотрит на
+        # `created_at`, ветки 2/3 различаются наличием `org_inn`, а проверка
+        # «категория и оплата в ключ не входят» без `category` не выражается.
+        # У двойника поля просто лежали в словаре; здесь они колонки.
         await self.pool.execute(
             "INSERT INTO receipts (id, org, amount, date, payment, kkt_fn, fd_num, "
-            "org_id, user_id, org_brand, org_legal, source) "
-            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'manual')",
+            "org_id, user_id, org_brand, org_legal, source, category, org_inn, "
+            "created_at, category_id, category_manual) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, "
+            "COALESCE($15, NOW()), $16, $17)",
             id,
             org,
             amount,
@@ -316,8 +330,62 @@ class ЖиваяБаза:
             user_id,
             org_brand,
             org_legal,
+            source,
+            category,
+            org_inn,
+            created_at,
+            category_id,
+            category_manual,
         )
         await self._подвести_счётчик("receipts")
+
+    async def момент(self, **сдвиг):
+        """Момент ПО ЧАСАМ БАЗЫ, со сдвигом назад (`days=6`, `seconds=100`).
+
+        ⚠️ ЗАЧЕМ, ЗАМЕРОМ 06.09.2026. `receipts.created_at` — `TIMESTAMP` БЕЗ
+        пояса, и `NOW()` кладёт туда МЕСТНОЕ время сервера, а `datetime.utcnow()`
+        в процессе даёт UTC. Пояс тестового кластера — Europe/Moscow, значит
+        чек, засеянный «прямо сейчас» через `utcnow()`, ложился в базу
+        ТРЁХЧАСОВОЙ ДАВНОСТИ. Окна дедупа считаются от `NOW()` (90 секунд и
+        7 дней), поэтому такой засев тихо смещает проверяемое окно; ни один
+        приговор от этого не перевернулся, но это везение, а не устройство.
+        """
+        return await self.pool.fetchval(
+            "SELECT (NOW() - $1::interval)::timestamp", timedelta(**сдвиг)
+        )
+
+    async def назначить_автора(self, receipt_id, user_id):
+        """Автор уже лежащего чека. Отдельным помощником, потому что у двойника
+        это была правка словаря на месте (`db.receipts[0]["user_id"] = 1`)."""
+        await self.pool.execute(
+            "UPDATE receipts SET user_id=$2 WHERE id=$1", receipt_id, user_id
+        )
+
+    async def позиции_чека(self, receipt_id):
+        """Строки товарного состава чека, в порядке позиции."""
+        return [
+            dict(r)
+            for r in await self.pool.fetch(
+                "SELECT * FROM receipt_items WHERE receipt_id=$1 ORDER BY position",
+                receipt_id,
+            )
+        ]
+
+    async def id_категории(self, name, org_id=1):
+        return await self.pool.fetchval(
+            "SELECT id FROM categories WHERE org_id=$1 AND name=$2", org_id, name
+        )
+
+    async def связи_отчётов(self):
+        """Все связи чек→отчёт. Нужна там, где проверяется, что чужая связь
+        УЦЕЛЕЛА после удаления в своей организации."""
+        return [
+            dict(r)
+            for r in await self.pool.fetch(
+                "SELECT report_id, receipt_id FROM report_items "
+                "ORDER BY report_id, receipt_id"
+            )
+        ]
 
     async def чек(self, id):
         строка = await self.pool.fetchrow("SELECT * FROM receipts WHERE id=$1", id)
