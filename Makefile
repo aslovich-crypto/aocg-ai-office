@@ -28,6 +28,17 @@ tracker:
 tracker-forms:
 	@$(PY) tests/tools/tracker_id_forms.py
 
+# ⚠️ ОТДЕЛЬНОЙ ЦЕЛЬЮ: счёт аудита очереди — это НЕ то же самое, что согласие
+# витрины с файлом. Прибор отвечает на другой вопрос: сколько строк проверено,
+# с каким вердиктом и сколько НЕ проверено вовсе.
+## audit-stamps — свод штампов аудита и список строк без штампа
+audit-stamps:
+	@$(PY) tests/tools/audit_stamps.py
+
+## audit-stamps-mut — мутации сторожа штампов (T11: непроверенный сторож неработающий)
+audit-stamps-mut:
+	@$(PY) tests/tools/audit_stamp_mutations.py
+
 ## tracker-check — сверить, что до витрины доехали ВСЕ задачи
 tracker-check:
 	@$(PY) tests/tools/tracker_html_guard.py
