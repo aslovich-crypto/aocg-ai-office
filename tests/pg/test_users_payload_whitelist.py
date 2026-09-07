@@ -84,3 +84,40 @@ async def test_свой_профиль_тоже_без_счётчиков(client
     assert r.status_code == 200, r.text
     for поле in ЗАПРЕЩЕНО:
         assert поле not in r.json(), f"{поле} уехало наружу в /me"
+
+
+# ─── ПОЛЯ ЧЕЛОВЕКА: имя и фамилию нельзя СТЕРЕТЬ правкой профиля ───
+# ⚠️ ЩЕЛЬ БЫЛА ТЕОРЕТИЧЕСКОЙ, И ЭТО НАДО ЗНАТЬ: через интерфейс стереть имя
+# было НЕЛЬЗЯ — экран «Личные данные» требует и имя, и фамилию. Стереть можно
+# было только прямым запросом к API, и на проде 08.09.2026 людей без имени 0.
+# Тест закрывает дверь, в которую никто не входил, — но она была открыта.
+#
+# ⚠️ И ОН ЖЕ ОТЛИЧАЕТ ДВА МУТАНТА: снятие проверки с ОДНОГО входа краснит
+# только свой тест, поломка ОБЩЕЙ функции — оба. Без второго входа в наборе
+# «правило одно» и «правило подключено везде» неразличимы.
+@pytest.mark.asyncio
+async def test_имя_нельзя_стереть_правкой_профиля(client, db, seeded):
+    # ⚠️ Смотрящего подменяет фикстура, а СТРОКИ в базе у него нет: id=1
+    # существует только в подмене. Для правки профиля строка нужна.
+    await db.обеспечить_пользователя(id=1, first_name="Test", last_name="User")
+    r = await client.patch("/api/users/me", json={"first_name": "   "})
+    assert r.status_code == 422, r.text
+    строка = await db.pool.fetchrow("SELECT first_name FROM users WHERE id=1")
+    assert (строка["first_name"] or "").strip(), "имя стёрлось, хотя запрос отвергнут"
+
+
+@pytest.mark.asyncio
+async def test_фамилию_нельзя_стереть_правкой_профиля(client, db, seeded):
+    r = await client.patch("/api/users/me", json={"last_name": ""})
+    assert r.status_code == 422, r.text
+
+
+@pytest.mark.asyncio
+async def test_непереданное_поле_профиля_не_трогается(client, db, seeded):
+    # `None` — «не меняем», и это не то же самое, что «стереть».
+    await db.обеспечить_пользователя(id=1, first_name="Test", last_name="User")
+    r = await client.patch("/api/users/me", json={"phone": "+79990000000"})
+    assert r.status_code == 200, r.text
+    строка = await db.pool.fetchrow("SELECT first_name, phone FROM users WHERE id=1")
+    assert (строка["first_name"] or "").strip()
+    assert строка["phone"] == "+79990000000"

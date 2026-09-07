@@ -226,6 +226,7 @@ async def test_register_by_invite_takes_role_and_org_from_invite(client, орг)
             "token": "ссылка",
             "email": "Novichok@example.com",
             "password": "парольдлинный",
+            "last_name": "Тестов",
             "first_name": "Новичок",
             # попытка навязать своё — модель таких полей не знает, и это
             # ровно то, что здесь проверяется
@@ -250,6 +251,8 @@ async def test_one_use_invite_burns_after_first_registration(client, орг):
         json={
             "token": "одноразовая",
             "email": "a@example.com",
+            "first_name": "Иван",
+            "last_name": "Тестов",
             "password": "парольдлинный",
         },
     )
@@ -261,6 +264,8 @@ async def test_one_use_invite_burns_after_first_registration(client, орг):
         json={
             "token": "одноразовая",
             "email": "b@example.com",
+            "first_name": "Иван",
+            "last_name": "Тестов",
             "password": "парольдлинный",
         },
     )
@@ -285,6 +290,8 @@ async def test_expired_invite_creates_nobody(client, орг):
         json={
             "token": "истёкшая",
             "email": "c@example.com",
+            "first_name": "Иван",
+            "last_name": "Тестов",
             "password": "парольдлинный",
         },
     )
@@ -307,6 +314,8 @@ async def test_taken_email_does_not_burn_invite(client, орг):
         json={
             "token": "ссылка",
             "email": "zanyat@example.com",
+            "first_name": "Иван",
+            "last_name": "Тестов",
             "password": "парольдлинный",
         },
     )
@@ -320,7 +329,13 @@ async def test_short_password_rejected_before_invite_is_spent(client, орг):
     inv = _приглашение(орг, token="ссылка")
     r = await client.post(
         "/api/auth/register-by-invite",
-        json={"token": "ссылка", "email": "d@example.com", "password": "1234"},
+        json={
+            "token": "ссылка",
+            "email": "d@example.com",
+            "first_name": "Иван",
+            "last_name": "Тестов",
+            "password": "1234",
+        },
     )
     assert r.status_code == 400, r.text
     assert орг.users == [] and inv["uses_count"] == 0
@@ -340,6 +355,8 @@ async def test_invite_of_other_org_registers_into_that_org(client, орг):
         json={
             "token": "чужая-ссылка",
             "email": "e@example.com",
+            "first_name": "Иван",
+            "last_name": "Тестов",
             "password": "парольдлинный",
         },
     )
@@ -368,6 +385,8 @@ async def test_validate_and_register_need_no_admin(client, орг):
         json={
             "token": "публичная",
             "email": "f@example.com",
+            "first_name": "Иван",
+            "last_name": "Тестов",
             "password": "парольдлинный",
         },
     )
@@ -418,7 +437,13 @@ async def test_old_invite_with_bad_role_downgrades_to_employee(client, орг):
     _приглашение(орг, token="старая", role="суперадмин")
     r = await client.post(
         "/api/auth/register-by-invite",
-        json={"token": "старая", "email": "z@example.com", "password": "парольдлинный"},
+        json={
+            "token": "старая",
+            "email": "z@example.com",
+            "first_name": "Иван",
+            "last_name": "Тестов",
+            "password": "парольдлинный",
+        },
     )
     assert r.status_code == 200, r.text
     (новый,) = [u for u in орг.users if u["email"] == "z@example.com"]
@@ -445,6 +470,7 @@ async def test_приглашение_с_почтой_шлёт_письмо_и_�
         json={
             "role": "employee",
             "email": "Novyi@Example.COM",
+            "last_name": "Тестов",
             "first_name": "Пётр",
             "expires_hours": 24,
         },
@@ -527,6 +553,7 @@ async def test_отметка_кого_завели_ставится_ТЕМ_ЖЕ
             "token": "имен",
             "email": "novyi@example.com",
             "password": "парольдлинный",
+            "last_name": "Тестов",
             "first_name": "Иван",
         },
     )
@@ -545,6 +572,7 @@ async def test_список_показывает_статус_и_получат�
         json={
             "role": "employee",
             "email": "kto@example.com",
+            "last_name": "Тестов",
             "first_name": "Анна",
             "expires_hours": 24,
         },

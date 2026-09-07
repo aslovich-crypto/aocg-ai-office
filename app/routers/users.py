@@ -2,8 +2,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
+from app.people_fields import непустое
 from app.auth import (
     Role,
     create_access_token,
@@ -152,12 +153,46 @@ class UserUpdate(BaseModel):
     region: Optional[str] = None
     employee_id: Optional[str] = None
 
+    # ⚠️ `None` — «поле не меняем», и оно проходит. Пустая строка — ПОПЫТКА
+    # СТЕРЕТЬ, и она отвергается: правило одно на четыре входа,
+    # см. `app/people_fields.py`. Отчество не проверяем — его может не быть
+    # по существу, в отличие от имени и фамилии.
+    @field_validator("first_name")
+    @classmethod
+    def _имя(cls, v):
+        return непустое(v, "Имя")
+
+    @field_validator("last_name")
+    @classmethod
+    def _фамилия(cls, v):
+        return непустое(v, "Фамилия")
+
+    @field_validator("email")
+    @classmethod
+    def _почта(cls, v):
+        return непустое(v, "Почта")
+
 
 class MeUpdate(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     phone: Optional[str] = None
     employee_number: Optional[str] = None
+
+    # ⚠️ ЩЕЛЬ, КОТОРУЮ ЭТО ЗАКРЫВАЕТ, БЫЛА ТЕОРЕТИЧЕСКОЙ — И ЭТО ВАЖНО ЗНАТЬ.
+    # Через интерфейс стереть имя было НЕЛЬЗЯ: экран «Личные данные» требует
+    # и имя, и фамилию (`src/App.jsx`, «Укажите имя» / «Укажите фамилию»).
+    # Стереть можно было только прямым запросом к API. На проде 08.09.2026
+    # людей без имени 0 — то есть дефект не наблюдался ни разу.
+    @field_validator("first_name")
+    @classmethod
+    def _имя(cls, v):
+        return непустое(v, "Имя")
+
+    @field_validator("last_name")
+    @classmethod
+    def _фамилия(cls, v):
+        return непустое(v, "Фамилия")
 
 
 class PasswordChange(BaseModel):

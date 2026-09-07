@@ -75,6 +75,7 @@ async def test_именная_свой_адрес_регистрирует(db, �
             "token": "имен",
             "email": "ivan@example.com",
             "password": "парольдлинный",
+            "last_name": "Тестов",
             "first_name": "Иван",
         },
     )
@@ -94,6 +95,8 @@ async def test_именная_чужой_адрес_отказ_без_созда
         json={
             "token": "имен",
             "email": "chuzhoy@example.com",
+            "first_name": "Иван",
+            "last_name": "Тестов",
             "password": "парольдлинный",
         },
     )
@@ -113,6 +116,8 @@ async def test_именная_чужой_адрес_отказ_без_созда
         json={
             "token": "имен",
             "email": "ivan@example.com",
+            "first_name": "Иван",
+            "last_name": "Тестов",
             "password": "парольдлинный",
         },
     )
@@ -129,6 +134,8 @@ async def test_отказ_не_называет_верный_адрес(db, ор
         json={
             "token": "имен",
             "email": "chuzhoy@example.com",
+            "first_name": "Иван",
+            "last_name": "Тестов",
             "password": "парольдлинный",
         },
     )
@@ -154,6 +161,8 @@ async def test_ссылка_не_работает_проверялкой_чуж�
         json={
             "token": "имен",
             "email": "petr@example.com",
+            "first_name": "Иван",
+            "last_name": "Тестов",
             "password": "парольдлинный",
         },
     )
@@ -162,6 +171,8 @@ async def test_ссылка_не_работает_проверялкой_чуж�
         json={
             "token": "имен",
             "email": "nikto@example.com",
+            "first_name": "Иван",
+            "last_name": "Тестов",
             "password": "парольдлинный",
         },
     )
@@ -180,6 +191,8 @@ async def test_регистр_и_пробелы_не_мешают(db, орг, cl
         json={
             "token": "имен",
             "email": "  A.Shu@AOCG.RU  ",
+            "first_name": "Иван",
+            "last_name": "Тестов",
             "password": "парольдлинный",
         },
     )
@@ -196,6 +209,8 @@ async def test_общая_ссылка_принимает_любую_почту(
         json={
             "token": "obshaya",
             "email": "kto-ugodno@example.com",
+            "first_name": "Иван",
+            "last_name": "Тестов",
             "password": "парольдлинный",
         },
     )
@@ -232,3 +247,79 @@ async def test_validate_неизвестного_токена_не_выдаёт_
     assert d["is_valid"] is False
     assert d["email"] is None and d["is_personal"] is False
     assert d["role"] is None and d["org_name"] is None
+
+
+# ─── T-ПОЛЯ: имя и фамилия обязательны на СЕРВЕРЕ, а не только на форме ───
+# ⚠️ ДО 08.09.2026 ЭТО ПРОВЕРЯЛА ТОЛЬКО ФОРМА. Модель принимала
+# `first_name: str = ""`, и прямой запрос заводил человека без имени в обход
+# экрана. Правило теперь одно на четыре входа — `app/people_fields.py`.
+@pytest.mark.asyncio
+async def test_регистрация_без_имени_отвергается(client, db, орг):
+    await _ссылка(db, "поля1", email=None)
+    r = await client.post(
+        "/api/auth/register-by-invite",
+        json={
+            "token": "поля1",
+            "email": "bez-imeni@example.com",
+            "last_name": "Тестов",
+            "password": "парольдлинный",
+        },
+    )
+    assert r.status_code == 422, r.text
+    assert not await db.pool.fetchval(
+        "SELECT count(*) FROM users WHERE email='bez-imeni@example.com'"
+    )
+
+
+@pytest.mark.asyncio
+async def test_регистрация_без_фамилии_отвергается(client, db, орг):
+    await _ссылка(db, "поля2", email=None)
+    r = await client.post(
+        "/api/auth/register-by-invite",
+        json={
+            "token": "поля2",
+            "email": "bez-familii@example.com",
+            "first_name": "Иван",
+            "password": "парольдлинный",
+        },
+    )
+    assert r.status_code == 422, r.text
+
+
+@pytest.mark.asyncio
+async def test_имя_из_одних_пробелов_отвергается(client, db, орг):
+    # ⚠️ ГЛАВНЫЙ СЛУЧАЙ: `NOT NULL` такое пропустил бы — пустая строка не NULL.
+    await _ссылка(db, "поля3", email=None)
+    r = await client.post(
+        "/api/auth/register-by-invite",
+        json={
+            "token": "поля3",
+            "email": "probely@example.com",
+            "first_name": "   ",
+            "last_name": "Тестов",
+            "password": "парольдлинный",
+        },
+    )
+    assert r.status_code == 422, r.text
+
+
+@pytest.mark.asyncio
+async def test_имя_и_фамилия_обрезаются_по_краям(client, db, орг):
+    # Хвостовой пробел ломает и сортировку, и сверку строк при отборе.
+    await _ссылка(db, "поля4", email=None)
+    r = await client.post(
+        "/api/auth/register-by-invite",
+        json={
+            "token": "поля4",
+            "email": "probel-po-krayam@example.com",
+            "first_name": "  Иван  ",
+            "last_name": "  Тестов  ",
+            "password": "парольдлинный",
+        },
+    )
+    assert r.status_code == 200, r.text
+    строка = await db.pool.fetchrow(
+        "SELECT first_name, last_name FROM users WHERE email='probel-po-krayam@example.com'"
+    )
+    assert строка["first_name"] == "Иван"
+    assert строка["last_name"] == "Тестов"

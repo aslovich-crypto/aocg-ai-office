@@ -64,6 +64,7 @@ async def test_приглашение_проходит_путь_целиком(c
             "token": токен,
             "email": "novichok@example.com",
             "password": "парольдлинный",
+            "last_name": "Тестов",
             "first_name": "Новичок",
             "role": "admin",  # попытка навязать — обязана быть проигнорирована
         },
@@ -113,6 +114,8 @@ async def test_ссылка_сгорела_после_прохода(client, db,
         json={
             "token": токен,
             "email": "first@example.com",
+            "first_name": "Иван",
+            "last_name": "Тестов",
             "password": "парольдлинный",
         },
     )
@@ -123,6 +126,8 @@ async def test_ссылка_сгорела_после_прохода(client, db,
         json={
             "token": токен,
             "email": "second@example.com",
+            "first_name": "Иван",
+            "last_name": "Тестов",
             "password": "парольдлинный",
         },
     )

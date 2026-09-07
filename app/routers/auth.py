@@ -18,10 +18,11 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
+from app.people_fields import обязательное
 from app.auth import (
     REFRESH_TOKEN_EXPIRE_DAYS,
     ROLE_EMPLOYEE,
@@ -116,8 +117,23 @@ class RegisterIn(BaseModel):
     phone: Optional[str] = None
     email: str
     password: str
-    first_name: str = ""
-    last_name: str = ""
+    # ⚠️ ИМЯ И ФАМИЛИЯ ОБЯЗАТЕЛЬНЫ (решение владельца 08.09.2026). До этого
+    # стояло `str = ""`, и прямой запрос заводил человека без имени в обход
+    # формы: форма требовала имя, сервер — нет. Правило одно на четыре входа,
+    # см. `app/people_fields.py`.
+    first_name: str
+    last_name: str
+
+    @field_validator("first_name")
+    @classmethod
+    def _имя(cls, v):
+        return обязательное(v, "Имя")
+
+    @field_validator("last_name")
+    @classmethod
+    def _фамилия(cls, v):
+        return обязательное(v, "Фамилия")
+
     org_type: str = "company"  # 'person' | 'company'
     org_name: Optional[str] = None
     inn: Optional[str] = None
@@ -156,8 +172,24 @@ class RegisterByInviteIn(BaseModel):
     phone: Optional[str] = None
     email: str
     password: str
-    first_name: str = ""
-    last_name: str = ""
+    # ⚠️ ФАМИЛИЯ СПРАШИВАЕТСЯ ЗДЕСЬ, А НЕ ПРИ ПРИГЛАШЕНИИ (решение владельца
+    # 08.09.2026). Довод: приглашающий часто знает человека по имени и впишет
+    # что попало — в авансовом отчёте окажется мусор вместо пустоты, а пустое
+    # поле честнее неверного. Свою фамилию человек знает. Форму создания
+    # приглашения (T168) это не трогает: поле стоит в форме ПЕРВОГО ВХОДА,
+    # где оно и было нарисовано, просто не требовалось.
+    first_name: str
+    last_name: str
+
+    @field_validator("first_name")
+    @classmethod
+    def _имя(cls, v):
+        return обязательное(v, "Имя")
+
+    @field_validator("last_name")
+    @classmethod
+    def _фамилия(cls, v):
+        return обязательное(v, "Фамилия")
 
 
 # ─── helpers ───
