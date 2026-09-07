@@ -70,9 +70,15 @@ import asyncpg
 #
 # ⚠️ IF NOT EXISTS ОБЯЗАТЕЛЕН: init_db крутится на КАЖДОМ старте, и упавшее
 # создание индекса уронило бы запуск целиком (класс T89).
+# ⚠️ ИНДЕКС СТАЛ ОБЫЧНЫМ 08.09.2026 — после того, как у `users` встал CHECK
+# на непустоту почты (`scripts/validate_people_fields.py`). Частичность
+# заводили ради пустых почт; теперь они невозможны по построению, и условие
+# `WHERE email IS NOT NULL AND email <> ''` истинно всегда.
+# Строки обязаны дословно совпадать с `init_db()` — за этим следит
+# `tests/test_migration_invite_columns.py`.
 ИНДЕКСЫ = [
-    "CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_lower "
-    "ON users (lower(email)) WHERE email IS NOT NULL AND email <> ''",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_lower_all "
+    "ON users (lower(email))",
 ]
 
 

@@ -94,7 +94,24 @@ async def _засеять_первого_администратора(conn) -> N
     на новой — администратор заводится штатной регистрацией.
     """
     почта = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "").strip()
+    имя = os.getenv("BOOTSTRAP_ADMIN_FIRST_NAME", "").strip()
+    фамилия = os.getenv("BOOTSTRAP_ADMIN_LAST_NAME", "").strip()
     if not почта:
+        return
+    # ⚠️ БЕЗ ИМЕНИ ИЛИ ФАМИЛИИ ЗАСЕВ ПРОПУСКАЕТСЯ — И ЭТО НЕ ПРИДИРКА,
+    # А ЗАЩИТА ОТ ПАДЕНИЯ СТАРТА. С 08.09.2026 у `users` стоят NOT NULL
+    # и CHECK на непустоту имени, фамилии и почты. Прежний код писал сюда
+    # `.strip() or None`, то есть на новой площадке с заданной почтой, но без
+    # имени, INSERT упал бы, `init_db()` вместе с ним, и приложение не
+    # поднялось бы вовсе — ровно класс T89, только не на индексе, а на засеве.
+    # Пропуск безопасен по тому же доводу, что и пропуск без почты:
+    # администратор заводится штатной регистрацией.
+    if not имя or not фамилия:
+        logger.warning(
+            "Засев администратора пропущен: BOOTSTRAP_ADMIN_FIRST_NAME "
+            "и BOOTSTRAP_ADMIN_LAST_NAME обязательны с 08.09.2026 "
+            "(у users стоят NOT NULL и CHECK на непустоту)"
+        )
         return
     await conn.execute(
         """
@@ -102,8 +119,8 @@ async def _засеять_первого_администратора(conn) -> N
         SELECT $1, $2, $3, $4, 'admin'
         WHERE NOT EXISTS (SELECT 1 FROM users)
         """,
-        os.getenv("BOOTSTRAP_ADMIN_FIRST_NAME", "").strip() or None,
-        os.getenv("BOOTSTRAP_ADMIN_LAST_NAME", "").strip() or None,
+        имя,
+        фамилия,
         os.getenv("BOOTSTRAP_ADMIN_PATRONYMIC", "").strip() or None,
         почта,
     )
@@ -330,20 +347,63 @@ async def init_db():
             -- T104 этап ④): дверь, из-за которой частичность заводили,
             -- закрыта неделю как. Довод читают ВМЕСТО кода, поэтому он
             -- обязан описывать сегодняшнее устройство, а не вчерашнее.
-            -- СЕГОДНЯШНЕЕ УСТРОЙСТВО: почта в схеме NULLable, и записать
-            -- пустую по-прежнему МОЖЕТ засев `BOOTSTRAP_ADMIN_*` (он пишет
-            -- `.strip() or None`) — а обычный UNIQUE разрешил бы РОВНО ОДНОГО
-            -- безпочтового человека на всю базу и отверг бы второго.
-            -- ⚠️ КОГДА ЧАСТИЧНОСТЬ МОЖНО БУДЕТ СНЯТЬ: после того как встанет
-            -- CHECK на непустоту почты (шаги ④⑤ работы 08.09.2026) — и НЕ
-            -- РАНЬШЕ. Замер прода 08.09.2026: людей 4, без почты 0, то есть
-            -- обычный UNIQUE сегодня создался бы — но гарантии, что завтра
-            -- не появится вторая пустая, нет до самого CHECK.
+            -- ⚠️ ЧАСТИЧНОСТЬ СНЯТА 08.09.2026: CHECK на непустоту почты встал
+            -- (блок «обязательные поля» ниже), пустая почта стала невозможной
+            -- по построению, и условие частичного индекса истинно всегда.
+            -- Валидация BEGIN/ROLLBACK на проде пройдена владельцем в тот же
+            -- день: пустых полей 0, шесть ALTER без ошибок, сверка 4·0·0·0.
             -- ⚠️ IF NOT EXISTS ОБЯЗАТЕЛЕН: init_db крутится на каждом старте,
             -- упавшее создание индекса уронило бы запуск целиком (T89).
             -- Валидация BEGIN/ROLLBACK на проде 31.08.2026: дублей 0,
             -- индекс создался, после отката исчез, людей не тронуло.
-            CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_lower ON users (lower(email)) WHERE email IS NOT NULL AND email <> '';
+            -- ⚠️ ИНДЕКС СТАЛ ОБЫЧНЫМ 08.09.2026 — после того, как встал CHECK
+            -- на непустоту почты (см. блок «обязательные поля» ниже). Пустая
+            -- почта теперь невозможна по построению, значит условие
+            -- `WHERE email IS NOT NULL AND email <> ''` истинно всегда и стало
+            -- украшением. Прежний довод частичности ссылался на `UserCreate`,
+            -- снесённый 31.08.2026 вместе с POST /api/users/ (`7d74bb7`), —
+            -- то есть протух ещё раньше.
+            -- ⚠️ НОВОЕ ИМЯ, А НЕ ПЕРЕСОЗДАНИЕ ПОД СТАРЫМ: `CREATE ... IF NOT
+            -- EXISTS` со старым именем ничего бы не сделал, а `DROP`+`CREATE`
+            -- на каждом старте перестраивал бы индекс заново. Обе строки ниже
+            -- идемпотентны, и порядок «сперва создать, потом снять» держит
+            -- уникальность без разрыва.
+            -- Откат: CREATE UNIQUE INDEX uq_users_email_lower ON users (lower(email))
+            --          WHERE email IS NOT NULL AND email <> '';
+            --        DROP INDEX uq_users_email_lower_all;
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_lower_all ON users (lower(email));
+            DROP INDEX IF EXISTS uq_users_email_lower;
+
+            -- ══ ОБЯЗАТЕЛЬНЫЕ ПОЛЯ ЧЕЛОВЕКА (08.09.2026, решение владельца) ══
+            -- Имя, фамилия и почта обязаны быть у каждого. До этого схема
+            -- допускала NULL во всех трёх, а регистрация писала ПУСТЫЕ СТРОКИ:
+            -- прямой запрос заводил человека без имени в обход формы.
+            -- ⚠️ ОДИН `NOT NULL` НЕ ЗАКРЫЛ БЫ ГЛАВНОГО: пустая строка не NULL,
+            -- а писалась именно она. Поэтому рядом идёт CHECK на непустоту.
+            -- ⚠️ CHECK ЧЕРЕЗ DROP IF EXISTS + ADD: формы «ADD CONSTRAINT IF NOT
+            -- EXISTS» в PostgreSQL нет, а init_db крутится на КАЖДОМ старте —
+            -- голый ADD со второго запуска ронял бы приложение целиком (T89).
+            -- Цена названа: ограничение пересоздаётся каждый старт, то есть
+            -- таблица перепроверяется целиком. На 4 строках это доли
+            -- миллисекунды; на большой таблице приём меняют на блок DO.
+            -- ⚠️ Валидация BEGIN/ROLLBACK на проде 08.09.2026 (владелец):
+            -- пустых полей 0, шесть ALTER без ошибок, сверка 4·0·0·0.
+            -- Рельсы: scripts/validate_people_fields.py, список один.
+            -- Откат: ALTER TABLE users ALTER COLUMN first_name DROP NOT NULL;
+            --        ALTER TABLE users ALTER COLUMN last_name  DROP NOT NULL;
+            --        ALTER TABLE users ALTER COLUMN email      DROP NOT NULL;
+            --        ALTER TABLE users DROP CONSTRAINT ck_users_first_name_notblank;
+            --        ALTER TABLE users DROP CONSTRAINT ck_users_last_name_notblank;
+            --        ALTER TABLE users DROP CONSTRAINT ck_users_email_notblank;
+            ALTER TABLE users ALTER COLUMN first_name SET NOT NULL;
+            ALTER TABLE users ALTER COLUMN last_name  SET NOT NULL;
+            ALTER TABLE users ALTER COLUMN email      SET NOT NULL;
+            ALTER TABLE users DROP CONSTRAINT IF EXISTS ck_users_first_name_notblank;
+            ALTER TABLE users ADD  CONSTRAINT ck_users_first_name_notblank CHECK (btrim(first_name) <> '');
+            ALTER TABLE users DROP CONSTRAINT IF EXISTS ck_users_last_name_notblank;
+            ALTER TABLE users ADD  CONSTRAINT ck_users_last_name_notblank  CHECK (btrim(last_name)  <> '');
+            ALTER TABLE users DROP CONSTRAINT IF EXISTS ck_users_email_notblank;
+            ALTER TABLE users ADD  CONSTRAINT ck_users_email_notblank      CHECK (btrim(email)      <> '');
             CREATE TABLE IF NOT EXISTS revoked_tokens (
                 id          SERIAL PRIMARY KEY,
                 token_hash  TEXT NOT NULL,

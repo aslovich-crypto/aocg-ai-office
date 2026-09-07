@@ -51,6 +51,33 @@ PYTEST = str(КОРЕНЬ / "venv" / "bin" / "pytest")
         "ждём": "test_имя_из_одних_пробелов_отвергается",
         "почему": "пустая строка не NULL — NOT NULL такое пропустил бы",
     },
+    {
+        "имя": "М3 CHECK снят с ОДНОЙ колонки (фамилия)",
+        "файл": "app/database.py",
+        "было": "            ALTER TABLE users ADD  CONSTRAINT ck_users_last_name_notblank  CHECK (btrim(last_name)  <> '');\n",
+        "стало": "",
+        "сколько": 0,
+        "ждём": "test_каждая_строка_миграции_есть_в_init_db",
+        "почему": "красной обязана стать сверка со списком, а не «что-то сломалось»",
+    },
+    {
+        "имя": "М4 строка миграции разошлась с init_db",
+        "файл": "app/database.py",
+        "было": "ALTER TABLE users ALTER COLUMN email      SET NOT NULL;",
+        "стало": "ALTER TABLE users ALTER COLUMN email SET NOT NULL;  -- разошлось",
+        "сколько": 0,
+        "ждём": "test_каждая_строка_миграции_есть_в_init_db",
+        "почему": "рельсы: список и схема обязаны совпасть дословно",
+    },
+    {
+        "имя": "М5 индекс вернули к частичному",
+        "файл": "app/database.py",
+        "было": "            CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_lower_all ON users (lower(email));\n",
+        "стало": "            CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_lower ON users (lower(email)) WHERE email IS NOT NULL AND email <> '';\n",
+        "сколько": 0,
+        "ждём": "test_индексы_из_валидатора_есть_в_init_db",
+        "почему": "валидатор invite сверяет индексы дословно — вернули старый, разошлось",
+    },
 ]
 
 
@@ -60,6 +87,8 @@ def прогнать() -> str:
             PYTEST,
             "tests/pg/test_invite_email_match.py",
             "tests/pg/test_users_payload_whitelist.py",
+            "tests/test_migration_people_fields.py",
+            "tests/test_migration_invite_columns.py",
             "-q",
         ],
         cwd=КОРЕНЬ,
