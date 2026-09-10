@@ -13,7 +13,10 @@
 бы ей верить.
 """
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel, ConfigDict
 
 from app.auth import get_current_user
 from app.database import get_pool
@@ -59,13 +62,59 @@ async def список(user: dict = Depends(get_current_user)):
     }
 
 
+class ПрочитаноIn(BaseModel):
+    """Какие события человек видел. Пусто — значит «первые ПРЕДЕЛ»."""
+
+    model_config = ConfigDict(extra="forbid")
+    ids: Optional[list[int]] = None
+
+
 @router.post("/read")
-async def пометить_прочитанными(user: dict = Depends(get_current_user)):
-    """Открыл список — значит увидел всё. Возвращает, сколько погасили."""
+async def пометить_прочитанными(
+    тело: Optional[ПрочитаноIn] = None, user: dict = Depends(get_current_user)
+):
+    """Гасим ТОЛЬКО ТО, ЧТО ЧЕЛОВЕК ВИДЕЛ. Возвращает, сколько погасили.
+
+    ⚠️ РАНЬШЕ ГАСИЛОСЬ ВСЁ НЕПРОЧИТАННОЕ, И ЭТО БЫЛА ЛОЖЬ В БАЗЕ (правка
+    10.09.2026, решение владельца). Список отдаёт ПРЕДЕЛ = 20 строк, а
+    гашение шло без всякого предела: у человека с двадцатью пятью событиями
+    открытие шторки помечало прочитанными все двадцать пять, из которых пять
+    на экране не побывали. **Непрочитанное значит «человек не видел»;
+    пометить невыведенное — потерять уведомление навсегда**, потому что
+    вернуть его нечем: точка погасла, в списке оно двадцать первое.
+
+    ⚠️ ПОЧЕМУ ID ПРИХОДЯТ ОТ КЛИЕНТА, А НЕ СЧИТАЮТСЯ ТУТ ЖЕ ПО ТОМУ ЖЕ
+    LIMIT. Второе выглядит проще и почти работает — но между GET и POST
+    может лечь новое событие, и «первые двадцать» уже другие: свежее
+    погасло бы, не побывав на экране. Это ровно та беда, которую чиним,
+    только в миниатюре. Клиент знает, что нарисовал, — он и говорит.
+
+    ⚠️ ЧУЖОЕ ПОГАСИТЬ НЕЛЬЗЯ: `user_id=$1` в условии остаётся при обоих
+    путях, поэтому присланный чужой id просто не найдётся.
+
+    ⚠️ ПУСТОЕ ТЕЛО — ЗАКОННЫЙ ПУТЬ, а не забывчивость клиента: гасим первые
+    ПРЕДЕЛ в том же порядке, что и выдаём. Так ведёт себя старый клиент
+    и любой сторонний вызов; поведение хуже точного, но не лживее прежнего.
+    """
     p = await get_pool()
-    строки = await p.fetch(
-        "UPDATE notifications SET read_at = NOW() "
-        "WHERE user_id=$1 AND read_at IS NULL RETURNING id",
-        user["id"],
-    )
+    ids = (тело.ids if тело else None) or None
+    if ids:
+        строки = await p.fetch(
+            "UPDATE notifications SET read_at = NOW() "
+            "WHERE user_id=$1 AND read_at IS NULL AND id = ANY($2::int[]) "
+            "RETURNING id",
+            user["id"],
+            ids,
+        )
+    else:
+        строки = await p.fetch(
+            "UPDATE notifications SET read_at = NOW() WHERE id IN ("
+            "  SELECT id FROM ("
+            "    SELECT id, read_at FROM notifications WHERE user_id=$1"
+            "    ORDER BY created_at DESC, id DESC"
+            f"    LIMIT {ПРЕДЕЛ}"
+            "  ) видимые WHERE read_at IS NULL"
+            ") RETURNING id",
+            user["id"],
+        )
     return {"read": len(строки)}
