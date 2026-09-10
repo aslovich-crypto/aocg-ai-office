@@ -39,10 +39,15 @@ from app.categories_seed import seed_default_categories
 from app.database import get_pool
 from app.email_service import (
     email_enabled,
+    send_invite_accepted_email,
     send_invite_notification,
     send_password_reset_email,
     send_verification_email,
 )
+from app.notifications import ПРИГЛАШЕНИЕ_ПРИНЯТО
+from app.notifications import записать as записать_событие
+from app.notifications import кому_управляющим
+from app.notifications import почты as почты_адресатов
 
 limiter = Limiter(key_func=get_remote_address)
 logger = logging.getLogger(__name__)
@@ -970,6 +975,51 @@ async def invite_validate(token: str):
     }
 
 
+async def _сказать_о_новом_сотруднике(p, user, background) -> None:
+    """Управляющим: по приглашению завелась учётная запись (T159, событие №4).
+
+    ⚠️ ЗОВЁТСЯ ИЗ ОБЕИХ ВЕТОК `auto_verify` — решение владельца 10.09.2026,
+    вариант ⓐ. Развилка была такая: писать событие в момент СОЗДАНИЯ учётной
+    записи или в момент ПОДТВЕРЖДЕНИЯ почты. Второе точнее — там человек
+    действительно вошёл, — но `verify_email` пришлось бы менять в сигнатуре
+    (`BackgroundTasks` там нет) и спрашивать `invite_links` по колонке
+    без индекса. Довод владельца: «событие говорит „человек завёлся по вашему
+    приглашению" — полезно и до подтверждения почты; точность на четверых
+    не нужна».
+
+    ⚠️ ПОЭТОМУ ТЕКСТ СОБЫТИЯ ГОВОРИТ РОВНО ПРО УЧЁТНУЮ ЗАПИСЬ, А НЕ ПРО
+    РАБОТУ. При включённой почте человек в этот момент ещё НЕ ВОШЁЛ и может
+    не подтвердить адрес никогда. Управляющий, прочитавший «принял
+    приглашение», решил бы, что сотрудник уже работает, — и это была бы
+    неправда в половине случаев. Требование владельца, дословно: текст
+    честный.
+
+    ⚠️ СЕБЕ НЕ ПИШЕМ — тем же правилом, что в отчётах: приглашение могло быть
+    выписано на роль администратора, и тогда новый человек сам попадает
+    в круг управляющих. Уведомление «вы завели себя» обесценивает остальные.
+    """
+    адресаты = await кому_управляющим(p, user["org_id"], кроме=user["id"])
+    if not адресаты:
+        return
+    имя = (
+        " ".join(х for х in (user["first_name"], user["last_name"]) if х)
+        or user["email"]
+    )
+    ссылка = f"{APP_URL}/nastroyki" if APP_URL else ""
+    # ⚠️ ПОРЯДОК ТОТ ЖЕ, ЧТО В ОТЧЁТАХ: сначала строка события — она наша
+    # и обязана лечь, — потом письмо фоном через чужой SMTP.
+    await записать_событие(
+        p,
+        адресаты=адресаты,
+        org_id=user["org_id"],
+        вид=ПРИГЛАШЕНИЕ_ПРИНЯТО,
+        заголовок=f"Новый сотрудник: {имя}",
+        текст="Завёл учётную запись по приглашению",
+    )
+    for адрес in await почты_адресатов(p, адресаты):
+        background.add_task(send_invite_accepted_email, адрес, имя, ссылка)
+
+
 @router.post("/auth/register-by-invite")
 async def register_by_invite(body: RegisterByInviteIn, background: BackgroundTasks):
     email = body.email.strip().lower()
@@ -1056,6 +1106,11 @@ async def register_by_invite(body: RegisterByInviteIn, background: BackgroundTas
                 inv["id"],
             )
 
+    # ⚠️ СОБЫТИЕ — ДО ОБЕИХ ВЕТОК, А НЕ В КАЖДОЙ ПО КОПИИ. Ранний `return`
+    # для `auto_verify` стоит ниже, и вызов, поставленный после него, работал
+    # бы только при включённой почте — то есть ровно наоборот тому, как это
+    # читается глазами. Одно место, обе ветки.
+    await _сказать_о_новом_сотруднике(p, user, background)
     if auto_verify:
         return await _auth_payload(p, user)
     background.add_task(

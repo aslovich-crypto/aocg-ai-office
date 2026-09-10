@@ -8,10 +8,14 @@
 проверять собственную выдумку (класс T136).
 """
 
-from datetime import date
+from datetime import date, timedelta, timezone
+from datetime import datetime as _dt
 
 import pytest
 import pytest_asyncio
+
+from app.routers import auth as модуль_входа
+from app.routers import reports as модуль_отчётов
 
 
 @pytest_asyncio.fixture
@@ -212,3 +216,225 @@ async def test_чужие_события_не_гасятся(client, as_role, db
         "SELECT read_at FROM notifications WHERE user_id=1 AND title='Чужое'"
     )
     assert чужое["read_at"] is None, "сотрудник погасил событие администратора"
+
+
+# ═══ ВТОРОЙ КАНАЛ: ПИСЬМА ══════════════════════════════════════════════════
+#
+# ⚠️ ДО 10.09.2026 ПИСЕМ НЕ КАСАЛСЯ НИ ОДИН ТЕСТ. Замер того дня: поиск
+# `send_report_status_email|send_report_submitted_email|send_invite_accepted_email`
+# по всему каталогу `tests/` давал НОЛЬ совпадений. Постановка T159 при этом
+# требует ровно обратного: «событие одно, каналов два; разведи их — появятся
+# два списка того, что считается событием, и разойдутся они молча».
+# Прибор был у одного канала из двух, и половина работы держалась на памяти.
+#
+# ⚠️ ПРОВЕРЯЕМ ФАКТ ВЫЗОВА, А НЕ SMTP. Настоящая отправка — чужой сервер;
+# её живьём принимает владелец (приёмка 10.09.2026 прошла, письмо об
+# отклонении дошло с причиной). Здесь стережём то, что в нашей власти:
+# что вызов ПОСТАВЛЕН, с тем адресом и с той причиной.
+#
+# ⚠️ ФОНОВЫЕ ЗАДАЧИ ПОД ASGITransport ИСПОЛНЯЮТСЯ — проверено отдельно
+# 10.09.2026, иначе весь этот раздел был бы зелёным вхолостую.
+
+
+@pytest.fixture
+def письма(monkeypatch):
+    """Перехват обоих писем об отчёте. Возвращает список кортежей аргументов."""
+    ушло = []
+    monkeypatch.setattr(
+        модуль_отчётов,
+        "send_report_status_email",
+        lambda *а: ушло.append(("статус",) + а),
+    )
+    monkeypatch.setattr(
+        модуль_отчётов,
+        "send_report_submitted_email",
+        lambda *а: ушло.append(("на проверку",) + а),
+    )
+    return ушло
+
+
+@pytest.mark.asyncio
+async def test_письмо_об_отклонении_уходит_с_причиной(client, db, контора, письма):
+    """⚠️ ТО САМОЕ ПИСЬМО, которое владелец увидел живьём 10.09.2026."""
+    r = await client.patch(
+        "/api/reports/1", json={"status": "Отклонён", "reason": "нет чека на 1200 ₽"}
+    )
+    assert r.status_code == 200, r.text
+    assert len(письма) == 1, "ровно одно письмо — автору отчёта"
+    вид, адрес, название, статус, причина, _ссылка = письма[0]
+    assert вид == "статус"
+    assert адрес == "ivan@example.com", "адресат письма — автор, а не отклонивший"
+    assert статус == "Отклонён"
+    assert причина == "нет чека на 1200 ₽", (
+        "причина обязана доехать ВТОРЫМ каналом тоже: человек читает почту, "
+        "а не колокольчик"
+    )
+    assert название == "Отчёт за май"
+
+
+@pytest.mark.asyncio
+async def test_письмо_об_одобрении_уходит(client, db, контора, письма):
+    """⚠️ ЭТО СОБЫТИЕ ЖИВЬЁМ НЕ ПРОВЕРЯЛОСЬ (граница приёмки 10.09.2026).
+
+    Ветка кода та же, что у отклонения, — но «та же ветка» это довод,
+    а не замер. Здесь замер.
+    """
+    r = await client.patch("/api/reports/1", json={"status": "Одобрен"})
+    assert r.status_code == 200, r.text
+    assert len(письма) == 1
+    вид, адрес, _название, статус, причина, _ссылка = письма[0]
+    assert (вид, адрес, статус) == ("статус", "ivan@example.com", "Одобрен")
+    assert причина == "", "у одобрения причины нет, и пустая строка — не None"
+
+
+@pytest.mark.asyncio
+async def test_письмо_на_проверку_уходит_всем_управляющим(
+    client_employee, db, контора, письма
+):
+    """Столько же писем, сколько строк события: один список на оба канала."""
+    r = await client_employee.patch("/api/reports/1", json={"status": "На проверке"})
+    assert r.status_code == 200, r.text
+    адреса = sorted(п[1] for п in письма)
+    assert адреса == ["admin@example.com", "buh@example.com"], (
+        "письмо каждому управляющему; автору себе — не пишем"
+    )
+    строки = await события(db)
+    assert len(строки) == len(письма), (
+        "число писем обязано совпадать с числом событий — иначе каналы "
+        "разошлись, а это ровно то, чего требует не допускать постановка"
+    )
+
+
+# ═══ ПОВТОРНОЕ НАЖАТИЕ ═════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_повторный_тот_же_статус_не_плодит_событий(client, db, контора, письма):
+    """⚠️ ПОВТОР ПРИ ПЛОХОЙ СЕТИ — ОБЫЧНОЕ ДЕЛО, А НЕ ОШИБКА ЧЕЛОВЕКА.
+
+    Решение владельца 10.09.2026 (вариант ⓐ): статус переписываем молча,
+    событие и письмо НЕ шлём. Против 409 довод прямой: «нажал, ответ
+    не дошёл, нажал снова — и получил ошибку на ВЕРНОМ действии».
+    """
+    п = {"status": "Отклонён", "reason": "нет чека"}
+    первый = await client.patch("/api/reports/1", json=п)
+    второй = await client.patch("/api/reports/1", json=п)
+    assert первый.status_code == 200 and второй.status_code == 200, "повтор безобиден"
+    assert первый.json()["receiptIds"] == второй.json()["receiptIds"], (
+        "ответ ТОЙ ЖЕ формы: фронт кладёт его в список, и вторая форма "
+        "разъехалась бы с базой на пустом месте"
+    )
+    assert len(await события(db)) == 1, "второе нажатие событий не плодит"
+    assert len(письма) == 1, "и писем тоже"
+
+
+# ═══ СОБЫТИЕ №4: ПО ПРИГЛАШЕНИЮ ЗАВЕЛАСЬ УЧЁТНАЯ ЗАПИСЬ ════════════════════
+#
+# ⚠️ ДО 10.09.2026 ЭТОГО СОБЫТИЯ НЕ БЫЛО ВОВСЕ, И ЭТО КЛАСС T149 «СДЕЛАЛИ
+# И НЕ ПОДКЛЮЧИЛИ»: вид `invite_accepted` был объявлен (`app/notifications.py`),
+# письмо `send_invite_accepted_email` было написано (`app/email_service.py`) —
+# а вызовов не было ни одного. Аудит 06.09 заглянул в модуль, увидел
+# объявление и счёл работу сделанной.
+
+
+@pytest_asyncio.fixture
+async def приглашение(db):
+    """Ссылка на конкретный адрес; срок — завтра, одно применение."""
+    await db.pool.execute(
+        """INSERT INTO invite_links
+             (token, org_id, role, created_by, expires_at, max_uses, email)
+           VALUES ($1,1,'employee',1,$2,1,$3)""",
+        "прогл",
+        _dt.now(timezone.utc) + timedelta(days=1),
+        "novy@example.com",
+    )
+    return db
+
+
+async def _завестись(client):
+    return await client.post(
+        "/api/auth/register-by-invite",
+        json={
+            "token": "прогл",
+            "email": "novy@example.com",
+            "password": "парольдлинный",
+            "first_name": "Пётр",
+            "last_name": "Сидоров",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_приглашение_принято_будит_управляющих_при_выключенной_почте(
+    client, db, контора, приглашение, monkeypatch
+):
+    """Ветка auto_verify: человек вошёл сразу."""
+    monkeypatch.setattr(модуль_входа, "email_enabled", lambda: False)
+    ушло = []
+    monkeypatch.setattr(
+        модуль_входа, "send_invite_accepted_email", lambda *а: ушло.append(а)
+    )
+    r = await _завестись(client)
+    assert r.status_code == 200, r.text
+    строки = await события(db)
+    assert len(строки) == 2, "по строке админу и бухгалтеру"
+    assert {с["user_id"] for с in строки} == {1, 5}
+    assert {с["kind"] for с in строки} == {"invite_accepted"}
+    assert "Пётр Сидоров" in строки[0]["title"], "управляющему нужно ИМЯ, а не id"
+    assert строки[0]["body"] == "Завёл учётную запись по приглашению", (
+        "⚠️ ТЕКСТ ЧЕСТНЫЙ (требование владельца 10.09.2026): при включённой "
+        "почте человек в этот момент ещё НЕ ВОШЁЛ, и «принял приглашение» "
+        "было бы неправдой в половине случаев"
+    )
+    assert sorted(а[0] for а in ушло) == ["admin@example.com", "buh@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_приглашение_принято_будит_управляющих_и_при_включённой_почте(
+    client, db, контора, приглашение, monkeypatch
+):
+    """⚠️ ВТОРАЯ ВЕТКА — ТА, ЧТО РАБОТАЕТ НА ПРОДЕ.
+
+    Здесь ручка отвечает `{"verified": False}` и уходит ранним `return` мимо
+    `_auth_payload`. Вызов события стоит ДО развилки именно поэтому: поставь
+    его после — работал бы ровно наоборот тому, как читается глазами.
+    """
+    monkeypatch.setattr(модуль_входа, "email_enabled", lambda: True)
+    monkeypatch.setattr(модуль_входа, "send_verification_email", lambda *а: True)
+    ушло = []
+    monkeypatch.setattr(
+        модуль_входа, "send_invite_accepted_email", lambda *а: ушло.append(а)
+    )
+    r = await _завестись(client)
+    assert r.status_code == 200 and r.json().get("verified") is False, r.text
+    строки = await события(db)
+    assert len(строки) == 2, "событие пишется и до подтверждения почты"
+    assert len(ушло) == 2, "и письма тоже"
+
+
+@pytest.mark.asyncio
+async def test_завёдшийся_админ_себе_события_не_пишет(client, db, контора, monkeypatch):
+    """Приглашение на роль администратора: новый человек сам управляющий."""
+    monkeypatch.setattr(модуль_входа, "email_enabled", lambda: False)
+    monkeypatch.setattr(модуль_входа, "send_invite_accepted_email", lambda *а: True)
+    await db.pool.execute(
+        """INSERT INTO invite_links
+             (token, org_id, role, created_by, expires_at, max_uses, email)
+           VALUES ('адм',1,'admin',1,$1,1,'novy@example.com')""",
+        _dt.now(timezone.utc) + timedelta(days=1),
+    )
+    r = await client.post(
+        "/api/auth/register-by-invite",
+        json={
+            "token": "адм",
+            "email": "novy@example.com",
+            "password": "парольдлинный",
+            "first_name": "Пётр",
+            "last_name": "Сидоров",
+        },
+    )
+    assert r.status_code == 200, r.text
+    строки = await события(db)
+    assert {с["user_id"] for с in строки} == {1, 5}, (
+        "себе не пишем: новый админ и так знает, что завёлся"
+    )

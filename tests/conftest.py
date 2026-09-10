@@ -163,7 +163,7 @@ class FakePool:
         # попытки считаются отдельно от выданных ссылок, потому что попытка
         # заводится и на несуществующий адрес (иначе пороги неравны и выдают
         # наши адреса).
-        self.notifications = []  # T159, временно — до перевода test_api.py
+        self.notifications = []  # T159; ветки записи и адресатов — ниже
         self.password_resets = []
         self.reset_attempts = []
         self._prid = 0
@@ -500,6 +500,38 @@ class FakePool:
             ]
             hits.sort(key=lambda r: r["created_at"])
             return [_dup_fakerow(r, self) for r in hits]
+        # ─── T159, событие «по приглашению завелась учётная запись» ───
+        #
+        # ⚠️ ЭТИ ДВЕ ВЕТКИ — НЕ «ИЗОБРАЖЕНИЕ ПО НАШЕМУ ОПИСАНИЮ», И РАЗНИЦУ
+        # НАДО ЗНАТЬ (класс T136). Они фильтруют ТОТ ЖЕ список `self.users`
+        # по тем же полям, что настоящий SQL, — то есть повторяют условие,
+        # а не его толкование. Проверка самого события живёт на живой базе
+        # (`tests/pg/test_notifications.py`); здесь ветки нужны ровно затем,
+        # чтобы регистрация по приглашению не падала у двойника на запросе,
+        # которого он не знает.
+        #
+        # ⚠️ ЗАВЕДЕНЫ 10.09.2026, КОГДА ПРАВКА T159 УРОНИЛА ВОСЕМЬ ТЕСТОВ
+        # ДВОЙНИКА. Аудит того же дня это предсказал: «T159 невидима для
+        # двойника — все её запросы у `mirror_gaps.py` в разделе „запросы
+        # без ветки вовсе"». Строка [[T184]] («двойник под 427 тестами»)
+        # держит вопрос, переводить ли их на живой контур целиком.
+        if q.startswith("SELECT id FROM users WHERE org_id=$1 AND role = ANY"):
+            org_id, роли, кроме = args[0], list(args[1]), args[2]
+            return [
+                {"id": u["id"]}
+                for u in self.users
+                if u.get("org_id") == org_id
+                and u.get("role") in роли
+                and u.get("is_active", True)
+                and u.get("id") != кроме
+            ]
+        if q.startswith("SELECT email FROM users WHERE id = ANY"):
+            ids = list(args[0])
+            return [
+                {"email": u["email"]}
+                for u in self.users
+                if u.get("id") in ids and u.get("email") and u.get("is_active", True)
+            ]
         raise NotImplementedError(f"fetch: {q}")
 
     async def fetchrow(self, query, *args):
@@ -1419,6 +1451,22 @@ class FakePool:
                 }
             )
             return "INSERT"
+        if q.startswith("INSERT INTO notifications"):
+            # Поля в том же порядке, что в `app/notifications.py`:
+            # user_id, org_id, kind, title, body, report_id.
+            self.notifications.append(
+                {
+                    "id": len(self.notifications) + 1,
+                    "user_id": args[0],
+                    "org_id": args[1],
+                    "kind": args[2],
+                    "title": args[3],
+                    "body": args[4],
+                    "report_id": args[5],
+                    "read_at": None,
+                }
+            )
+            return "INSERT 0 1"
         raise NotImplementedError(f"execute: {q}")
 
     def acquire(self):
