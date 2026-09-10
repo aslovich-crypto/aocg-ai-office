@@ -468,6 +468,50 @@ async def init_db():
             -- ============================================================
             -- Обязательные (10 — fn уже есть; amount оставляем старую NUMERIC(12,2)):
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS datetime       TIMESTAMP WITH TIME ZONE;
+            -- ⚠️ И СРАЗУ СНИМАЕМ С НЕЁ ОБЕЩАНИЕ ЗОНЫ (строка 20, 11.09.2026).
+            -- Колонка заводилась как TIMESTAMPTZ, а ФНС отдаёт СТЕННОЕ время
+            -- кассы наивной строкой без зоны («2026-08-11T21:34:00»). Значение
+            -- получало метку +00:00, которой касса не присылала, и метка ЛОЖНА:
+            -- в России одиннадцать часовых поясов, зоны кассы мы не знаем.
+            -- Тип обещал то, чего в данных нет; честная форма — без зоны.
+            --
+            -- ⚠️ USING ... AT TIME ZONE 'UTC' — НЕ УКРАШЕНИЕ, А СУТЬ. Голый
+            -- ALTER ... TYPE конвертирует ПО ПОЯСУ СЕССИИ, и делает это МОЛЧА.
+            -- Замер на живом PostgreSQL 11.09.2026 (значение 21:34:00+00):
+            --   TZ=UTC           → 2026-08-11 21:34:00   верно
+            --   TZ=Europe/Moscow → 2026-08-12 00:34:00   СДВИГ НА ТРИ ЧАСА
+            --   USING ... 'UTC'  → 2026-08-11 21:34:00   верно при любом поясе
+            -- Прод в UTC, локальный кластер в Europe/Moscow — то есть на машине
+            -- разработчика голый ALTER сдвинул бы все чеки и выглядел успехом.
+            --
+            -- ⚠️ ИДЕМПОТЕНТНО: init_db крутится на КАЖДОМ старте, а ALTER TYPE
+            -- «IF NOT EXISTS» не имеет. Со второго запуска колонка уже без зоны,
+            -- и USING ... AT TIME ZONE 'UTC' у TIMESTAMP БЕЗ зоны означал бы
+            -- другое (навесить зону обратно), поэтому смена типа обёрнута
+            -- условием по information_schema — выполняется ровно один раз.
+            --
+            -- ⚠️ ВТОРАЯ ПОЛОВИНА РАБОТЫ — ВО ФРОНТЕ, И ПОРЯДОК НЕРАЗДЕЛИМ:
+            -- компенсация timeZone:"UTC" (src/lib/format.js) нужна ровно пока
+            -- метка лжёт. Снять её раньше этого DDL — экран уедет на три часа.
+            -- ⚠️ Валидация BEGIN/ROLLBACK на проде 10.09.2026 (владелец,
+            -- бастион): TimeZone +00:00, чеков 98, со временем 96, тип сменился,
+            -- СДВИГОВ НОЛЬ (сверка вернула пустую выборку), ROLLBACK вернул тип.
+            -- Рельсы: scripts/validate_receipt_datetime.py, список один.
+            -- Откат: ALTER TABLE receipts ALTER COLUMN datetime
+            --          TYPE TIMESTAMP WITH TIME ZONE
+            --          USING datetime AT TIME ZONE 'UTC';
+            DO $$
+            BEGIN
+              IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                 WHERE table_name = 'receipts' AND column_name = 'datetime'
+                   AND data_type = 'timestamp with time zone'
+              ) THEN
+                ALTER TABLE receipts
+                  ALTER COLUMN datetime TYPE TIMESTAMP WITHOUT TIME ZONE
+                  USING datetime AT TIME ZONE 'UTC';
+              END IF;
+            END $$;
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS currency       VARCHAR(3)  DEFAULT 'RUB';
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS operation_type VARCHAR(20) DEFAULT 'purchase';
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS org_legal      VARCHAR(500);
