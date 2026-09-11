@@ -1539,3 +1539,111 @@ async def test_без_времени_права_на_дозапрос_нет(cli
     assert resp.status_code == 200
     detail = await client.get("/api/receipts/%s" % resp.json()["id"])
     assert detail.json()["можно_дозапросить"] is False
+
+
+# ─── строка 31 · ④ правка чека перестала отвечать 200 на пустоту ───────
+
+
+@pytest.mark.asyncio
+async def test_дозаполнение_пустых_реквизитов_доезжает_до_базы(client, db):
+    """Единственная дорога вернуть реквизиты человеку с бумажным чеком.
+
+    Дозапросить такие чеки у ФНС нельзя В ПРИНЦИПЕ: запрос к ней собирается
+    из этих же значений, а строка QR нигде не хранится.
+    """
+    создан = await client.post(
+        "/api/receipts/",
+        json={"date": "2026-06-11", "org": "МЕРКА", "amount": 100.5},
+    )
+    assert создан.status_code == 200
+    id_чека = создан.json()["id"]
+
+    ответ = await client.patch(
+        "/api/receipts/%s" % id_чека,
+        json={
+            "kkt_fn": "7380440902249750",
+            "fd_num": "43200",
+            "fpd": "788765250",
+            "datetime": "2026-06-11T11:45:00",
+        },
+    )
+    assert ответ.status_code == 200
+    строка = await db.pool.fetchrow(
+        "SELECT kkt_fn, fd_num, fpd, datetime FROM receipts WHERE id=$1", id_чека
+    )
+    assert строка["kkt_fn"] == "7380440902249750"
+    assert строка["fd_num"] == "43200"
+    assert строка["fpd"] == "788765250"
+    assert строка["datetime"] is not None
+
+
+@pytest.mark.asyncio
+async def test_заполненный_реквизит_не_переписывается_и_отказ_называет_поле(client):
+    """Дозаполнить пропуск — восстановить факт; переписать непустое — подменить
+    первичный документ. Разные действия, и второе здесь не нужно.
+    """
+    создан = await client.post(
+        "/api/receipts/",
+        json={
+            "date": "2026-06-11",
+            "org": "МЕРКА",
+            "amount": 100.5,
+            "kkt_fn": "7380440902249751",
+        },
+    )
+    id_чека = создан.json()["id"]
+
+    ответ = await client.patch(
+        "/api/receipts/%s" % id_чека, json={"kkt_fn": "9999999999999999"}
+    )
+    assert ответ.status_code == 409
+    # Отказ обязан назвать ИМЕННО занятое поле: общее «нельзя» заставило бы
+    # гадать, какое из четырёх помешало.
+    assert "kkt_fn" in ответ.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_неизвестное_поле_в_правке_отвергается_а_не_проглатывается(client):
+    """⚠️ ЭТО И ЕСТЬ ГЛАВНАЯ ПОЛОВИНА ПРАВКИ ④.
+
+    Пока модель молча отбрасывала лишнее, ответ 200 означал «принято» и тогда,
+    когда не было принято НИЧЕГО. Снаружи это неотличимо от успеха.
+    """
+    создан = await client.post(
+        "/api/receipts/",
+        json={"date": "2026-06-11", "org": "МЕРКА", "amount": 100.5},
+    )
+    ответ = await client.patch(
+        "/api/receipts/%s" % создан.json()["id"], json={"такого_поля_нет": "1"}
+    )
+    assert ответ.status_code == 422, "неизвестное поле обязано получить отказ, а не 200"
+
+
+@pytest.mark.asyncio
+async def test_дозаполнение_до_дубля_даёт_409_а_не_500(client):
+    """Дозаполнение идёт МИМО всей проверки дублей — её стережёт база.
+
+    Наше дело здесь одно: не отдать 500 вместо внятного отказа.
+    """
+    первый = await client.post(
+        "/api/receipts/",
+        json={
+            "date": "2026-06-11",
+            "org": "МЕРКА",
+            "amount": 100.5,
+            "source": "qr_scan",
+            "kkt_fn": "7380440902249752",
+            "raw_data": {"fiscalDocumentNumber": "43201"},
+        },
+    )
+    assert первый.status_code == 200
+    второй = await client.post(
+        "/api/receipts/",
+        json={"date": "2026-06-11", "org": "ДРУГОЙ", "amount": 200.0},
+    )
+    ответ = await client.patch(
+        "/api/receipts/%s" % второй.json()["id"],
+        json={"kkt_fn": "7380440902249752", "fd_num": "43201"},
+    )
+    assert ответ.status_code == 409
+    assert "документ" in ответ.json()["detail"]

@@ -8,7 +8,7 @@ from typing import List, Optional
 import asyncpg
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import RedirectResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.auth import can_delete_any, can_see_all, get_current_user
 from app.categorization import DEFAULT_FALLBACK, categorize
@@ -55,7 +55,26 @@ def _фоновая_почта(отправить, *аргументы) -> None:
 
 # Что PATCH /receipts/{id} вправе менять. Имя колонки в SQL берётся ТОЛЬКО
 # отсюда: пользовательская строка идентификатором не станет (T38).
-ПОЛЯ_ЧЕКА = ("payment", "org", "category_id", "category_manual")
+ПОЛЯ_ЧЕКА = (
+    "payment",
+    "org",
+    "category_id",
+    "category_manual",
+    # ⚠️ ФИСКАЛЬНЫЕ РЕКВИЗИТЫ — ТОЛЬКО ДОЗАПОЛНЕНИЕ ПУСТОГО (строка 31, ④).
+    # До 12.09.2026 их здесь не было, и присланные значения отбрасывались
+    # МОЛЧА, с ответом 200: человек видел успех, а в базе не менялось ничего.
+    # Владелец: «молчаливый отказ хуже самой потери».
+    "kkt_fn",
+    "fd_num",
+    "fpd",
+    "datetime",
+)
+
+# Что из ПОЛЯ_ЧЕКА разрешено только ДОПИСЫВАТЬ В ПУСТОЕ, но не переписывать.
+# Реквизит на сохранённом чеке — документальный факт: заполнить пропуск значит
+# восстановить его, а переписать непустое — подменить первичный документ,
+# в том числе уже принятый к учёту. Разные действия, и второе здесь не нужно.
+ТОЛЬКО_ДОЗАПОЛНЕНИЕ = ("kkt_fn", "fd_num", "fpd", "datetime")
 
 router = APIRouter(prefix="/api/receipts", tags=["receipts"])
 
@@ -987,9 +1006,22 @@ async def bulk_delete_receipts(
 
 
 class ReceiptPatch(BaseModel):
+    # ⚠️ НЕИЗВЕСТНОЕ ПОЛЕ ТЕПЕРЬ ОТВЕРГАЕТСЯ, А НЕ ПРОГЛАТЫВАЕТСЯ (строка 31, ④).
+    # Пока модель молча отбрасывала лишнее, ответ 200 означал «принято»
+    # и когда не было принято НИЧЕГО. Снаружи это неотличимо от успеха —
+    # ровно так реквизиты, присланные в правку, пропадали без следа.
+    model_config = ConfigDict(extra="forbid")
+
     category: Optional[str] = None
     payment: Optional[str] = None
     org: Optional[str] = None
+    # Дозаполнение реквизитов у сохранённого чека: единственная дорога вернуть
+    # их человеку с бумажным чеком в руках. Дозапросить у ФНС такие чеки нельзя
+    # в принципе — запрос к ней СОБИРАЕТСЯ из этих же значений.
+    kkt_fn: Optional[str] = None
+    fd_num: Optional[str] = None
+    fpd: Optional[str] = None
+    datetime: Optional[_dt] = None
 
 
 @router.patch("/{id}")
@@ -1002,6 +1034,31 @@ async def patch_receipt(
     for k, v in [("payment", r.payment), ("org", r.org)]:
         if v is not None:
             поля[k] = v
+
+    # ── дозаполнение фискальных реквизитов ──────────────────────────────
+    новые_реквизиты = {
+        "kkt_fn": r.kkt_fn,
+        "fd_num": r.fd_num,
+        "fpd": r.fpd,
+        "datetime": r.datetime,
+    }
+    если_просят = {k: v for k, v in новые_реквизиты.items() if v is not None}
+    if если_просят:
+        текущий = await _fetch_receipt(p, id, user)
+        if not текущий:
+            raise HTTPException(status_code=404, detail="Not found")
+        занятые = [k for k in если_просят if текущий.get(k) is not None]
+        if занятые:
+            # ⚠️ ОТКАЗ ГОВОРИТ, ЧТО ИМЕННО ЗАНЯТО. Общее «нельзя» заставило бы
+            # гадать, какое из четырёх полей помешало.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Эти реквизиты уже заполнены и не переписываются: "
+                    + ", ".join(занятые)
+                ),
+            )
+        поля.update(если_просят)
     # Ручная смена категории: строку category в колонку НЕ пишем (вариант B), только
     # резолвим category_id server-side (per-org, НЕ из тела — IDOR-защита) и ставим
     # category_manual=TRUE — будущий батч-пересчёт (Фикс №4) такой чек не тронет.
@@ -1023,10 +1080,20 @@ async def patch_receipt(
     if not can_see_all(user["role"]):
         values.append(user["id"])
         where += f" AND user_id=${len(values)}"
-    row = await p.fetchrow(
-        f"UPDATE receipts SET {sets} {where} RETURNING *",
-        *values,
-    )
+    try:
+        row = await p.fetchrow(
+            f"UPDATE receipts SET {sets} {where} RETURNING *",
+            *values,
+        )
+    except asyncpg.UniqueViolationError:
+        # ⚠️ ДЕДУП СТЕРЕЖЁТ БАЗА, А НЕ ЭТА РУЧКА. Дозаполнение проходит мимо
+        # всей проверки дублей, которая живёт в создании чека, — значит пара
+        # ФН+ФД могла бы совпасть с чужой строкой. Уникальный индекс это
+        # ловит; наше дело — не отдать 500 вместо внятного отказа.
+        raise HTTPException(
+            status_code=409,
+            detail="Чек с такими ФН и ФД уже есть — это тот же документ",
+        )
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
     # RETURNING * даёт только колонки таблицы. Перечитываем чек канонической
