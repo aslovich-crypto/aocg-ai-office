@@ -722,9 +722,21 @@ async def test_unique_violation_kkt_fn_cross_org_returns_409(client, db):
 
 
 @pytest.mark.asyncio
-async def test_photo_ocr_with_fn_not_written_to_columns(client):
-    # Variant A: a photo_ocr receipt never writes its (unreliable) OCR number to
-    # the kkt_fn column — it stays only in raw_data.fn for reference.
+async def test_фн_с_QR_сохраняется_даже_когда_ярлык_источника_photo_ocr(client):
+    """⚠️ УЗКАЯ ФОРМА ВАРИАНТА A, решение владельца 12.09.2026 (строка 31, ③).
+
+    ДО ЭТОГО ТЕСТ ТРЕБОВАЛ ОБРАТНОГО, и требовал по ложному основанию: ФН
+    объявлялся ненадёжным по ЯРЛЫКУ ИСТОЧНИКА. Ярлык описывает ПОСЛЕДНИЙ шаг,
+    а не происхождение каждого поля: путь «QR отсканирован → ФНС промолчала →
+    распознали фото» кончается ярлыком photo_ocr, хотя ФН там прочитан
+    машиной с QR. Так терялся ДОСТОВЕРНЫЙ номер — один из четырёх каналов
+    потери, замеренных 11.09.2026.
+
+    Вариант A остаётся в силе для своего случая, и держится он теперь
+    на ПРОВЕРЯЕМОМ основании, а не на ярлыке: распознавание ФН не отдаёт
+    вовсе — промпту это прямо запрещено, а разбор ответа всегда даёт None
+    (см. `test_ocr_не_умеет_отдавать_фн` и `test_parse_ocr_response_kkt_fn_always_none`).
+    """
     resp = await client.post(
         "/api/receipts/",
         json={
@@ -732,16 +744,18 @@ async def test_photo_ocr_with_fn_not_written_to_columns(client):
             "org": "Кофейня",
             "amount": 250.0,
             "source": "photo_ocr",
-            "kkt_fn": "OCR_HALLUCINATED_FN",
-            "raw_data": {"fn": "OCR_HALLUCINATED_FN", "items": []},
+            "kkt_fn": "7380440902249744",
+            "raw_data": {"items": []},
         },
     )
     assert resp.status_code == 200
     rid = resp.json()["id"]
 
     row = (await client.get(f"/api/receipts/{rid}")).json()
-    assert row["kkt_fn"] is None
-    assert row["raw_data"]["fn"] == "OCR_HALLUCINATED_FN"  # preserved for reference
+    assert row["kkt_fn"] == "7380440902249744", (
+        "ФН, прочитанный с QR, обязан сохраниться — ярлык источника описывает "
+        "последний шаг, а не происхождение поля"
+    )
 
 
 # ─── qr_scan: FNS raw_data parsed into typed columns + receipt_items ──
