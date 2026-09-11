@@ -13,6 +13,7 @@ from app import env_check
 from app.routers import (
     receipts,
     reports,
+    reports_export,
     fns,
     cards,
     ocr,
@@ -154,6 +155,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(receipts.router)
 app.include_router(reports.router)
+app.include_router(reports_export.router)
 app.include_router(fns.router)
 app.include_router(cards.router)
 app.include_router(ocr.router)

@@ -31,3 +31,4 @@ bcrypt==4.0.1
 slowapi==0.1.9
 resend==2.4.0
 sentry-sdk[fastapi]==2.63.0
+XlsxWriter==3.2.9
