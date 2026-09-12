@@ -15,10 +15,10 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
+from app import reports_data
 from app.auth import can_see_all, get_current_user
 from app.database import get_pool
 from app.exports import report_xlsx
-from app.routers.reports import _fetch_report
 from app.storage import s3
 
 logger = logging.getLogger(__name__)
@@ -79,41 +79,24 @@ async def export_report_xlsx(id: int, user: dict = Depends(get_current_user)):
         )
 
     p = await get_pool()
-    отчёт = await _fetch_report(p, id, user)
+    # ⚠️ СБОР ИЗ БАЗЫ — ОБЩИЙ С БУДУЩЕЙ РУЧКОЙ ИНТЕГРАЦИИ (шаг 3, заход ①).
+    # Здесь остаётся только то, что относится ИМЕННО К ФАЙЛУ: подпись ссылки
+    # на снимок, сборка байтов и имя файла.
+    собранное = await reports_data.собрать(p, id, user)
     # Чужой отчёт неотличим от несуществующего — как во всех ручках отчётов.
-    if not отчёт:
+    if собранное is None:
         raise HTTPException(status_code=404, detail="Not found")
-
-    # Статья расхода нужна СЛОВОМ, а в чеке лежит только category_id —
-    # ни один запрос отчётов справочник не соединяет, поэтому соединяем здесь.
-    чеки = await p.fetch(
-        """SELECT receipts.*, categories.name AS статья
-             FROM report_items ri
-             JOIN receipts        ON receipts.id = ri.receipt_id
-        LEFT JOIN categories      ON categories.id = receipts.category_id
-            WHERE ri.report_id = $1 AND receipts.org_id = $2
-         ORDER BY receipts.date, receipts.id""",
-        id,
-        user["org_id"],
-    )
-
-    автор = await p.fetchrow(
-        "SELECT first_name, last_name FROM users WHERE id=$1 AND org_id=$2",
-        отчёт["user_id"],
-        user["org_id"],
-    )
+    отчёт_словарь, подотчётник, чеки = собранное
 
     cfg = s3.S3Config.from_env()
-    отчёт_словарь = dict(отчёт)
     строки = []
-    for чек in чеки:
-        ряд = dict(чек)
+    for ряд in чеки:
         ряд["снимок"] = _ссылка_на_снимок(ряд, cfg)
         строки.append(ряд)
 
     байты = report_xlsx.собрать(
         отчёт_словарь,
-        report_xlsx.фамилия_и_инициал(dict(автор) if автор else None),
+        подотчётник,
         строки,
         dt.datetime.now(),
     )
