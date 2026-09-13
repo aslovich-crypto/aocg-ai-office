@@ -197,6 +197,38 @@ async def test_photo_key_without_configured_storage_is_503_not_404(
     assert resp.status_code == 503
 
 
+# ────────────── персональные данные не кэшируются НИГДЕ ──────────────
+# ⚠️ ТРИ ВЕТКИ, ТРИ ПРОВЕРКИ, И ЭТО НЕ ИЗБЫТОК. Заголовок стоял только
+# на первой: ветка внешнего адреса и ветка base64 отдавали снимок без него,
+# и это заметил аудит захода ⑥. Снимок — персональные данные в ЛЮБОЙ ветке,
+# и промежуточному узлу его кэшировать нельзя независимо от того, откуда
+# мы его достали. Решение владельца 13.09.2026, расширение объёма по 13а.17.
+
+
+async def test_нет_кэша_на_ветке_хранилища(client, storage_env, monkeypatch):
+    _fake_storage(monkeypatch)
+    created = await _create(client, photo_key="receipts/1/abc.jpg")
+    resp = await client.get(f"/api/receipts/{created['id']}/photo")
+    assert resp.headers.get("cache-control") == "no-store"
+
+
+async def test_нет_кэша_на_ветке_внешнего_адреса(client, storage_env):
+    """Даже у 302: закэшированный редирект приводит к чужому снимку молча."""
+    created = await _create(client, photo_url="https://r2.example/abc.jpg")
+    resp = await client.get(
+        f"/api/receipts/{created['id']}/photo", follow_redirects=False
+    )
+    assert resp.status_code == 302
+    assert resp.headers.get("cache-control") == "no-store"
+
+
+async def test_нет_кэша_на_ветке_base64(client, storage_env):
+    created = await _create(client, raw_data={"photo_base64": _PNG_B64})
+    resp = await client.get(f"/api/receipts/{created['id']}/photo")
+    assert resp.status_code == 200
+    assert resp.headers.get("cache-control") == "no-store"
+
+
 # ─────────────────────── ручка OCR: три исхода ───────────────────────
 
 

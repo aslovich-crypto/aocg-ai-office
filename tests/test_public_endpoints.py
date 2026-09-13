@@ -117,6 +117,7 @@ from app.main import app
 ЗАЩИЩЕНЫ_КЛЮЧОМ = {
     "GET /api/integration/reports",
     "GET /api/integration/reports/{id}",
+    "GET /api/integration/receipts/{id}/photo",
 }
 
 

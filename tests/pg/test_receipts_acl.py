@@ -138,3 +138,59 @@ async def test_bulk_delete_employee_ignores_foreign(db, люди, client_employe
 async def test_dedupe_cleanup_403_for_non_admin(db, люди, client_employee):
     r = await client_employee.post("/api/receipts/dedupe-cleanup/")
     assert r.status_code == 403
+
+
+# ─────────────────────────── СНИМОК ЧЕКА ───────────────────────────
+# ⚠️ ЭТУ ПАРУ НЕ СТЕРЁГ НИКТО, И НАШЁЛ ЭТО АУДИТ ЗАХОДА ⑥ (13.09.2026).
+# Живые проверки ручки снимка были, но все ходили под админом: ветка
+# «сотрудник видит только свой» не исполнялась ни разу — ни здесь, ни
+# на двойнике. Условие отбора исполняет SQL, значит и проверять его надо
+# на живой базе, а не на зеркале.
+
+
+async def _чек_со_снимком(db, rid, user_id, org_id=ORG):
+    await _чек(db, rid, user_id, org_id)
+    await db.pool.execute(
+        "UPDATE receipts SET raw_data=$2 WHERE id=$1",
+        rid,
+        # Однопиксельный PNG: важен не рисунок, а то, что байты пришли.
+        {
+            "photo_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lE"
+            "QVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_employee_photo_own_ok(db, люди, client_employee):
+    await _чек_со_снимком(db, 1, EMP_ID)
+    resp = await client_employee.get("/api/receipts/1/photo")
+    assert resp.status_code == 200, resp.text
+    assert resp.content, "снимок пришёл пустым"
+
+
+@pytest.mark.asyncio
+async def test_employee_photo_foreign_404(db, люди, client_employee):
+    """Чужой снимок неотличим от несуществующего чека."""
+    await _чек_со_снимком(db, 2, ADMIN_ID)
+    свой = await client_employee.get("/api/receipts/999/photo")
+    чужой = await client_employee.get("/api/receipts/2/photo")
+    assert чужой.status_code == свой.status_code == 404
+    assert чужой.json() == свой.json()
+
+
+@pytest.mark.asyncio
+async def test_admin_photo_foreign_ok(db, люди, client):
+    """Заведомо разная пара: тот же чек админу отдаётся."""
+    await _чек_со_снимком(db, 2, EMP_ID)
+    resp = await client.get("/api/receipts/2/photo")
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+async def test_photo_of_foreign_org_404_even_for_admin(db, люди, client):
+    await db.добавить_организацию(id=777, name="Чужая")
+    await db.добавить_пользователя(id=9, first_name="Чужой", role="admin", org_id=777)
+    await _чек_со_снимком(db, 3, 9, org_id=777)
+    resp = await client.get("/api/receipts/3/photo")
+    assert resp.status_code == 404

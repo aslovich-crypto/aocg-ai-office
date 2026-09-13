@@ -1,5 +1,3 @@
-import base64
-import binascii
 import json
 import logging
 from datetime import date, datetime as _dt
@@ -7,7 +5,6 @@ from typing import List, Optional
 
 import asyncpg
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from fastapi.responses import RedirectResponse, Response
 from pydantic import BaseModel, ConfigDict
 
 from app.auth import can_delete_any, can_see_all, get_current_user
@@ -24,6 +21,7 @@ from app.notifications import (
 from app.routers.fns import спросить_фнс
 from app.parsers.items_parser import parse_fns_items, parse_ocr_items
 from app.parsers.ocr_parser import parse_ocr_response
+from app import receipt_photo
 from app.storage import s3
 
 # Срок жизни подписанной ссылки на фото. Пять минут — столько нужно браузеру,
@@ -214,67 +212,38 @@ async def suggest_payment(org: str, user: dict = Depends(get_current_user)):
 
 @router.get("/{id}/photo")
 async def get_receipt_photo(id: int, user: dict = Depends(get_current_user)):
-    """Фото чека. ТРИ ИСТОЧНИКА, ПОРЯДОК ЗНАЧИМ И ЗАКРЕПЛЁН ТЕСТАМИ.
+    """Фото чека человеку. Права — на КАЖДЫЙ запрос, отдача — общая с ключом.
 
-    photo_key (приватный бакет) → photo_url (внешний адрес) → base64 внутри
-    raw_data. Порядок именно такой, потому что до конца S-40 старые и новые
-    чеки живут ОДНОВРЕМЕННО: у старых снимок в базе, у новых — в хранилище.
-    Это стык, на котором ломается тихо: перевернётся порядок — часть чеков
-    начнёт отдавать устаревший источник, и снаружи это выглядит как «фото
-    просто другое», а не как ошибка.
+    ⚠️ САМА ОТДАЧА ЖИВЁТ В `app/receipt_photo.py` И ОБЩАЯ С РУЧКОЙ ПО КЛЮЧУ
+    (шаг 3, заход ⑥). Три источника в строгом порядке — ключ в приватном
+    бакете, внешний адрес, base64 внутри `raw_data` — скопированные во вторую
+    ручку разошлись бы молча: обе ответили бы 200 и отдали разное. Здесь
+    остаётся то, что у человека и у ключа РАЗНОЕ, — проверка прав.
+
+    ⚠️ ЧЕЛОВЕКУ ВЕТКА ВНЕШНЕГО АДРЕСА ОТВЕЧАЕТ 302: туда идёт его браузер.
+    Ключу 302 не отдаётся ни в каком виде, и это разница потребителя, а не
+    роли, — см. докстроку общего модуля.
     """
     p = await get_pool()
     # A-ACL: employee видит фото только своего чека; accountant/admin — любого в орг.
     if can_see_all(user["role"]):
         row = await p.fetchrow(
-            "SELECT photo_key, photo_url, raw_data FROM receipts WHERE id=$1 AND org_id=$2",
+            "SELECT %s FROM receipts WHERE id=$1 AND org_id=$2"
+            % receipt_photo.ПОЛЯ_СНИМКА,
             id,
             user["org_id"],
         )
     else:
         row = await p.fetchrow(
-            "SELECT photo_key, photo_url, raw_data FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3",
+            "SELECT %s FROM receipts WHERE id=$1 AND org_id=$2 AND user_id=$3"
+            % receipt_photo.ПОЛЯ_СНИМКА,
             id,
             user["org_id"],
             user["id"],
         )
     if not row:
         raise HTTPException(status_code=404, detail="Receipt not found")
-    if row["photo_key"]:
-        cfg = s3.S3Config.from_env()
-        if cfg is None:
-            # Ключ есть, а хранилище не настроено — это расхождение настроек,
-            # а не отсутствие фото. Молчать нельзя: 404 читался бы как «снимка нет».
-            raise HTTPException(status_code=503, detail="Storage is not configured")
-        try:
-            content, content_type = await s3.get_object(cfg, row["photo_key"])
-        except s3.ObjectNotFound:
-            # Ключ в базе есть, объекта в бакете нет — рассинхрон, но для
-            # пользователя это именно «фото нет».
-            logger.warning("Фото по ключу отсутствует в хранилище, чек id=%s", id)
-            raise HTTPException(status_code=404, detail="No photo for this receipt")
-        except s3.StorageError:
-            # 152-ФЗ: наружу не отдаём ни ключ, ни адрес, ни ответ поставщика.
-            logger.warning("Хранилище не отдало фото, чек id=%s", id)
-            raise HTTPException(status_code=502, detail="Storage is unavailable")
-        # no-store: фото — персональные данные, в кэше промежуточных узлов
-        # им не место.
-        return Response(
-            content=content,
-            media_type=content_type,
-            headers={"Cache-Control": "no-store"},
-        )
-    if row["photo_url"]:
-        return RedirectResponse(url=row["photo_url"], status_code=302)
-    raw = row["raw_data"] if isinstance(row["raw_data"], dict) else {}
-    photo_b64 = raw.get("photo_base64") if raw else None
-    if not photo_b64:
-        raise HTTPException(status_code=404, detail="No photo for this receipt")
-    try:
-        photo_bytes = base64.b64decode(photo_b64, validate=True)
-    except (binascii.Error, ValueError):
-        raise HTTPException(status_code=500, detail="Corrupt photo data")
-    return Response(content=photo_bytes, media_type="image/jpeg")
+    return await receipt_photo.отдать(row, номер=id, редиректом=True)
 
 
 async def _fetch_receipt(conn, id: int, user: dict):
