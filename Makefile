@@ -39,6 +39,13 @@ audit-stamps:
 audit-stamps-mut:
 	@$(PY) tests/tools/audit_stamp_mutations.py
 
+# ⚠️ ОТДЕЛЬНОЙ ЦЕЛЬЮ И НЕ В ХВОСТЕ (решение владельца 13.09.2026): предмет
+# здесь — выдача доступа НАРУЖУ, ключ уезжает в чужую базу на год. Зелёные
+# проверки ничего не значат, пока не показано, что они краснеют.
+## keys-mut — мутации ручек ключей интеграции (круг, срок, секрет, замок)
+keys-mut:
+	@$(PY) tests/tools/keys_mutations.py
+
 ## tracker-check — сверить, что до витрины доехали ВСЕ задачи
 tracker-check:
 	@$(PY) tests/tools/tracker_html_guard.py
