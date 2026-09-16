@@ -803,6 +803,98 @@ async def init_db():
         #   DROP INDEX IF EXISTS integration_keys_prefix_unique;
         #   DROP TABLE IF EXISTS integration_keys;
 
+        # ── 1C-21 заход ②: ДВЕ ТАБЛИЦЫ ОБМЕНА С 1С ──────────────────────
+        #
+        # ⚠️ ПОЧЕМУ СООТВЕТСТВИЕ КАТЕГОРИЙ — ТАБЛИЦА, А НЕ КОНСТАНТА В КОДЕ
+        # (решение владельца 16.09.2026). План счетов и статьи затрат живут
+        # в БАЗЕ КЛИЕНТА: у каждого он свой, и наш код их не знает. Константа
+        # здесь означала бы «у всех как у бюро» — то есть неверную проводку
+        # молча, а неверная проводка дороже отсутствующей.
+        #
+        # ⚠️ ССЫЛКИ НА 1С ХРАНЯТСЯ СТРОКАМИ, А НЕ ЧУЖИМИ GUID-КОЛОНКАМИ.
+        # `Ref_Key` в 1С — UUID, но валидировать его на нашей стороне нечем:
+        # мы не знаем, существует ли элемент в чужой базе, и узнаём это только
+        # при записи. Строка честнее: она не обещает целостности, которой нет.
+        #
+        # ⚠️ УНИКАЛЬНОСТЬ — ПО ПАРЕ (организация, категория). Одна категория
+        # у одной организации может вести ровно к одному счёту: два правила
+        # для одной строки расхода означают, что проводка зависит от порядка
+        # выборки, а такой дефект не ловится ничем.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS odata_category_map (
+                id            SERIAL PRIMARY KEY,
+                org_id        INTEGER NOT NULL REFERENCES organizations(id),
+                category_id   INTEGER NOT NULL REFERENCES categories(id),
+                -- Счёт затрат в базе клиента: «20.01», «26» и подобные.
+                -- Код, а не ссылка: в 1С счёт ищется по коду, и человек
+                -- в настройке пишет именно его.
+                account_code  TEXT NOT NULL,
+                -- Статья затрат — элемент справочника клиента. Храним и имя,
+                -- и ссылку: ссылка нужна записи, имя — человеку в настройке,
+                -- чтобы он видел, что выбрал, без похода в 1С.
+                expense_ref   TEXT,
+                expense_name  TEXT,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            -- Одна категория — одно правило внутри организации.
+            CREATE UNIQUE INDEX IF NOT EXISTS odata_category_map_unique
+                ON odata_category_map(org_id, category_id);
+        """)
+
+        # ⚠️ ЖУРНАЛ ВЫГРУЗОК ХРАНИТ ИСТОРИЮ, А НЕ ПОСЛЕДНЮЮ ПОПЫТКУ, и это
+        # ровно тот довод, по которому владелец 16.09.2026 отверг вариант
+        # «две колонки в reports»: там повторная отправка затёрла бы прошлую,
+        # и вопрос «когда и чем кончилось» остался бы без ответа.
+        #
+        # ⚠️ ЭТО ЖЕ МЕСТО ДЛЯ ИДЕМПОТЕНТНОСТИ (строка 1C-23): «уже выгружен»
+        # определяется по наличию УСПЕШНОЙ записи с идентификатором документа,
+        # а не по флагу. Флаг сказал бы «да», не сказав, ЧТО именно лежит в 1С.
+        #
+        # ⚠️ ЧАСТИЧНЫЙ УНИКАЛЬНЫЙ ИНДЕКС ПО УСПЕХАМ — ЗАЩИТА ОТ ВТОРОГО
+        # ДОКУМЕНТА НА УРОВНЕ БАЗЫ, а не только в коде. Неудачных попыток
+        # у отчёта может быть сколько угодно, успешная — одна. Гонка двух
+        # одновременных выгрузок ловится здесь же, как счёт живых ключей
+        # ловится замком в заходе ⑧.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS odata_exports (
+                id           SERIAL PRIMARY KEY,
+                org_id       INTEGER NOT NULL REFERENCES organizations(id),
+                report_id    INTEGER NOT NULL REFERENCES reports(id),
+                -- Кто нажал. Без него на вопрос «кто отправил это в 1С»
+                -- ответить нечем, а отвечать придётся бухгалтеру клиента.
+                user_id      INTEGER REFERENCES users(id),
+                started_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                finished_at  TIMESTAMPTZ,
+                -- Исход словом: ok · error · unavailable. Проверка значений
+                -- живёт в коде, а не в CHECK: набор исходов будет расти
+                -- вместе с заходами ③ и ④, а менять CHECK на живой таблице
+                -- дороже, чем менять кортеж в питоне.
+                outcome      TEXT NOT NULL,
+                -- Идентификатор созданного документа в 1С и его номер:
+                -- по ним человек находит документ в чужой базе глазами.
+                doc_ref      TEXT,
+                doc_number   TEXT,
+                -- Короткое объяснение неудачи ДЛЯ ЧЕЛОВЕКА. Тело чужой
+                -- ошибки сюда не кладётся: в нём имя пользователя и путь
+                -- базы клиента (замер 1C-21, заход ①).
+                error_note   TEXT
+            );
+            -- ⚠️ УСПЕШНАЯ ВЫГРУЗКА У ОТЧЁТА РОВНО ОДНА. Неудачных сколько
+            -- угодно: они история, а не состояние.
+            CREATE UNIQUE INDEX IF NOT EXISTS odata_exports_one_success
+                ON odata_exports(report_id) WHERE outcome = 'ok';
+            -- Журнал смотрят по организации и по времени: «что уехало за день».
+            CREATE INDEX IF NOT EXISTS idx_odata_exports_org
+                ON odata_exports(org_id, started_at DESC);
+        """)
+        # ОБРАТНЫЙ DDL (точка отката, выполняется РУКАМИ, не приложением):
+        #   DROP INDEX IF EXISTS idx_odata_exports_org;
+        #   DROP INDEX IF EXISTS odata_exports_one_success;
+        #   DROP TABLE IF EXISTS odata_exports;
+        #   DROP INDEX IF EXISTS odata_category_map_unique;
+        #   DROP TABLE IF EXISTS odata_category_map;
+
         await _снять_колонки_ставок_ндс(conn)
         await _засеять_первого_администратора(conn)
 
