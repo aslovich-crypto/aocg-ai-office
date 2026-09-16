@@ -181,6 +181,10 @@ def test_сверка_молчит_когда_всё_сошлось(caplog):
         "ODATA_URL": "https://площадка/base/odata/standard.odata",
         "ODATA_LOGIN": "служебный",
         "ODATA_PASSWORD": "тайна",
+        "ODATA_ORG_REF": "org-guid",
+        "ODATA_WAREHOUSE_REF": "sklad-guid",
+        "ODATA_CURRENCY_REF": "rub-guid",
+        "ODATA_RESPONSIBLE_REF": "otv-guid",
     }
     assert env_check.сверить(хорошее) == []
     with caplog.at_level("WARNING"):
@@ -217,6 +221,10 @@ def test_сверка_называет_каждое_расхождение(caplo
         "ODATA_URL": "https://площадка/base/odata/standard.odata",
         "ODATA_LOGIN": "служебный",
         "ODATA_PASSWORD": "тайна",
+        "ODATA_ORG_REF": "org-guid",
+        "ODATA_WAREHOUSE_REF": "sklad-guid",
+        "ODATA_CURRENCY_REF": "rub-guid",
+        "ODATA_RESPONSIBLE_REF": "otv-guid",
     }
     имена = {имя for имя, _видно, _угроза in env_check.сверить(плохое)}
     assert имена == {
@@ -261,6 +269,10 @@ def test_отсутствие_переменной_с_безопасным_ум�
         "ODATA_URL": "https://площадка/base/odata/standard.odata",
         "ODATA_LOGIN": "служебный",
         "ODATA_PASSWORD": "тайна",
+        "ODATA_ORG_REF": "org-guid",
+        "ODATA_WAREHOUSE_REF": "sklad-guid",
+        "ODATA_CURRENCY_REF": "rub-guid",
+        "ODATA_RESPONSIBLE_REF": "otv-guid",
     }
     # Ни JWT_ALGORITHM, ни сроков, ни SECURITY_* — как в панели на 04.09.2026.
     assert env_check.сверить(основа) == []

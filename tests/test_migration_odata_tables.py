@@ -158,3 +158,39 @@ def test_внешние_ключи_на_организацию_есть_у_об�
         assert "org_id" in создание and "REFERENCES organizations(id)" in создание, (
             "у %s нет внешнего ключа на организацию" % таблица
         )
+
+
+def test_печать_sql_работает_без_драйвера_базы():
+    """⚠️ ПРИБОР НА ПРИБОР. `--sql` запускает ВЛАДЕЛЕЦ на своей машине, где
+    `asyncpg` нет и не будет, — он берёт текст и несёт его на бастион.
+    Инструмент, который нельзя запустить там, где он нужен, бесполезен.
+
+    ⚠️ ОКРУЖЕНИЕ БЕЗ ДРАЙВЕРА СОЗДАЁТСЯ, А НЕ ИЩЕТСЯ. Системный питон без
+    зависимостей на одной машине есть, на другой нет, и сторож зависел бы от
+    того, где его гоняют. `sys.modules["asyncpg"] = None` делает импорт
+    невозможным ДЕТЕРМИНИРОВАННО — ровно так, как на машине владельца.
+    """
+    import subprocess
+    import sys
+
+    сценарий = (
+        "import sys, runpy\n"
+        "sys.modules['asyncpg'] = None\n"
+        "sys.argv = ['validate_odata_tables.py', '--sql']\n"
+        "runpy.run_path('scripts/validate_odata_tables.py', run_name='__main__')\n"
+    )
+    итог = subprocess.run(
+        [sys.executable, "-c", сценарий],
+        cwd=str(КОРЕНЬ),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert итог.returncode == 0, "--sql не работает без драйвера базы (код %s):\n%s" % (
+        итог.returncode,
+        (итог.stderr or итог.stdout)[-800:],
+    )
+    assert "BEGIN;" in итог.stdout and "ROLLBACK;" in итог.stdout, (
+        "--sql отработал, но текста валидации нет"
+    )
+    assert "COMMIT;" not in итог.stdout

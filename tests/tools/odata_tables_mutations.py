@@ -115,6 +115,15 @@ import tempfile
         "состояние, ради ухода от которого колонка и заведена",
     ),
     (
+        "⑫ драйвер базы снова импортируется вверху рельсов",
+        РЕЛЬСЫ,
+        "import asyncio\nimport os\nimport sys\n",
+        "import asyncio\nimport os\nimport sys\n\nimport asyncpg\n",
+        [СТОРОЖ],
+        "`--sql` владелец запускает на машине без asyncpg; импорт вверху ронял "
+        "печать SQL ещё до текста — прибор нельзя было запустить там, где он нужен",
+    ),
+    (
         "⑧ таблицы в init_db нет вовсе, а рельсы зелёные",
         СХЕМА,
         "            CREATE TABLE IF NOT EXISTS odata_exports (",

@@ -28,8 +28,14 @@ class ПоддельнаяОдинЭс:
     """
 
     def __init__(
-        self, проведение_ок=True, запись_код=200, контрагенты=None, счета=None
+        self,
+        проведение_ок=True,
+        запись_код=200,
+        контрагенты=None,
+        счета=None,
+        дубли=False,
     ):
+        self.дубли = дубли
         self.вызовы = []
         self.проведение_ок = проведение_ок
         self.запись_код = запись_код
@@ -45,6 +51,11 @@ class ПоддельнаяОдинЭс:
             значение = фильтр.split("'")[1] if "'" in фильтр else ""
             словарь = self.контрагенты if "Контрагенты" in путь else self.счета
             ссылка = словарь.get(значение)
+            if self.дубли and "Контрагенты" in путь and ссылка:
+                # Два контрагента с одним ИНН — филиалы, дубли. Не редкость.
+                return 200, {
+                    "тело": {"value": [{"Ref_Key": ссылка}, {"Ref_Key": "второй"}]}
+                }
             return 200, {"тело": {"value": [{"Ref_Key": ссылка}] if ссылка else []}}
         if путь.endswith("/Post"):
             return (
@@ -299,3 +310,130 @@ async def test_отказ_1с_пишется_в_журнал_и_не_роняе�
         "SELECT outcome FROM odata_exports WHERE report_id=1"
     )
     assert исход == "error"
+
+
+# ── БЕЗ КОНТРАГЕНТА: ДОКУМЕНТ УХОДИТ, НО НЕ ПРОВОДИТСЯ (решение 16.09) ──
+
+
+def _проводили(одинэс):
+    return [в for в in одинэс.вызовы if в[0] == "POST" and в[1].endswith("/Post")]
+
+
+async def _проверить_непроведённый(client, db, одинэс, ожидаемые_чеки):
+    """⚠️ ОБЩАЯ ПРОВЕРКА ТРЁХ ИСХОДОВ ОДНОГО ПРЕДМЕТА. Документ уходит,
+    НЕ проводится, причина названа словами, чеки перечислены, в журнале
+    исход `unposted` — не `partial`: проведение не падало, его не делали."""
+    тело = (await client.post(ВЫГРУЗКА % 1)).json()
+    assert тело["выгружен"] is True, "отчёт заблокирован из-за чеков без контрагента"
+    assert тело["проведён"] is False, "документ с пустым контрагентом проведён"
+    assert _проводили(одинэс) == [], "вызов Post всё-таки ушёл"
+    assert тело["чеки_без_контрагента"] == ожидаемые_чеки
+    причина = тело["почему_не_проведён"] or ""
+    assert "намеренно" in причина and all(str(ч) in причина for ч in ожидаемые_чеки), (
+        "причина не названа или чеки не перечислены: %r" % причина
+    )
+    строка = await db.pool.fetchrow("SELECT outcome, error_note FROM odata_exports")
+    assert строка["outcome"] == "unposted", (
+        "исход %s, а должен быть unposted" % строка["outcome"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_нет_инн_документ_уходит_но_не_проводится(
+    client, db, настроено, monkeypatch
+):
+    await _отчёт(db, инн=None)
+    одинэс = ПоддельнаяОдинЭс()
+    monkeypatch.setattr(odata_client, "запросить", одинэс)
+    await _проверить_непроведённый(client, db, одинэс, [1])
+
+
+@pytest.mark.asyncio
+async def test_инн_без_совпадения_документ_не_проводится(
+    client, db, настроено, monkeypatch
+):
+    """Второй путь того же исхода: ИНН есть, контрагента с ним в базе нет."""
+    await _отчёт(db)
+    одинэс = ПоддельнаяОдинЭс(контрагенты={})
+    monkeypatch.setattr(odata_client, "запросить", одинэс)
+    await _проверить_непроведённый(client, db, одинэс, [1])
+
+
+@pytest.mark.asyncio
+async def test_два_совпадения_по_инн_документ_не_проводится(
+    client, db, настроено, monkeypatch
+):
+    """Третий путь: выбрать «первого из двух» и есть додумывание."""
+    await _отчёт(db)
+    одинэс = ПоддельнаяОдинЭс(дубли=True)
+    monkeypatch.setattr(odata_client, "запросить", одинэс)
+    await _проверить_непроведённый(client, db, одинэс, [1])
+
+
+@pytest.mark.asyncio
+async def test_с_контрагентом_документ_проводится(client, db, настроено, monkeypatch):
+    """Пара к трём тестам выше: правило не должно было отнять проведение
+    у отчётов, где контрагенты найдены у всех."""
+    await _отчёт(db)
+    одинэс = ПоддельнаяОдинЭс()
+    monkeypatch.setattr(odata_client, "запросить", одинэс)
+    тело = (await client.post(ВЫГРУЗКА % 1)).json()
+    assert тело["проведён"] is True and len(_проводили(одинэс)) == 1
+    assert тело["почему_не_проведён"] is None
+
+
+@pytest.mark.asyncio
+async def test_после_непроведённого_второй_документ_не_уходит(
+    client, db, настроено, monkeypatch
+):
+    await _отчёт(db, инн=None)
+    monkeypatch.setattr(odata_client, "запросить", ПоддельнаяОдинЭс())
+    await client.post(ВЫГРУЗКА % 1)
+    второй = ПоддельнаяОдинЭс()
+    monkeypatch.setattr(odata_client, "запросить", второй)
+    ответ = await client.post(ВЫГРУЗКА % 1)
+    assert ответ.status_code == 409 and "не проведён" in ответ.json()["detail"]
+    assert второй.вызовы == [], "после непроведённого ушёл второй документ"
+
+
+@pytest.mark.asyncio
+async def test_непроведённую_выгрузку_можно_отменить(
+    client, db, настроено, monkeypatch
+):
+    await _отчёт(db, инн=None)
+    monkeypatch.setattr(odata_client, "запросить", ПоддельнаяОдинЭс())
+    await client.post(ВЫГРУЗКА % 1)
+    assert (await client.post(ОТМЕНА % 1)).status_code == 200
+
+
+# ── ПЕРЕМЕННЫЕ: БЕЗ НИХ ВЫГРУЗКА ОТВЕЧАЕТ 503 С ИМЕНАМИ ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_без_единой_odata_переменной_ручка_503_с_именами(client, db, monkeypatch):
+    """⚠️ Отсутствие ссылок на 1С ломает ВЫГРУЗКУ, а не приложение: ручка
+    отвечает 503 и перечисляет, чего не хватает, — по именам, без значений."""
+    for пер in (
+        "ODATA_URL",
+        "ODATA_LOGIN",
+        "ODATA_PASSWORD",
+        "ODATA_ORG_REF",
+        "ODATA_WAREHOUSE_REF",
+        "ODATA_CURRENCY_REF",
+        "ODATA_RESPONSIBLE_REF",
+    ):
+        monkeypatch.delenv(пер, raising=False)
+    await _отчёт(db)
+    одинэс = ПоддельнаяОдинЭс()
+    monkeypatch.setattr(odata_client, "запросить", одинэс)
+    ответ = await client.post(ВЫГРУЗКА % 1)
+    assert ответ.status_code == 503, ответ.text
+    текст = ответ.json()["detail"]
+    for имя in (
+        "ODATA_ORG_REF",
+        "ODATA_WAREHOUSE_REF",
+        "ODATA_CURRENCY_REF",
+        "ODATA_RESPONSIBLE_REF",
+    ):
+        assert имя in текст, "не названа %s: %s" % (имя, текст)
+    assert одинэс.вызовы == [], "при ненастроенном обмене ходили в 1С"
