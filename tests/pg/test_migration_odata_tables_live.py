@@ -26,6 +26,8 @@ import sys
 import pytest
 
 СНЕСТИ = (
+    "DROP INDEX IF EXISTS odata_user_map_unique",
+    "DROP TABLE IF EXISTS odata_user_map",
     "DROP INDEX IF EXISTS idx_odata_exports_org",
     "DROP INDEX IF EXISTS odata_exports_one_success",
     "DROP TABLE IF EXISTS odata_exports",
@@ -114,9 +116,9 @@ async def test_init_db_поднимает_обе_таблицы(db):
     """Схема теста поднимается тем же `init_db`, что и прод."""
     есть = await db.pool.fetchval(
         "SELECT count(*) FROM information_schema.tables"
-        " WHERE table_name IN ('odata_category_map','odata_exports')"
+        " WHERE table_name IN ('odata_category_map','odata_exports','odata_user_map')"
     )
-    assert есть == 2, "init_db не создал таблицы обмена: их %s" % есть
+    assert есть == 3, "init_db не создал таблицы обмена: их %s" % есть
 
 
 @pytest.mark.asyncio
@@ -223,3 +225,40 @@ async def test_одна_категория_одно_правило(db):
     await правило("20.01")
     with pytest.raises(asyncpg.UniqueViolationError):
         await правило("26")
+
+
+@pytest.mark.asyncio
+async def test_один_человек_одно_соответствие(db):
+    """⚠️ ДВА СООТВЕТСТВИЯ НА ОДНОГО ЧЕЛОВЕКА означали бы, что подотчётное
+    лицо в документе зависит от порядка выборки — а документ уедет в учёт
+    клиента, и разбираться с ним будет его бухгалтер."""
+    import asyncpg
+
+    await db.добавить_организацию(id=1)
+    await db.обеспечить_пользователя(id=1, first_name="А", role="admin")
+
+    async def соответствие(ссылка):
+        await db.pool.execute(
+            "INSERT INTO odata_user_map (org_id, user_id, person_ref, person_name)"
+            " VALUES (1, 1, $1, 'Шукалович А.')",
+            ссылка,
+        )
+
+    await соответствие("89065214-36a5-11ea-849f-5cb90100870b")
+    with pytest.raises(asyncpg.UniqueViolationError):
+        await соответствие("другой-элемент-справочника")
+
+
+@pytest.mark.asyncio
+async def test_соответствие_человека_без_ссылки_не_заводится(db):
+    """Пустая ссылка — это «соответствие есть, а вести некуда»: запись,
+    которая выглядит настройкой и ею не является."""
+    import asyncpg
+
+    await db.добавить_организацию(id=1)
+    await db.обеспечить_пользователя(id=1, first_name="А", role="admin")
+    with pytest.raises(asyncpg.NotNullViolationError):
+        await db.pool.execute(
+            "INSERT INTO odata_user_map (org_id, user_id, person_ref)"
+            " VALUES (1, 1, NULL)"
+        )

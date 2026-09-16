@@ -35,7 +35,7 @@ import sys
 
 import asyncpg
 
-ТАБЛИЦЫ = ("odata_category_map", "odata_exports")
+ТАБЛИЦЫ = ("odata_category_map", "odata_exports", "odata_user_map")
 
 # ⚠️ ДОСЛОВНАЯ КОПИЯ ТОГО, ЧТО ЛЕЖИТ В `init_db()`.
 МИГРАЦИЯ = [
@@ -68,12 +68,25 @@ import asyncpg
     ON odata_exports(report_id) WHERE outcome = 'ok'""",
     """CREATE INDEX IF NOT EXISTS idx_odata_exports_org
     ON odata_exports(org_id, started_at DESC)""",
+    """CREATE TABLE IF NOT EXISTS odata_user_map (
+    id          SERIAL PRIMARY KEY,
+    org_id      INTEGER NOT NULL REFERENCES organizations(id),
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    person_ref  TEXT NOT NULL,
+    person_name TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS odata_user_map_unique
+    ON odata_user_map(org_id, user_id)""",
     """ALTER TABLE odata_exports
     ADD COLUMN IF NOT EXISTS defaulted_categories TEXT[] NOT NULL DEFAULT '{}'""",
 ]
 
 # ОБРАТНЫЙ DDL — точка отката. Выполняется РУКАМИ, приложением никогда.
 ОБРАТНЫЙ_DDL = [
+    "DROP INDEX IF EXISTS odata_user_map_unique",
+    "DROP TABLE IF EXISTS odata_user_map",
     "DROP INDEX IF EXISTS idx_odata_exports_org",
     "DROP INDEX IF EXISTS odata_exports_one_success",
     "DROP TABLE IF EXISTS odata_exports",
@@ -107,8 +120,18 @@ import asyncpg
         "error_note",
         "defaulted_categories",
     ),
+    "odata_user_map": (
+        "id",
+        "org_id",
+        "user_id",
+        "person_ref",
+        "person_name",
+        "created_at",
+        "updated_at",
+    ),
 }
 ОЖИДАЕМЫЕ_ИНДЕКСЫ = (
+    "odata_user_map_unique",
     "odata_category_map_unique",
     "odata_exports_one_success",
     "idx_odata_exports_org",
@@ -127,12 +150,13 @@ def напечатать_sql() -> None:
         print(команда.strip() + ";")
     print(
         "SELECT table_name, count(*) AS колонок FROM information_schema.columns\n"
-        " WHERE table_name IN ('odata_category_map','odata_exports')\n"
+        " WHERE table_name IN ('odata_category_map','odata_exports','odata_user_map')\n"
         " GROUP BY table_name ORDER BY table_name;"
     )
     print(
         "SELECT indexname FROM pg_indexes\n"
-        " WHERE tablename IN ('odata_category_map','odata_exports') ORDER BY indexname;"
+        " WHERE tablename IN ('odata_category_map','odata_exports','odata_user_map')\n"
+        " ORDER BY indexname;"
     )
     print("ROLLBACK;")
     # ⚠️ ЧИСЛА СЧИТАЮТСЯ, А НЕ ВПИСЫВАЮТСЯ РУКАМИ. Первая редакция обещала

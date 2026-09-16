@@ -910,12 +910,47 @@ async def init_db():
             ALTER TABLE odata_exports
                 ADD COLUMN IF NOT EXISTS defaulted_categories TEXT[] NOT NULL DEFAULT '{}';
         """)
+        # ⚠️ ТРЕТЬЯ ТАБЛИЦА ОБМЕНА: КТО ЕСТЬ КТО. Решение 1C-08 от 16.09.2026 —
+        # сопоставление людей СПРАВОЧНИКОМ СООТВЕТСТВИЙ, а не автоподбором.
+        # Основание цифрами замера 1C-01: ИНН заполнен у ОДНОГО человека
+        # из трёх, поэтому сопоставление по ИНН отпадает; по ФИО ненадёжно
+        # (однофамильцы, разный порядок частей имени), и проверить это не на
+        # чем — людей трое. Настраивается один раз руками и переносится
+        # на клиентов как есть: у них десятки людей, а не тысячи.
+        #
+        # ⚠️ ИМЯ ЧЕЛОВЕКА ХРАНИТСЯ РЯДОМ СО ССЫЛКОЙ, и это не дубль: ссылка
+        # нужна записи, имя — человеку в настройке, чтобы он видел, кого
+        # выбрал, не ходя в 1С. По той же причине имя лежит и в журнале
+        # выгрузок (`defaulted_categories`).
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS odata_user_map (
+                id          SERIAL PRIMARY KEY,
+                org_id      INTEGER NOT NULL REFERENCES organizations(id),
+                user_id     INTEGER NOT NULL REFERENCES users(id),
+                -- Элемент Catalog_ФизическиеЛица в базе клиента. Строкой,
+                -- а не UUID-колонкой: проверить существование элемента
+                -- в ЧУЖОЙ базе нам нечем, и строка не обещает целостности,
+                -- которой нет (тот же довод, что у соответствия категорий).
+                person_ref  TEXT NOT NULL,
+                person_name TEXT,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            -- Один наш человек — одно соответствие внутри организации.
+            -- Два означали бы, что подотчётное лицо в документе зависит
+            -- от порядка выборки.
+            CREATE UNIQUE INDEX IF NOT EXISTS odata_user_map_unique
+                ON odata_user_map(org_id, user_id);
+        """)
+
         # ОБРАТНЫЙ DDL (точка отката, выполняется РУКАМИ, не приложением):
         #   DROP INDEX IF EXISTS idx_odata_exports_org;
         #   DROP INDEX IF EXISTS odata_exports_one_success;
         #   DROP TABLE IF EXISTS odata_exports;
         #   DROP INDEX IF EXISTS odata_category_map_unique;
         #   DROP TABLE IF EXISTS odata_category_map;
+        #   DROP INDEX IF EXISTS odata_user_map_unique;
+        #   DROP TABLE IF EXISTS odata_user_map;
 
         await _снять_колонки_ставок_ндс(conn)
         await _засеять_первого_администратора(conn)
