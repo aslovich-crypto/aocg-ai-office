@@ -16,6 +16,7 @@ from app.routers import (
     reports_export,
     integration,
     keys,
+    odata,
     fns,
     cards,
     ocr,
@@ -167,6 +168,7 @@ app.include_router(reports.router)
 app.include_router(reports_export.router)
 app.include_router(integration.router)
 app.include_router(keys.router)
+app.include_router(odata.router)
 app.include_router(fns.router)
 app.include_router(cards.router)
 app.include_router(ocr.router)

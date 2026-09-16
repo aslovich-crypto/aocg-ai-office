@@ -33,6 +33,13 @@ _SECRET_KEYS = {
     "authorization",
     "passport",
     "snils",
+    # ⚠️ ДОСТУПЫ К 1С КЛИЕНТА (1C-21). Ключ `odata_password` под общее
+    # правило «password» НЕ подпадает: сравнение идёт по ТОЧНОМУ имени ключа,
+    # а не по вхождению. Логин здесь тоже секрет: это учётная запись в чужой
+    # бухгалтерии, и по ней видно, кого мы обслуживаем.
+    "odata_password",
+    "odata_login",
+    "odata_url",
 }
 _OPERATOR_KEYS = {"operator", "cashier"}  # кассир в ответе ФНС и parsed-алиас
 

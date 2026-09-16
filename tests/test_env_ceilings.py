@@ -176,6 +176,11 @@ def test_сверка_молчит_когда_всё_сошлось(caplog):
         "S3_BUCKET": "b",
         "S3_ENDPOINT": "e",
         "SECURITY_AUTH_RATE_LIMIT": "10",
+        # Доступы к 1С (1C-21): обмен выключен, пока их нет, и прибор об этом
+        # говорит — значит в «полном» наборе они обязаны быть.
+        "ODATA_URL": "https://площадка/base/odata/standard.odata",
+        "ODATA_LOGIN": "служебный",
+        "ODATA_PASSWORD": "тайна",
     }
     assert env_check.сверить(хорошее) == []
     with caplog.at_level("WARNING"):
@@ -209,6 +214,9 @@ def test_сверка_называет_каждое_расхождение(caplo
         "MAX_RELAY_TOKEN": "t",
         "S3_BUCKET": "b",
         "S3_ENDPOINT": "e",
+        "ODATA_URL": "https://площадка/base/odata/standard.odata",
+        "ODATA_LOGIN": "служебный",
+        "ODATA_PASSWORD": "тайна",
     }
     имена = {имя for имя, _видно, _угроза in env_check.сверить(плохое)}
     assert имена == {
@@ -250,6 +258,9 @@ def test_отсутствие_переменной_с_безопасным_ум�
         "MAX_RELAY_TOKEN": "t",
         "S3_BUCKET": "b",
         "S3_ENDPOINT": "e",
+        "ODATA_URL": "https://площадка/base/odata/standard.odata",
+        "ODATA_LOGIN": "служебный",
+        "ODATA_PASSWORD": "тайна",
     }
     # Ни JWT_ALGORITHM, ни сроков, ни SECURITY_* — как в панели на 04.09.2026.
     assert env_check.сверить(основа) == []
