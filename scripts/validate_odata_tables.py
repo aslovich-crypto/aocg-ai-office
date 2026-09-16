@@ -61,12 +61,15 @@ import asyncpg
     outcome      TEXT NOT NULL,
     doc_ref      TEXT,
     doc_number   TEXT,
-    error_note   TEXT
+    error_note   TEXT,
+    defaulted_categories TEXT[] NOT NULL DEFAULT '{}'
 )""",
     """CREATE UNIQUE INDEX IF NOT EXISTS odata_exports_one_success
     ON odata_exports(report_id) WHERE outcome = 'ok'""",
     """CREATE INDEX IF NOT EXISTS idx_odata_exports_org
     ON odata_exports(org_id, started_at DESC)""",
+    """ALTER TABLE odata_exports
+    ADD COLUMN IF NOT EXISTS defaulted_categories TEXT[] NOT NULL DEFAULT '{}'""",
 ]
 
 # ОБРАТНЫЙ DDL — точка отката. Выполняется РУКАМИ, приложением никогда.
@@ -102,6 +105,7 @@ import asyncpg
         "doc_ref",
         "doc_number",
         "error_note",
+        "defaulted_categories",
     ),
 }
 ОЖИДАЕМЫЕ_ИНДЕКСЫ = (

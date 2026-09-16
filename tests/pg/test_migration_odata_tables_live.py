@@ -152,6 +152,54 @@ async def test_успешная_выгрузка_у_отчёта_ровно_од
 
 
 @pytest.mark.asyncio
+async def test_подстановка_по_умолчанию_остаётся_в_журнале(db):
+    """⚠️ ТРЕБОВАНИЕ ВЛАДЕЛЬЦА ШИРЕ МОМЕНТА ОТВЕТА: через месяц бухгалтер
+    спросит, почему всё легло на 20.01, и ответ обязан лежать В ЖУРНАЛЕ.
+    Проверяем оба конца: пустой список по умолчанию (подстановок не было)
+    и сохранённый перечень (какие категории настроить)."""
+    await db.добавить_организацию(id=1)
+    await db.обеспечить_пользователя(id=1, first_name="А", role="admin")
+    await db.добавить_отчёт(id=2, title="Август", user_id=1, org_id=1)
+
+    # ① Ничего не передали — «правила нашлись для всех», а НЕ «не знаем».
+    await db.pool.execute(
+        "INSERT INTO odata_exports (org_id, report_id, outcome) VALUES (1, 2, 'ok')"
+    )
+    пусто = await db.pool.fetchval(
+        "SELECT defaulted_categories FROM odata_exports WHERE report_id=2"
+    )
+    assert пусто == [], "умолчание не пустой список, а %r" % (пусто,)
+
+    # ② Перечень сохраняется целиком и читается без join с категориями.
+    await db.pool.execute(
+        "INSERT INTO odata_exports (org_id, report_id, outcome, defaulted_categories)"
+        " VALUES (1, 2, 'error', $1::text[])",
+        ["Такси", "Канцтовары"],
+    )
+    список = await db.pool.fetchval(
+        "SELECT defaulted_categories FROM odata_exports"
+        " WHERE report_id=2 AND outcome='error'"
+    )
+    assert список == ["Такси", "Канцтовары"]
+
+
+@pytest.mark.asyncio
+async def test_колонка_подстановок_не_допускает_неизвестности(db):
+    """NULL здесь означал бы «не знаем, были ли подстановки» — а это
+    ровно то состояние, ради ухода от которого колонка и заводится."""
+    import asyncpg
+
+    await db.добавить_организацию(id=1)
+    await db.обеспечить_пользователя(id=1, first_name="А", role="admin")
+    await db.добавить_отчёт(id=3, title="Сентябрь", user_id=1, org_id=1)
+    with pytest.raises(asyncpg.NotNullViolationError):
+        await db.pool.execute(
+            "INSERT INTO odata_exports (org_id, report_id, outcome, defaulted_categories)"
+            " VALUES (1, 3, 'ok', NULL)"
+        )
+
+
+@pytest.mark.asyncio
 async def test_одна_категория_одно_правило(db):
     """Два правила на одну категорию сделали бы проводку зависимой
     от порядка выборки."""
