@@ -2,6 +2,11 @@
 # -*- coding: utf-8 -*-
 """ВАЛИДАЦИЯ МИГРАЦИИ «таблицы обмена с 1С» — BEGIN/ROLLBACK, БЕЗ ЗАПИСИ.
 
+⚠️ ЗАХОД 1C-22 ДОБАВИЛ ЧЕТВЁРТУЮ ТАБЛИЦУ И ДВА ОГРАНИЧЕНИЯ-ПЕРЕЧИСЛЕНИЯ:
+профиль учёта организации (режим налогообложения, режим НДС, счёт по
+умолчанию), признак принятия в УСН у правила категории и обязательная
+статья затрат. Списки ниже — те же, что в `init_db()`, дословно.
+
 ⚠️ ЗАКРЕПЛЯЮЩЕЙ КОМАНДЫ ЗДЕСЬ НЕТ НИ ОДНОЙ — только откат. Транзакция
 открывается, DDL прогоняется на ЖИВОЙ схеме, состав замеряется через
 `information_schema`, и всё откатывается. База остаётся ровно такой же,
@@ -40,7 +45,12 @@ import sys
 # запустить ровно там, где он нужен. Стережёт это
 # `tests/test_migration_odata_tables.py::test_печать_sql_работает_без_драйвера_базы`.
 
-ТАБЛИЦЫ = ("odata_category_map", "odata_exports", "odata_user_map")
+ТАБЛИЦЫ = (
+    "odata_category_map",
+    "odata_exports",
+    "odata_user_map",
+    "org_accounting_profile",
+)
 
 # ⚠️ ДОСЛОВНАЯ КОПИЯ ТОГО, ЧТО ЛЕЖИТ В `init_db()`.
 МИГРАЦИЯ = [
@@ -49,13 +59,36 @@ import sys
     org_id        INTEGER NOT NULL REFERENCES organizations(id),
     category_id   INTEGER NOT NULL REFERENCES categories(id),
     account_code  TEXT NOT NULL,
-    expense_ref   TEXT,
+    expense_ref   TEXT NOT NULL,
     expense_name  TEXT,
+    usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'
+        CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',
+                                  'Распределяются', 'ВозвратРасхода')),
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )""",
     """CREATE UNIQUE INDEX IF NOT EXISTS odata_category_map_unique
     ON odata_category_map(org_id, category_id)""",
+    """ALTER TABLE odata_category_map
+    ADD COLUMN IF NOT EXISTS usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'
+        CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',
+                                  'Распределяются', 'ВозвратРасхода'))""",
+    """ALTER TABLE odata_category_map
+    ALTER COLUMN expense_ref SET NOT NULL""",
+    """CREATE TABLE IF NOT EXISTS org_accounting_profile (
+    id                   SERIAL PRIMARY KEY,
+    org_id               INTEGER NOT NULL REFERENCES organizations(id),
+    tax_regime           TEXT NOT NULL
+        CHECK (tax_regime IN ('usn_income_expense', 'usn_income',
+                              'osno', 'ausn')),
+    vat_mode             TEXT NOT NULL
+        CHECK (vat_mode IN ('not_payer', 'included', 'deductible')),
+    default_account_code TEXT NOT NULL,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS org_accounting_profile_unique
+    ON org_accounting_profile(org_id)""",
     """CREATE TABLE IF NOT EXISTS odata_exports (
     id           SERIAL PRIMARY KEY,
     org_id       INTEGER NOT NULL REFERENCES organizations(id),
@@ -90,6 +123,10 @@ import sys
 
 # ОБРАТНЫЙ DDL — точка отката. Выполняется РУКАМИ, приложением никогда.
 ОБРАТНЫЙ_DDL = [
+    "DROP INDEX IF EXISTS org_accounting_profile_unique",
+    "DROP TABLE IF EXISTS org_accounting_profile",
+    "ALTER TABLE odata_category_map DROP COLUMN IF EXISTS usn_reflection",
+    "ALTER TABLE odata_category_map ALTER COLUMN expense_ref DROP NOT NULL",
     "DROP INDEX IF EXISTS odata_user_map_unique",
     "DROP TABLE IF EXISTS odata_user_map",
     "DROP INDEX IF EXISTS idx_odata_exports_org",
@@ -109,6 +146,16 @@ import sys
         "account_code",
         "expense_ref",
         "expense_name",
+        "usn_reflection",
+        "created_at",
+        "updated_at",
+    ),
+    "org_accounting_profile": (
+        "id",
+        "org_id",
+        "tax_regime",
+        "vat_mode",
+        "default_account_code",
         "created_at",
         "updated_at",
     ),
@@ -140,12 +187,13 @@ import sys
     "odata_category_map_unique",
     "odata_exports_one_success",
     "idx_odata_exports_org",
+    "org_accounting_profile_unique",
 )
 
 
 def напечатать_sql() -> None:
     """SQL для бастиона: BEGIN, миграция, замер, ROLLBACK. Ни одного COMMIT."""
-    print("-- ВАЛИДАЦИЯ МИГРАЦИИ «таблицы обмена с 1С» (1C-21, заходы ② и ③)")
+    print("-- ВАЛИДАЦИЯ МИГРАЦИИ «таблицы обмена с 1С» (1C-21 ②③ · 1C-22)")
     print("-- ⚠️ ЗАКРЕПЛЕНИЯ НЕТ: в конце ROLLBACK, база останется как была.")
     print("BEGIN;")
     for команда in МИГРАЦИЯ:
@@ -153,15 +201,25 @@ def напечатать_sql() -> None:
     print("-- повтор целиком: init_db выполняется на КАЖДОМ старте контейнера")
     for команда in МИГРАЦИЯ:
         print(команда.strip() + ";")
+    # ⚠️ ИМЕНА ТАБЛИЦ БЕРУТСЯ ИЗ СПИСКА, А НЕ ПЕРЕПИСЫВАЮТСЯ РЯДОМ. Тот же
+    # класс, что и вписанные руками числа ниже: четвёртая таблица 1C-22 не
+    # попала бы в замер, и владелец сверял бы вывод psql по трём из четырёх.
+    перечень = ",".join("'%s'" % т for т in ТАБЛИЦЫ)
     print(
         "SELECT table_name, count(*) AS колонок FROM information_schema.columns\n"
-        " WHERE table_name IN ('odata_category_map','odata_exports','odata_user_map')\n"
-        " GROUP BY table_name ORDER BY table_name;"
+        " WHERE table_name IN (%s)\n"
+        " GROUP BY table_name ORDER BY table_name;" % перечень
     )
     print(
         "SELECT indexname FROM pg_indexes\n"
-        " WHERE tablename IN ('odata_category_map','odata_exports','odata_user_map')\n"
-        " ORDER BY indexname;"
+        " WHERE tablename IN (%s)\n"
+        " ORDER BY indexname;" % перечень
+    )
+    # Ограничения-перечисления 1C-22: они и есть предмет этой миграции.
+    print(
+        "SELECT conname FROM pg_constraint\n"
+        " WHERE contype = 'c' AND conrelid::regclass::text IN (%s)\n"
+        " ORDER BY conname;" % перечень
     )
     print("ROLLBACK;")
     # ⚠️ ЧИСЛА СЧИТАЮТСЯ, А НЕ ВПИСЫВАЮТСЯ РУКАМИ. Первая редакция обещала

@@ -34,6 +34,52 @@ import tempfile
 # (имя, файл, было, стало, ловцы, зачем)
 МУТАНТЫ = [
     (
+        "⑬ CHECK на ОтражениеВУСН снят — в базу лёг бы любой текст",
+        РЕЛЬСЫ,
+        """    usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'
+        CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',
+                                  'Распределяются', 'ВозвратРасхода')),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),""",
+        """    usn_reflection TEXT NOT NULL DEFAULT 'Принимаются',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),""",
+        [ЖИВОЙ],
+        "поле документа в 1С объявлено строкой и опечатку не отобьёт: "
+        "«принимаются» с маленькой буквы уехало бы в чужой учёт молча",
+    ),
+    (
+        "⑭ статья затрат снова необязательна",
+        СХЕМА,
+        "                expense_ref   TEXT NOT NULL,\n                expense_name  TEXT,\n                usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'\n                    CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',\n                                              'Распределяются', 'ВозвратРасхода')),\n                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n                updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()\n            );\n            -- Одна категория — одно правило внутри организации.\n            CREATE UNIQUE INDEX IF NOT EXISTS odata_category_map_unique\n                ON odata_category_map(org_id, category_id);\n            -- ⚠️ ОТДЕЛЬНЫМИ ALTER, И ЭТО НЕ ИЗБЫТОЧНОСТЬ: `CREATE TABLE IF NOT\n            -- EXISTS` на уже созданной таблице не добавляет ни колонок,\n            -- ни ограничений. Там, где таблица появилась редакцией захода ②,\n            -- изменения приедут только так.\n            ALTER TABLE odata_category_map\n                ADD COLUMN IF NOT EXISTS usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'\n                    CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',\n                                              'Распределяются', 'ВозвратРасхода'));\n            ALTER TABLE odata_category_map\n                ALTER COLUMN expense_ref SET NOT NULL;",
+        "                expense_ref   TEXT,\n                expense_name  TEXT,\n                usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'\n                    CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',\n                                              'Распределяются', 'ВозвратРасхода')),\n                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n                updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()\n            );\n            -- Одна категория — одно правило внутри организации.\n            CREATE UNIQUE INDEX IF NOT EXISTS odata_category_map_unique\n                ON odata_category_map(org_id, category_id);\n            -- ⚠️ ОТДЕЛЬНЫМИ ALTER, И ЭТО НЕ ИЗБЫТОЧНОСТЬ: `CREATE TABLE IF NOT\n            -- EXISTS` на уже созданной таблице не добавляет ни колонок,\n            -- ни ограничений. Там, где таблица появилась редакцией захода ②,\n            -- изменения приедут только так.\n            ALTER TABLE odata_category_map\n                ADD COLUMN IF NOT EXISTS usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'\n                    CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',\n                                              'Распределяются', 'ВозвратРасхода'));\n            SELECT 1;",
+        [СТОРОЖ, ЖИВОЙ],
+        "⚠️ ЛОВИТ СТОРОЖ РАСХОЖДЕНИЯ, А НЕ ЖИВОЙ ПРОГОН, и это замер: в живом "
+        "контуре схему восстанавливают РЕЛЬСЫ, и NOT NULL возвращается оттуда. "
+        "NOT NULL объявлен дважды — в CREATE и отдельным ALTER для баз, "
+        "созданных прежней редакцией. Снятие ОДНОГО места ничего не меняет, "
+        "и первая редакция этой мутации честно выжила. Якорь берёт оба места: "
+        "правило без статьи — не правило, иначе документ уедет со статьёй, "
+        "которую подставит сама 1С",
+    ),
+    (
+        "⑮ профиль организации перестал быть единственным",
+        РЕЛЬСЫ,
+        "CREATE UNIQUE INDEX IF NOT EXISTS org_accounting_profile_unique",
+        "CREATE INDEX IF NOT EXISTS org_accounting_profile_unique",
+        [ЖИВОЙ],
+        "два профиля у организации означают, что состав документа зависит "
+        "от порядка выборки — тот же класс, что два правила на категорию",
+    ),
+    (
+        "⑯ CHECK на режимы профиля снят",
+        РЕЛЬСЫ,
+        """    vat_mode             TEXT NOT NULL
+        CHECK (vat_mode IN ('not_payer', 'included', 'deductible')),""",
+        """    vat_mode             TEXT NOT NULL,""",
+        [ЖИВОЙ],
+        "опечатка в режиме НДС тихо меняет состав документа: при included "
+        "чек не дробится, при deductible дробится и требует контрагента",
+    ),
+    (
         "① рельсы разошлись с init_db: колонка только в рельсах",
         РЕЛЬСЫ,
         "    account_code  TEXT NOT NULL,",

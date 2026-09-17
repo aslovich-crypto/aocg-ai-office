@@ -57,7 +57,7 @@ class ПоддельнаяОдинЭс:
         self.сбой_чтения = set(сбой_чтения or ())
         self.нечитаемый_ответ = set(нечитаемый_ответ or ())
         к = контрагенты if контрагенты is not None else {"7707083893": "k-guid"}
-        с = счета if счета is not None else {"20.01": "s-2001-guid"}
+        с = счета if счета is not None else {"26": "s-26-guid"}
         self.записи_контрагентов = [
             {"Ref_Key": ref, "ИНН": инн, "DeletionMark": False}
             for инн, ref in к.items()
@@ -130,24 +130,102 @@ def настроено(monkeypatch):
         monkeypatch.setenv(пер, знач)
 
 
-async def _отчёт(db, статус="Одобрен", соответствие=True, инн="7707083893"):
+async def _категория(db, имя="Такси и каршеринг"):
+    """Категория отчёта. Заводится, а не ищется: пропуск «категорий нет»
+    сделал бы сторожей молчаливо-зелёными (T87)."""
+    номер = await db.pool.fetchval(
+        "SELECT id FROM categories WHERE org_id=1 AND name=$1", имя
+    )
+    if номер is not None:
+        return номер
+    группа = await db.pool.fetchval(
+        "SELECT id FROM category_groups WHERE org_id=1 LIMIT 1"
+    ) or await db.pool.fetchval(
+        "INSERT INTO category_groups (org_id, name, position)"
+        " VALUES (1, 'Транспорт', 1) RETURNING id"
+    )
+    return await db.pool.fetchval(
+        "INSERT INTO categories (org_id, group_id, name, tax_kind, position)"
+        " VALUES (1, $1, $2, 'Прочие расходы', 1) RETURNING id",
+        группа,
+        имя,
+    )
+
+
+async def _профиль(db, режим="usn_income_expense", ндс="included", счёт="26"):
+    """Профиль учёта организации (1C-22). Без него ручка отбивает 409."""
+    await db.pool.execute(
+        "INSERT INTO org_accounting_profile (org_id, tax_regime, vat_mode,"
+        " default_account_code) VALUES (1, $1, $2, $3)"
+        " ON CONFLICT (org_id) DO UPDATE SET tax_regime=$1, vat_mode=$2,"
+        " default_account_code=$3",
+        режим,
+        ндс,
+        счёт,
+    )
+
+
+async def _правило(db, категория, счёт="26", статья="ст-транспорт", усн="Принимаются"):
+    await db.pool.execute(
+        "INSERT INTO odata_category_map (org_id, category_id, account_code,"
+        " expense_ref, expense_name, usn_reflection) VALUES (1, $1, $2, $3, $4, $5)"
+        " ON CONFLICT (org_id, category_id) DO UPDATE SET account_code=$2,"
+        " expense_ref=$3, usn_reflection=$5",
+        категория,
+        счёт,
+        статья,
+        "Транспортные расходы",
+        усн,
+    )
+
+
+async def _отчёт(
+    db,
+    статус="Одобрен",
+    соответствие=True,
+    инн="7707083893",
+    правило=True,
+    режим="usn_income_expense",
+    ндс="included",
+    счёт="26",
+    усн="Принимаются",
+    свод=None,
+):
+    """⚠️ ПРОФИЛЬ И ПРАВИЛО — ЧАСТЬ ОБЫЧНОЙ НАСТРОЙКИ (1C-22). Без профиля
+    выгрузки нет вовсе, без правила категории документ не проводится."""
     await db.добавить_организацию(id=1, name="АОЦГ")
     await db.обеспечить_пользователя(id=1, first_name="Админ", role="admin")
     await db.добавить_отчёт(id=1, title="Июль", user_id=1, org_id=1, status=статус)
     from datetime import date
 
+    категория = await _категория(db)
     await db.добавить_чек(
-        id=1, org="Кофейня", amount=120, date=date(2026, 9, 1), org_id=1, user_id=1
+        id=1,
+        org="Кофейня",
+        amount=120,
+        date=date(2026, 9, 1),
+        org_id=1,
+        user_id=1,
+        category_id=категория,
     )
     await db.pool.execute("UPDATE receipts SET org_inn=$1 WHERE id=1", инн)
+    if свод is not None:
+        # ⚠️ СЛОВАРЬ, А НЕ СТРОКА JSON. У пула стоит кодек jsonb: строку он
+        # закодировал бы ВТОРОЙ раз, и приложение прочитало бы текст вместо
+        # свода — тест был бы зелёным, ничего не проверив.
+        await db.pool.execute("UPDATE receipts SET vat_breakdown=$1 WHERE id=1", свод)
     await db.pool.execute(
         "INSERT INTO report_items (report_id, receipt_id) VALUES (1, 1)"
     )
+    await _профиль(db, режим=режим, ндс=ндс, счёт=счёт)
+    if правило:
+        await _правило(db, категория, счёт=счёт, усн=усн)
     if соответствие:
         await db.pool.execute(
             "INSERT INTO odata_user_map (org_id, user_id, person_ref, person_name)"
             " VALUES (1, 1, 'person-guid', 'Админ')"
         )
+    return категория
 
 
 # ── ГЕЙТ И ДОПУСК ────────────────────────────────────────────────────────
@@ -189,23 +267,28 @@ async def test_без_соответствия_человека_отказ_а_н
 
 
 @pytest.mark.asyncio
-async def test_ответ_говорит_о_счёте_по_умолчанию_и_называет_категории(
+async def test_категория_без_соответствия_названа_и_держит_проведение(
     client, db, настроено, monkeypatch
 ):
-    """⚠️⚠️ ГЛАВНОЕ ТРЕБОВАНИЕ ЗАХОДА: «сработало» не должно читаться
-    как «разнесено верно». Правил нет — ответ обязан это сказать."""
-    await _отчёт(db)
+    """⚠️⚠️ ГЛАВНОЕ ТРЕБОВАНИЕ 1C-22 (Р1 и Р3): категория без соответствия
+    останавливает проведение и названа поимённо — и в ответе, и в журнале.
+    Прежняя редакция проводила такой документ и лишь предупреждала; тогда
+    «сработало» читалось как «разнесено верно»."""
+    await _отчёт(db, правило=False)
     monkeypatch.setattr(odata_client, "запросить", ПоддельнаяОдинЭс())
     тело = (await client.post(ВЫГРУЗКА % 1)).json()
-    assert тело["выгружен"] is True and тело["проведён"] is True
-    assert тело["счета_по_умолчанию"], "подстановка не названа"
-    assert "20.01" in тело["предупреждение"]
+    assert тело["выгружен"] is True and тело["проведён"] is False
+    assert тело["категории_без_соответствия"] == ["Такси и каршеринг"]
+    assert "Такси и каршеринг" in (тело["почему_не_проведён"] or "")
+    assert "26" in тело["предупреждение"]
     записано = await db.pool.fetchrow(
-        "SELECT outcome, doc_number, defaulted_categories FROM odata_exports WHERE report_id=1"
+        "SELECT outcome, doc_number, defaulted_categories FROM odata_exports"
+        " WHERE report_id=1"
     )
-    assert записано["outcome"] == "ok" and записано["doc_number"] == "0000-000010"
-    assert записано["defaulted_categories"] == тело["счета_по_умолчанию"], (
-        "в журнале подстановки не те, что в ответе"
+    assert записано["outcome"] == "unposted"
+    assert записано["doc_number"] == "0000-000010"
+    assert записано["defaulted_categories"] == тело["категории_без_соответствия"], (
+        "в журнале категории не те, что в ответе"
     )
 
 
@@ -224,7 +307,7 @@ async def test_до_записи_ищутся_контрагент_и_счёт_�
         в for в in одинэс.вызовы if в[0] == "POST" and в[1] == "Document_АвансовыйОтчет"
     )
     строка = запись[3]["Прочее"][0]
-    assert строка["СчетЗатрат_Key"] == "s-2001-guid", "в поле ссылки уехал код"
+    assert строка["СчетЗатрат_Key"] == "s-26-guid", "в поле ссылки уехал код"
     assert строка["Поставщик_Key"] == "k-guid"
 
 
@@ -239,7 +322,7 @@ async def test_счёта_нет_в_плане_счетов_документ_н�
     одинэс = ПоддельнаяОдинЭс(счета={})
     monkeypatch.setattr(odata_client, "запросить", одинэс)
     ответ = await client.post(ВЫГРУЗКА % 1)
-    assert ответ.status_code == 409 and "20.01" in ответ.json()["detail"]
+    assert ответ.status_code == 409 and "26" in ответ.json()["detail"]
     assert not any(в[0] == "POST" for в in одинэс.вызовы), (
         "документ ушёл со ссылкой в никуда"
     )
@@ -375,32 +458,59 @@ def _проводили(одинэс):
 
 
 async def _проверить_непроведённый(client, db, одинэс, ожидаемые_чеки):
-    """⚠️ ОБЩАЯ ПРОВЕРКА ТРЁХ ИСХОДОВ ОДНОГО ПРЕДМЕТА. Документ уходит,
-    НЕ проводится, причина названа словами, чеки перечислены, в журнале
-    исход `unposted` — не `partial`: проведение не падало, его не делали."""
+    """⚠️ ОБЩАЯ ПРОВЕРКА ОДНОГО ИСХОДА ПРИ ВЫЧЕТЕ НДС (1C-22, Р1②). Документ
+    уходит, НЕ проводится, причина названа словами, чеки перечислены,
+    в журнале исход `unposted` — не `partial`: проведение не падало,
+    его не делали."""
     тело = (await client.post(ВЫГРУЗКА % 1)).json()
     assert тело["выгружен"] is True, "отчёт заблокирован из-за чеков без контрагента"
-    assert тело["проведён"] is False, "документ с пустым контрагентом проведён"
+    assert тело["проведён"] is False, "документ без контрагента проведён при вычете"
     assert _проводили(одинэс) == [], "вызов Post всё-таки ушёл"
     assert тело["чеки_без_контрагента"] == ожидаемые_чеки
     причина = тело["почему_не_проведён"] or ""
     assert "намеренно" in причина and all(str(ч) in причина for ч in ожидаемые_чеки), (
         "причина не названа или чеки не перечислены: %r" % причина
     )
+    assert "вычет" in причина, "не сказано, ПОЧЕМУ контрагент обязателен: %r" % причина
     строка = await db.pool.fetchrow("SELECT outcome, error_note FROM odata_exports")
     assert строка["outcome"] == "unposted", (
         "исход %s, а должен быть unposted" % строка["outcome"]
     )
 
 
+async def _проверить_проведён_без_контрагента(client, db, ожидаемые_чеки):
+    """⚠️ ПАРА К ПРЕДЫДУЩЕЙ, И ЭТО ОТМЕНЁННОЕ ПРАВИЛО ОТ 16.09 (1C-22, Р1).
+    Там, где НДС не принимается к вычету, пустой поставщик учёту не мешает:
+    документ проводится, а чеки просто названы."""
+    тело = (await client.post(ВЫГРУЗКА % 1)).json()
+    assert тело["проведён"] is True, (
+        "контрагент удержал проведение вне режима вычета: %s" % тело
+    )
+    assert тело["чеки_без_контрагента"] == ожидаемые_чеки, "чеки не названы"
+    assert тело["почему_не_проведён"] is None
+    исход = await db.pool.fetchval("SELECT outcome FROM odata_exports")
+    assert исход == "ok"
+
+
 @pytest.mark.asyncio
-async def test_нет_инн_документ_уходит_но_не_проводится(
+async def test_нет_инн_при_вычете_документ_не_проводится(
     client, db, настроено, monkeypatch
 ):
-    await _отчёт(db, инн=None)
+    await _отчёт(db, инн=None, ндс="deductible")
     одинэс = ПоддельнаяОдинЭс()
     monkeypatch.setattr(odata_client, "запросить", одинэс)
     await _проверить_непроведённый(client, db, одинэс, [1])
+
+
+@pytest.mark.asyncio
+async def test_нет_инн_при_ндс_в_стоимости_документ_проводится(
+    client, db, настроено, monkeypatch
+):
+    """⚠️ ПРАВИЛО ОТ 16.09 ОТМЕНЕНО (Р1). Контрагент держит проведение
+    только там, где он нужен учёту, — при вычете НДС."""
+    await _отчёт(db, инн=None, ндс="included")
+    monkeypatch.setattr(odata_client, "запросить", ПоддельнаяОдинЭс())
+    await _проверить_проведён_без_контрагента(client, db, [1])
 
 
 @pytest.mark.asyncio
@@ -408,7 +518,7 @@ async def test_инн_без_совпадения_документ_не_пров
     client, db, настроено, monkeypatch
 ):
     """Второй путь того же исхода: ИНН есть, контрагента с ним в базе нет."""
-    await _отчёт(db)
+    await _отчёт(db, ндс="deductible")
     одинэс = ПоддельнаяОдинЭс(контрагенты={})
     monkeypatch.setattr(odata_client, "запросить", одинэс)
     await _проверить_непроведённый(client, db, одинэс, [1])
@@ -419,7 +529,7 @@ async def test_два_совпадения_по_инн_документ_не_п�
     client, db, настроено, monkeypatch
 ):
     """Третий путь: выбрать «первого из двух» и есть додумывание."""
-    await _отчёт(db)
+    await _отчёт(db, ндс="deductible")
     одинэс = ПоддельнаяОдинЭс(дубли=True)
     monkeypatch.setattr(odata_client, "запросить", одинэс)
     await _проверить_непроведённый(client, db, одинэс, [1])
@@ -469,7 +579,7 @@ async def test_с_контрагентом_документ_проводится
 async def test_после_непроведённого_второй_документ_не_уходит(
     client, db, настроено, monkeypatch
 ):
-    await _отчёт(db, инн=None)
+    await _отчёт(db, правило=False)
     monkeypatch.setattr(odata_client, "запросить", ПоддельнаяОдинЭс())
     await client.post(ВЫГРУЗКА % 1)
     второй = ПоддельнаяОдинЭс()
@@ -483,7 +593,7 @@ async def test_после_непроведённого_второй_докуме
 async def test_непроведённую_выгрузку_можно_отменить(
     client, db, настроено, monkeypatch
 ):
-    await _отчёт(db, инн=None)
+    await _отчёт(db, правило=False)
     monkeypatch.setattr(odata_client, "запросить", ПоддельнаяОдинЭс())
     await client.post(ВЫГРУЗКА % 1)
     assert (await client.post(ОТМЕНА % 1)).status_code == 200
@@ -584,7 +694,7 @@ async def test_удалённый_контрагент_не_даёт_ложно�
 async def test_только_удалённый_контрагент_не_считается_найденным(
     client, db, настроено, monkeypatch
 ):
-    await _отчёт(db)
+    await _отчёт(db, ндс="deductible")
     одинэс = ПоддельнаяОдинЭс(контрагенты={}, удалённые_контрагенты=["7707083893"])
     monkeypatch.setattr(odata_client, "запросить", одинэс)
     тело = (await client.post(ВЫГРУЗКА % 1)).json()
@@ -601,15 +711,15 @@ async def test_удалённый_счёт_не_находится_и_докум
     и отказ приходил по ложной причине. Поэтому тот же счёт живым обязан
     найтись и уехать — только так 409 выше означает именно отсев."""
     await _отчёт(db)
-    одинэс = ПоддельнаяОдинЭс(счета={}, удалённые_счета={"20.01": "s-удалённый"})
+    одинэс = ПоддельнаяОдинЭс(счета={}, удалённые_счета={"26": "s-удалённый"})
     monkeypatch.setattr(odata_client, "запросить", одинэс)
     ответ = await client.post(ВЫГРУЗКА % 1)
-    assert ответ.status_code == 409 and "20.01" in ответ.json()["detail"]
+    assert ответ.status_code == 409 and "26" in ответ.json()["detail"]
     assert not any(в[0] == "POST" for в in одинэс.вызовы), (
         "документ ушёл на удалённый счёт"
     )
 
-    живой = ПоддельнаяОдинЭс(счета={"20.01": "s-живой"})
+    живой = ПоддельнаяОдинЭс(счета={"26": "s-живой"})
     monkeypatch.setattr(odata_client, "запросить", живой)
     ответ = await client.post(ВЫГРУЗКА % 1)
     assert ответ.status_code == 200, (
@@ -677,3 +787,104 @@ async def test_без_инн_контрагенты_не_читаются(client
     monkeypatch.setattr(odata_client, "запросить", одинэс)
     await client.post(ВЫГРУЗКА % 1)
     assert "Catalog_Контрагенты" not in [в[1] for в in _чтения(одинэс)]
+
+
+# ── 1C-22: ПРОФИЛЬ ОРГАНИЗАЦИИ ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_без_профиля_выгрузки_нет_и_в_1с_не_ходим(
+    client, db, настроено, monkeypatch
+):
+    """⚠️ Без профиля неизвестны режим НДС и счёт по умолчанию. Собирать
+    документ на догадках нельзя, поэтому отказ ДО чтения справочников,
+    до журнала и до записи."""
+    await _отчёт(db)
+    await db.pool.execute("DELETE FROM org_accounting_profile WHERE org_id=1")
+    одинэс = ПоддельнаяОдинЭс()
+    monkeypatch.setattr(odata_client, "запросить", одинэс)
+    ответ = await client.post(ВЫГРУЗКА % 1)
+    assert ответ.status_code == 409, ответ.text
+    assert "профиль" in ответ.json()["detail"].lower()
+    assert одинэс.вызовы == [], "без профиля всё равно сходили в 1С"
+    assert await db.pool.fetchval("SELECT count(*) FROM odata_exports") == 0
+
+
+@pytest.mark.asyncio
+async def test_счёт_по_умолчанию_берётся_из_профиля(client, db, настроено, monkeypatch):
+    """⚠️ Р2. Константы «20.01» в коде больше нет: счёт задаёт профиль,
+    и в плане счетов ищется именно он."""
+    await _отчёт(db, правило=False, счёт="44")
+    одинэс = ПоддельнаяОдинЭс(счета={"44": "s-44-guid"})
+    monkeypatch.setattr(odata_client, "запросить", одинэс)
+    ответ = await client.post(ВЫГРУЗКА % 1)
+    assert ответ.status_code == 200, ответ.text
+    запись = next(
+        в for в in одинэс.вызовы if в[0] == "POST" and в[1] == "Document_АвансовыйОтчет"
+    )
+    assert запись[3]["Прочее"][0]["СчетЗатрат_Key"] == "s-44-guid"
+
+
+@pytest.mark.asyncio
+async def test_отражение_в_усн_уезжает_из_соответствия(
+    client, db, настроено, monkeypatch
+):
+    """⚠️ Р4. Значение берётся у правила категории, а не пишется константой."""
+    await _отчёт(db, усн="НеПринимаются")
+    одинэс = ПоддельнаяОдинЭс()
+    monkeypatch.setattr(odata_client, "запросить", одинэс)
+    assert (await client.post(ВЫГРУЗКА % 1)).status_code == 200
+    запись = next(
+        в for в in одинэс.вызовы if в[0] == "POST" and в[1] == "Document_АвансовыйОтчет"
+    )
+    assert запись[3]["Прочее"][0]["ОтражениеВУСН"] == "НеПринимаются"
+
+
+@pytest.mark.asyncio
+async def test_на_осно_поле_усн_в_1с_не_уходит(client, db, настроено, monkeypatch):
+    """Организация на общем режиме: поля упрощёнки в её документе быть
+    не должно вовсе."""
+    await _отчёт(db, режим="osno", ндс="deductible")
+    одинэс = ПоддельнаяОдинЭс()
+    monkeypatch.setattr(odata_client, "запросить", одинэс)
+    assert (await client.post(ВЫГРУЗКА % 1)).status_code == 200
+    запись = next(
+        в for в in одинэс.вызовы if в[0] == "POST" and в[1] == "Document_АвансовыйОтчет"
+    )
+    assert "ОтражениеВУСН" not in запись[3]["Прочее"][0]
+
+
+@pytest.mark.asyncio
+async def test_при_ндс_в_стоимости_чек_уезжает_одной_строкой(
+    client, db, настроено, monkeypatch
+):
+    """Свод из двух ставок, а строка одна: разносить НДС, который к вычету
+    не принимается, значит давать бухгалтеру лишнюю сверку."""
+    await _отчёт(db, ндс="included", свод={"20": 10.0, "10": 5.0})
+    одинэс = ПоддельнаяОдинЭс()
+    monkeypatch.setattr(odata_client, "запросить", одинэс)
+    assert (await client.post(ВЫГРУЗКА % 1)).status_code == 200
+    запись = next(
+        в for в in одинэс.вызовы if в[0] == "POST" and в[1] == "Document_АвансовыйОтчет"
+    )
+    строки = запись[3]["Прочее"]
+    assert len(строки) == 1, "чек раздробили вне режима вычета: %s" % строки
+    assert строки[0]["СтавкаНДС"] == "БезНДС"
+    assert строки[0]["Сумма"] == 120.0
+
+
+@pytest.mark.asyncio
+async def test_при_вычете_тот_же_чек_дробится_по_ставкам(
+    client, db, настроено, monkeypatch
+):
+    """Пара к тесту выше на тех же данных: режим НДС решает, а не свод."""
+    await _отчёт(db, ндс="deductible", свод={"20": 10.0, "10": 5.0})
+    одинэс = ПоддельнаяОдинЭс()
+    monkeypatch.setattr(odata_client, "запросить", одинэс)
+    assert (await client.post(ВЫГРУЗКА % 1)).status_code == 200
+    запись = next(
+        в for в in одинэс.вызовы if в[0] == "POST" and в[1] == "Document_АвансовыйОтчет"
+    )
+    строки = запись[3]["Прочее"]
+    assert len(строки) == 3, "при вычете чек не раздроблен: %s" % строки
+    assert round(sum(с["Сумма"] for с in строки), 2) == 120.0
