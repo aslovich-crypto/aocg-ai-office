@@ -46,46 +46,80 @@ import sys
 # `tests/test_migration_odata_tables.py::test_печать_sql_работает_без_драйвера_базы`.
 
 ТАБЛИЦЫ = (
-    "odata_category_map",
+    "org_category_map",
+    "org_expense_kind_map",
+    "org_accounting_profile",
     "odata_exports",
     "odata_user_map",
-    "org_accounting_profile",
 )
 
 # ⚠️ ДОСЛОВНАЯ КОПИЯ ТОГО, ЧТО ЛЕЖИТ В `init_db()`.
 МИГРАЦИЯ = [
-    """CREATE TABLE IF NOT EXISTS odata_category_map (
+    """ALTER TABLE IF EXISTS odata_category_map RENAME TO org_category_map""",
+    """ALTER INDEX IF EXISTS odata_category_map_unique
+    RENAME TO org_category_map_unique""",
+    """CREATE TABLE IF NOT EXISTS org_category_map (
     id            SERIAL PRIMARY KEY,
     org_id        INTEGER NOT NULL REFERENCES organizations(id),
     category_id   INTEGER NOT NULL REFERENCES categories(id),
-    account_code  TEXT NOT NULL,
+    account_code  TEXT,
     expense_ref   TEXT NOT NULL,
     expense_name  TEXT,
     usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'
         CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',
-                                  'Распределяются', 'ВозвратРасхода')),
+                                  'Распределяются')),
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )""",
-    """CREATE UNIQUE INDEX IF NOT EXISTS odata_category_map_unique
-    ON odata_category_map(org_id, category_id)""",
-    """ALTER TABLE odata_category_map
+    """CREATE UNIQUE INDEX IF NOT EXISTS org_category_map_unique
+    ON org_category_map(org_id, category_id)""",
+    """ALTER TABLE org_category_map
     ADD COLUMN IF NOT EXISTS usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'
         CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',
-                                  'Распределяются', 'ВозвратРасхода'))""",
-    """ALTER TABLE odata_category_map
-    ALTER COLUMN expense_ref SET NOT NULL""",
+                                  'Распределяются'))""",
+    """ALTER TABLE org_category_map ALTER COLUMN account_code DROP NOT NULL""",
+    """ALTER TABLE org_category_map ALTER COLUMN expense_ref SET NOT NULL""",
+    """CREATE TABLE IF NOT EXISTS org_expense_kind_map (
+    id             SERIAL PRIMARY KEY,
+    org_id         INTEGER NOT NULL REFERENCES organizations(id),
+    tax_kind       TEXT NOT NULL
+        CHECK (tax_kind IN (
+            'Материальные расходы','Прочие расходы','Командировочные расходы',
+            'Представительские расходы','Расходы на рекламу (нормируемые)',
+            'Транспортные расходы','Оплата труда','Налоги и сборы',
+            'Не учитываемые в целях налогообложения'
+        )),
+    expense_ref    TEXT NOT NULL,
+    expense_name   TEXT,
+    account_code   TEXT,
+    usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'
+        CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',
+                                  'Распределяются')),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS org_expense_kind_map_unique
+    ON org_expense_kind_map(org_id, tax_kind)""",
     """CREATE TABLE IF NOT EXISTS org_accounting_profile (
     id                   SERIAL PRIMARY KEY,
     org_id               INTEGER NOT NULL REFERENCES organizations(id),
+    legal_form           TEXT NOT NULL
+        CHECK (legal_form IN ('ooo', 'ip')),
     tax_regime           TEXT NOT NULL
-        CHECK (tax_regime IN ('usn_income_expense', 'usn_income',
-                              'osno', 'ausn')),
+        CHECK (tax_regime IN ('osno', 'usn_dr', 'usn_d',
+                              'ausn_dr', 'ausn_d', 'eshn', 'psn')),
     vat_mode             TEXT NOT NULL
         CHECK (vat_mode IN ('not_payer', 'included', 'deductible')),
+    combines_psn         BOOLEAN NOT NULL DEFAULT FALSE,
     default_account_code TEXT NOT NULL,
+    auto_post_policy     TEXT NOT NULL DEFAULT 'when_mapped'
+        CHECK (auto_post_policy IN ('when_mapped', 'never', 'always')),
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT org_accounting_profile_psn_only_ip
+        CHECK (tax_regime <> 'psn' OR legal_form = 'ip'),
+    CONSTRAINT org_accounting_profile_combines_only_ip
+        CHECK (NOT combines_psn OR legal_form = 'ip')
 )""",
     """CREATE UNIQUE INDEX IF NOT EXISTS org_accounting_profile_unique
     ON org_accounting_profile(org_id)""",
@@ -125,21 +159,21 @@ import sys
 ОБРАТНЫЙ_DDL = [
     "DROP INDEX IF EXISTS org_accounting_profile_unique",
     "DROP TABLE IF EXISTS org_accounting_profile",
-    "ALTER TABLE odata_category_map DROP COLUMN IF EXISTS usn_reflection",
-    "ALTER TABLE odata_category_map ALTER COLUMN expense_ref DROP NOT NULL",
+    "DROP INDEX IF EXISTS org_expense_kind_map_unique",
+    "DROP TABLE IF EXISTS org_expense_kind_map",
     "DROP INDEX IF EXISTS odata_user_map_unique",
     "DROP TABLE IF EXISTS odata_user_map",
     "DROP INDEX IF EXISTS idx_odata_exports_org",
     "DROP INDEX IF EXISTS odata_exports_one_success",
     "DROP TABLE IF EXISTS odata_exports",
-    "DROP INDEX IF EXISTS odata_category_map_unique",
-    "DROP TABLE IF EXISTS odata_category_map",
+    "DROP INDEX IF EXISTS org_category_map_unique",
+    "DROP TABLE IF EXISTS org_category_map",
 ]
 
 # Что обязано появиться. Список — слепок DDL выше, а не вторая правда:
 # тест сверяет его с самим DDL построчно.
 ОЖИДАЕМЫЕ_КОЛОНКИ = {
-    "odata_category_map": (
+    "org_category_map": (
         "id",
         "org_id",
         "category_id",
@@ -150,12 +184,26 @@ import sys
         "created_at",
         "updated_at",
     ),
+    "org_expense_kind_map": (
+        "id",
+        "org_id",
+        "tax_kind",
+        "expense_ref",
+        "expense_name",
+        "account_code",
+        "usn_reflection",
+        "created_at",
+        "updated_at",
+    ),
     "org_accounting_profile": (
         "id",
         "org_id",
+        "legal_form",
         "tax_regime",
         "vat_mode",
+        "combines_psn",
         "default_account_code",
+        "auto_post_policy",
         "created_at",
         "updated_at",
     ),
@@ -184,16 +232,19 @@ import sys
 }
 ОЖИДАЕМЫЕ_ИНДЕКСЫ = (
     "odata_user_map_unique",
-    "odata_category_map_unique",
+    "org_category_map_unique",
+    "org_expense_kind_map_unique",
+    "org_accounting_profile_unique",
     "odata_exports_one_success",
     "idx_odata_exports_org",
-    "org_accounting_profile_unique",
 )
 
 
 def напечатать_sql() -> None:
     """SQL для бастиона: BEGIN, миграция, замер, ROLLBACK. Ни одного COMMIT."""
-    print("-- ВАЛИДАЦИЯ МИГРАЦИИ «таблицы обмена с 1С» (1C-21 ②③ · 1C-22)")
+    print(
+        "-- ВАЛИДАЦИЯ МИГРАЦИИ «таблицы обмена с 1С» (1C-21 ②③ · 1C-22 (AOCG-1C-001 v0.1))"
+    )
     print("-- ⚠️ ЗАКРЕПЛЕНИЯ НЕТ: в конце ROLLBACK, база останется как была.")
     print("BEGIN;")
     for команда in МИГРАЦИЯ:

@@ -38,10 +38,10 @@ import tempfile
         РЕЛЬСЫ,
         """    usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'
         CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',
-                                  'Распределяются', 'ВозвратРасхода')),
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),""",
+                                  'Распределяются')),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),""",
         """    usn_reflection TEXT NOT NULL DEFAULT 'Принимаются',
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),""",
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),""",
         [ЖИВОЙ],
         "поле документа в 1С объявлено строкой и опечатку не отобьёт: "
         "«принимаются» с маленькой буквы уехало бы в чужой учёт молча",
@@ -49,16 +49,15 @@ import tempfile
     (
         "⑭ статья затрат снова необязательна",
         СХЕМА,
-        "                expense_ref   TEXT NOT NULL,\n                expense_name  TEXT,\n                usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'\n                    CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',\n                                              'Распределяются', 'ВозвратРасхода')),\n                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n                updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()\n            );\n            -- Одна категория — одно правило внутри организации.\n            CREATE UNIQUE INDEX IF NOT EXISTS odata_category_map_unique\n                ON odata_category_map(org_id, category_id);\n            -- ⚠️ ОТДЕЛЬНЫМИ ALTER, И ЭТО НЕ ИЗБЫТОЧНОСТЬ: `CREATE TABLE IF NOT\n            -- EXISTS` на уже созданной таблице не добавляет ни колонок,\n            -- ни ограничений. Там, где таблица появилась редакцией захода ②,\n            -- изменения приедут только так.\n            ALTER TABLE odata_category_map\n                ADD COLUMN IF NOT EXISTS usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'\n                    CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',\n                                              'Распределяются', 'ВозвратРасхода'));\n            ALTER TABLE odata_category_map\n                ALTER COLUMN expense_ref SET NOT NULL;",
-        "                expense_ref   TEXT,\n                expense_name  TEXT,\n                usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'\n                    CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',\n                                              'Распределяются', 'ВозвратРасхода')),\n                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n                updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()\n            );\n            -- Одна категория — одно правило внутри организации.\n            CREATE UNIQUE INDEX IF NOT EXISTS odata_category_map_unique\n                ON odata_category_map(org_id, category_id);\n            -- ⚠️ ОТДЕЛЬНЫМИ ALTER, И ЭТО НЕ ИЗБЫТОЧНОСТЬ: `CREATE TABLE IF NOT\n            -- EXISTS` на уже созданной таблице не добавляет ни колонок,\n            -- ни ограничений. Там, где таблица появилась редакцией захода ②,\n            -- изменения приедут только так.\n            ALTER TABLE odata_category_map\n                ADD COLUMN IF NOT EXISTS usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'\n                    CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',\n                                              'Распределяются', 'ВозвратРасхода'));\n            SELECT 1;",
+        "                expense_ref   TEXT NOT NULL,\n                expense_name  TEXT,\n                usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'\n                    CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',\n                                              'Распределяются')),\n                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n                updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()\n            );\n            -- Одна категория — одно переопределение внутри организации.\n            CREATE UNIQUE INDEX IF NOT EXISTS org_category_map_unique\n                ON org_category_map(org_id, category_id);\n            -- ⚠️ ОТДЕЛЬНЫМИ ALTER, И ЭТО НЕ ИЗБЫТОЧНОСТЬ: `CREATE TABLE IF NOT\n            -- EXISTS` на уже созданной таблице не добавляет ни колонок,\n            -- ни ограничений. На проде таблица создана заходом ②, и правки\n            -- приедут туда только так.\n            ALTER TABLE org_category_map\n                ADD COLUMN IF NOT EXISTS usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'\n                    CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',\n                                              'Распределяются'));\n            ALTER TABLE org_category_map ALTER COLUMN account_code DROP NOT NULL;\n            ALTER TABLE org_category_map ALTER COLUMN expense_ref SET NOT NULL;",
+        "                expense_ref   TEXT,\n                expense_name  TEXT,\n                usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'\n                    CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',\n                                              'Распределяются')),\n                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n                updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()\n            );\n            -- Одна категория — одно переопределение внутри организации.\n            CREATE UNIQUE INDEX IF NOT EXISTS org_category_map_unique\n                ON org_category_map(org_id, category_id);\n            -- ⚠️ ОТДЕЛЬНЫМИ ALTER, И ЭТО НЕ ИЗБЫТОЧНОСТЬ: `CREATE TABLE IF NOT\n            -- EXISTS` на уже созданной таблице не добавляет ни колонок,\n            -- ни ограничений. На проде таблица создана заходом ②, и правки\n            -- приедут туда только так.\n            ALTER TABLE org_category_map\n                ADD COLUMN IF NOT EXISTS usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'\n                    CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',\n                                              'Распределяются'));\n            ALTER TABLE org_category_map ALTER COLUMN account_code DROP NOT NULL;\n            SELECT 1;",
         [СТОРОЖ, ЖИВОЙ],
         "⚠️ ЛОВИТ СТОРОЖ РАСХОЖДЕНИЯ, А НЕ ЖИВОЙ ПРОГОН, и это замер: в живом "
         "контуре схему восстанавливают РЕЛЬСЫ, и NOT NULL возвращается оттуда. "
         "NOT NULL объявлен дважды — в CREATE и отдельным ALTER для баз, "
-        "созданных прежней редакцией. Снятие ОДНОГО места ничего не меняет, "
-        "и первая редакция этой мутации честно выжила. Якорь берёт оба места: "
-        "правило без статьи — не правило, иначе документ уедет со статьёй, "
-        "которую подставит сама 1С",
+        "созданных прежней редакцией: снятие ОДНОГО места ничего не меняет. "
+        "Правило без статьи — не правило: документ уедет со статьёй, которую "
+        "подставит сама 1С",
     ),
     (
         "⑮ профиль организации перестал быть единственным",
@@ -82,8 +81,8 @@ import tempfile
     (
         "① рельсы разошлись с init_db: колонка только в рельсах",
         РЕЛЬСЫ,
-        "    account_code  TEXT NOT NULL,",
-        "    account_code  TEXT NOT NULL,\n    lишняя_колонка TEXT,",
+        "    account_code  TEXT,\n    expense_ref   TEXT NOT NULL,",
+        "    account_code  TEXT,\n    lишняя_колонка TEXT,\n    expense_ref   TEXT NOT NULL,",
         [СТОРОЖ],
         "проверяли бы одно, а применяли другое: валидация зелёная, а на прод "
         "уедет ДРУГОЙ DDL — ровно тот класс, ради которого сторож и заведён",
@@ -109,8 +108,8 @@ import tempfile
     (
         "④ одна категория получила право на два счёта",
         РЕЛЬСЫ,
-        "    ON odata_category_map(org_id, category_id)",
-        "    ON odata_category_map(org_id, category_id, account_code)",
+        "    ON org_category_map(org_id, category_id)",
+        "    ON org_category_map(org_id, category_id, account_code)",
         [СТОРОЖ, ЖИВОЙ],
         "два правила на одну строку расхода — и проводка зависит от порядка "
         "выборки; такой дефект не ловится ничем, кроме этого индекса",

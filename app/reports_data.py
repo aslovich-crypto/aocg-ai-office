@@ -32,7 +32,8 @@ from app.exports.report_xlsx import фамилия_и_инициал
 # ⚠️ СТАТЬЯ РАСХОДА НУЖНА СЛОВОМ, А В ЧЕКЕ ЛЕЖИТ ТОЛЬКО `category_id`.
 # Ни один запрос отчётов справочник не соединяет, поэтому соединение живёт
 # здесь — в единственном месте, где собираются данные отчёта.
-ЧЕКИ_ОТЧЁТА = """SELECT receipts.*, categories.name AS статья
+ЧЕКИ_ОТЧЁТА = """SELECT receipts.*, categories.name AS статья,
+                        categories.tax_kind AS tax_kind
      FROM report_items ri
      JOIN receipts        ON receipts.id = ri.receipt_id
 LEFT JOIN categories      ON categories.id = receipts.category_id

@@ -28,6 +28,10 @@ import pytest
 СНЕСТИ = (
     "DROP INDEX IF EXISTS org_accounting_profile_unique",
     "DROP TABLE IF EXISTS org_accounting_profile",
+    "DROP INDEX IF EXISTS org_expense_kind_map_unique",
+    "DROP TABLE IF EXISTS org_expense_kind_map",
+    "DROP INDEX IF EXISTS org_category_map_unique",
+    "DROP TABLE IF EXISTS org_category_map",
     "DROP INDEX IF EXISTS odata_user_map_unique",
     "DROP TABLE IF EXISTS odata_user_map",
     "DROP INDEX IF EXISTS idx_odata_exports_org",
@@ -131,7 +135,7 @@ async def test_валидация_НЕ_оставляет_таблиц_за_со
         _прогнать(адрес_живой_базы)
         осталось = await db.pool.fetchval(
             "SELECT count(*) FROM information_schema.tables"
-            " WHERE table_name IN ('odata_category_map','odata_exports',"
+            " WHERE table_name IN ('org_category_map','odata_exports',"
             "'org_accounting_profile')"
         )
         assert осталось == 0, "после валидации в базе осталось таблиц: %s" % осталось
@@ -245,7 +249,7 @@ async def test_одна_категория_одно_правило(db):
 
     async def правило(счёт):
         await db.pool.execute(
-            "INSERT INTO odata_category_map (org_id, category_id, account_code,"
+            "INSERT INTO org_category_map (org_id, category_id, account_code,"
             " expense_ref) VALUES (1, $1, $2, 'статья-guid')",
             категория,
             счёт,
@@ -298,93 +302,157 @@ async def test_соответствие_человека_без_ссылки_н�
 
 @pytest.mark.asyncio
 async def test_правило_без_статьи_затрат_не_заводится(db):
-    """⚠️ РЕШЕНИЕ ВЛАДЕЛЬЦА 17.09.2026: правило без статьи — не правило.
-    Строка без `expense_ref` описывала бы проводку наполовину, и документ
-    уехал бы со статьёй, которую подставит сама 1С, — не той, что в базе."""
+    """⚠️ Правило без статьи — не правило (AOCG-1C-001, § 5.2): строка
+    описывала бы проводку наполовину, и документ уехал бы со статьёй,
+    которую подставит сама 1С."""
     import asyncpg
 
     категория = await _категория(db)
     with pytest.raises(asyncpg.NotNullViolationError):
         await db.pool.execute(
-            "INSERT INTO odata_category_map (org_id, category_id, account_code)"
+            "INSERT INTO org_category_map (org_id, category_id, account_code)"
             " VALUES (1, $1, '26')",
             категория,
         )
-
-
-@pytest.mark.asyncio
-async def test_отражение_в_усн_только_из_четырёх_значений(db):
-    """⚠️ НАБОР ЗАКРЫТ ПЛАТФОРМОЙ: перечисление `ОтражениеВУСН` в схеме 1С
-    несёт ровно четыре члена. Поле документа объявлено строкой, и 1С
-    опечатку не отобьёт — значит отбивает база."""
-    import asyncpg
-
-    категория = await _категория(db)
-    with pytest.raises(asyncpg.CheckViolationError):
+    with pytest.raises(asyncpg.NotNullViolationError):
         await db.pool.execute(
-            "INSERT INTO odata_category_map (org_id, category_id, account_code,"
-            " expense_ref, usn_reflection) VALUES (1, $1, '26', 'ст', 'принимаются')",
-            категория,
+            "INSERT INTO org_expense_kind_map (org_id, tax_kind)"
+            " VALUES (1, 'Прочие расходы')"
         )
 
 
 @pytest.mark.asyncio
-async def test_четыре_значения_отражения_проходят(db):
+async def test_отражение_в_усн_только_из_трёх_значений(db):
+    """⚠️ НАБОР ЗАКРЫТ ДОКУМЕНТОМ: «ВозвратРасхода» — пометка возврата,
+    а не правило расхода. Поле документа в 1С объявлено строкой и опечатку
+    не отобьёт — значит отбивает база."""
+    import asyncpg
+
+    for значение in ("принимаются", "ВозвратРасхода"):
+        with pytest.raises(asyncpg.CheckViolationError):
+            await db.pool.execute(
+                "INSERT INTO org_expense_kind_map (org_id, tax_kind, expense_ref,"
+                " usn_reflection) VALUES (1, 'Прочие расходы', 'ст', $1)",
+                значение,
+            )
+
+
+@pytest.mark.asyncio
+async def test_три_значения_отражения_проходят(db):
     """Пара к тесту выше: CHECK не должен запрещать законное."""
-    категория = await _категория(db)
-    for значение in (
-        "Принимаются",
-        "НеПринимаются",
-        "Распределяются",
-        "ВозвратРасхода",
-    ):
+    await db.добавить_организацию(id=1)
+    for значение in ("Принимаются", "НеПринимаются", "Распределяются"):
         await db.pool.execute(
-            "INSERT INTO odata_category_map (org_id, category_id, account_code,"
-            " expense_ref, usn_reflection) VALUES (1, $1, '26', 'ст', $2)"
-            " ON CONFLICT (org_id, category_id) DO UPDATE SET usn_reflection = $2",
-            категория,
+            "INSERT INTO org_expense_kind_map (org_id, tax_kind, expense_ref,"
+            " usn_reflection) VALUES (1, 'Прочие расходы', 'ст', $1)"
+            " ON CONFLICT (org_id, tax_kind) DO UPDATE SET usn_reflection = $1",
             значение,
         )
     лежит = await db.pool.fetchval(
-        "SELECT usn_reflection FROM odata_category_map WHERE category_id=$1", категория
+        "SELECT usn_reflection FROM org_expense_kind_map WHERE org_id=1"
     )
-    assert лежит == "ВозвратРасхода"
+    assert лежит == "Распределяются"
 
 
 @pytest.mark.asyncio
-async def test_режимы_профиля_проверяются_базой(db):
-    """Опечатка в режиме тихо сменила бы состав документа: при `included`
-    чек не дробится по ставкам, при `deductible` дробится."""
+async def test_вид_расхода_только_из_словаря(db):
+    """Вид расхода — та же шкала, что у `categories.tax_kind`. Чужое
+    значение означало бы правило, к которому не привяжется ни одна
+    категория, — молча."""
     import asyncpg
 
     await db.добавить_организацию(id=1)
     with pytest.raises(asyncpg.CheckViolationError):
         await db.pool.execute(
-            "INSERT INTO org_accounting_profile (org_id, tax_regime, vat_mode,"
-            " default_account_code) VALUES (1, 'usn', 'included', '26')"
+            "INSERT INTO org_expense_kind_map (org_id, tax_kind, expense_ref)"
+            " VALUES (1, 'Придуманный вид', 'ст')"
+        )
+
+
+@pytest.mark.asyncio
+async def test_один_вид_расхода_одно_правило(db):
+    import asyncpg
+
+    await db.добавить_организацию(id=1)
+
+    async def правило(статья):
+        await db.pool.execute(
+            "INSERT INTO org_expense_kind_map (org_id, tax_kind, expense_ref)"
+            " VALUES (1, 'Прочие расходы', $1)",
+            статья,
+        )
+
+    await правило("ст-1")
+    with pytest.raises(asyncpg.UniqueViolationError):
+        await правило("ст-2")
+
+
+@pytest.mark.asyncio
+async def test_режимы_профиля_проверяются_базой(db):
+    """Опечатка в режиме тихо сменила бы состав документа: при `included`
+    чек не дробится, при `deductible` дробится и НДС не входит в стоимость."""
+    import asyncpg
+
+    await db.добавить_организацию(id=1)
+    for форма, режим, ндс, политика in (
+        ("ooo", "usn", "included", "when_mapped"),
+        ("ooo", "usn_dr", "вычет", "when_mapped"),
+        ("ао", "usn_dr", "included", "when_mapped"),
+        ("ooo", "usn_dr", "included", "иногда"),
+    ):
+        with pytest.raises(asyncpg.CheckViolationError):
+            await db.pool.execute(
+                "INSERT INTO org_accounting_profile (org_id, legal_form, tax_regime,"
+                " vat_mode, default_account_code, auto_post_policy)"
+                " VALUES (1, $1, $2, $3, '26', $4)",
+                форма,
+                режим,
+                ндс,
+                политика,
+            )
+
+
+@pytest.mark.asyncio
+async def test_патент_и_совмещение_только_у_ип(db):
+    """⚠️ СВЯЗКИ ПРОВЕРЯЕТ БАЗА, А НЕ ТОЛЬКО ЭКРАН (§ 5.1). Патент у ООО
+    означал бы документ, разнесённый по чужим правилам."""
+    import asyncpg
+
+    await db.добавить_организацию(id=1)
+    with pytest.raises(asyncpg.CheckViolationError):
+        await db.pool.execute(
+            "INSERT INTO org_accounting_profile (org_id, legal_form, tax_regime,"
+            " vat_mode, default_account_code) VALUES (1, 'ooo', 'psn', 'not_payer', '26')"
         )
     with pytest.raises(asyncpg.CheckViolationError):
         await db.pool.execute(
-            "INSERT INTO org_accounting_profile (org_id, tax_regime, vat_mode,"
-            " default_account_code) VALUES (1, 'usn_income_expense', 'вычет', '26')"
+            "INSERT INTO org_accounting_profile (org_id, legal_form, tax_regime,"
+            " vat_mode, combines_psn, default_account_code)"
+            " VALUES (1, 'ooo', 'usn_dr', 'included', TRUE, '26')"
         )
+    # У ИП то же самое законно.
+    await db.pool.execute(
+        "INSERT INTO org_accounting_profile (org_id, legal_form, tax_regime,"
+        " vat_mode, combines_psn, default_account_code)"
+        " VALUES (1, 'ip', 'psn', 'not_payer', TRUE, '26')"
+    )
 
 
 @pytest.mark.asyncio
 async def test_профиль_у_организации_ровно_один(db):
     """Два профиля означали бы, что состав документа зависит от порядка
-    выборки, — тот же довод, что у правила категории."""
+    выборки, — тот же довод, что у правила вида расхода."""
     import asyncpg
 
     await db.добавить_организацию(id=1)
 
     async def профиль(счёт):
         await db.pool.execute(
-            "INSERT INTO org_accounting_profile (org_id, tax_regime, vat_mode,"
-            " default_account_code) VALUES (1, 'usn_income_expense', 'included', $1)",
+            "INSERT INTO org_accounting_profile (org_id, legal_form, tax_regime,"
+            " vat_mode, default_account_code) VALUES (1, 'ooo', 'usn_dr', 'included', $1)",
             счёт,
         )
 
     await профиль("26")
     with pytest.raises(asyncpg.UniqueViolationError):
-        await профиль("20.01")
+        await профиль("44")

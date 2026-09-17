@@ -821,90 +821,158 @@ async def init_db():
         # для одной строки расхода означают, что проводка зависит от порядка
         # выборки, а такой дефект не ловится ничем.
         #
-        # ⚠️ 1C-22: ПРАВИЛО БЕЗ СТАТЬИ — НЕ ПРАВИЛО (решение владельца
-        # 17.09.2026). `expense_ref` становится обязательным: строка, в которой
-        # статьи нет, не описывает проводку, а притворяется описанием. Такую
-        # категорию честнее НЕ заводить вовсе — тогда её назовёт ответ ручки
-        # и документ не проведётся.
+        # ⚠️⚠️ 1C-22, ПЕРЕСТРОЙКА ПОД AOCG-1C-001 v0.1: ОСЬ СОПОСТАВЛЕНИЯ —
+        # ВИД РАСХОДА, А НЕ КАТЕГОРИЯ. Довод документа (§ 4): у каждой нашей
+        # категории уже есть `tax_kind` — вид расхода по 1С, девять значений,
+        # и ровно та же шкала стоит у статьи затрат клиента полем
+        # `ВидРасходовНУ`. Значит сопоставлять надо ДЕВЯТЬ ВИДОВ с его
+        # статьями, а не 48 категорий: у клиента с сорока восемью строками
+        # настройки шанс ошибиться в одной близок к единице.
         #
-        # ⚠️ ОтражениеВУСН ХРАНИТСЯ У ПРАВИЛА, А НЕ ВЫВОДИТСЯ ИЗ СТАТЬИ.
-        # Вывести его неоткуда: в справочнике статей затрат 1С такого признака
-        # нет вовсе (замер 17.09.2026, 21 запись, поля Code, Description,
-        # ВидРасходовНУ, ВидДеятельностиДляНалоговогоУчетаЗатрат). Набор
-        # значений закрыт самой платформой — четыре члена перечисления
-        # `ОтражениеВУСН` из живой схемы, поэтому здесь CHECK, а не проверка
-        # в коде: список не вырастет, его растит не наш заход, а 1С.
+        # ⚠️ ПЕРЕИМЕНОВАНИЕ, А НЕ НОВАЯ ТАБЛИЦА. `odata_category_map` меняет
+        # имя на `org_category_map`: таблица описывает УЧЁТ организации,
+        # а не транспорт, и читать её будет не только выгрузка по OData.
+        # Переименование идёт ДО создания, иначе на проде появились бы две.
+        #
+        # ⚠️ ПРАВИЛО БЕЗ СТАТЬИ — НЕ ПРАВИЛО. `expense_ref` обязателен:
+        # строка без статьи не описывает проводку, а притворяется описанием.
+        # Без статьи 1С подставляет свою, молча (замер 17.09.2026).
+        #
+        # ⚠️ ТРИ ЗНАЧЕНИЯ ПРИЗНАКА УСН, А НЕ ЧЕТЫРЕ. В перечислении 1С их
+        # четыре, но `ВозвратРасхода` — пометка возврата, а не правило
+        # расхода (AOCG-1C-001, § 5.2). В правило допускаются три.
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS odata_category_map (
+            ALTER TABLE IF EXISTS odata_category_map RENAME TO org_category_map;
+            ALTER INDEX IF EXISTS odata_category_map_unique
+                RENAME TO org_category_map_unique;
+            CREATE TABLE IF NOT EXISTS org_category_map (
                 id            SERIAL PRIMARY KEY,
                 org_id        INTEGER NOT NULL REFERENCES organizations(id),
                 category_id   INTEGER NOT NULL REFERENCES categories(id),
-                -- Счёт затрат в базе клиента: «20.01», «26» и подобные.
-                -- Код, а не ссылка: в 1С счёт ищется по коду, и человек
-                -- в настройке пишет именно его.
-                account_code  TEXT NOT NULL,
+                -- Счёт затрат в базе клиента: «26», «44» и подобные. Код,
+                -- а не ссылка: в 1С счёт ищется по коду, и человек в настройке
+                -- пишет именно его. NULL — счёт берётся из профиля.
+                account_code  TEXT,
                 -- Статья затрат — элемент справочника клиента. Храним и имя,
-                -- и ссылку: ссылка нужна записи, имя — человеку в настройке,
-                -- чтобы он видел, что выбрал, без похода в 1С.
+                -- и ссылку: ссылка нужна записи, имя — человеку в настройке.
                 expense_ref   TEXT NOT NULL,
                 expense_name  TEXT,
                 usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'
                     CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',
-                                              'Распределяются', 'ВозвратРасхода')),
+                                              'Распределяются')),
                 created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
-            -- Одна категория — одно правило внутри организации.
-            CREATE UNIQUE INDEX IF NOT EXISTS odata_category_map_unique
-                ON odata_category_map(org_id, category_id);
+            -- Одна категория — одно переопределение внутри организации.
+            CREATE UNIQUE INDEX IF NOT EXISTS org_category_map_unique
+                ON org_category_map(org_id, category_id);
             -- ⚠️ ОТДЕЛЬНЫМИ ALTER, И ЭТО НЕ ИЗБЫТОЧНОСТЬ: `CREATE TABLE IF NOT
             -- EXISTS` на уже созданной таблице не добавляет ни колонок,
-            -- ни ограничений. Там, где таблица появилась редакцией захода ②,
-            -- изменения приедут только так.
-            ALTER TABLE odata_category_map
+            -- ни ограничений. На проде таблица создана заходом ②, и правки
+            -- приедут туда только так.
+            ALTER TABLE org_category_map
                 ADD COLUMN IF NOT EXISTS usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'
                     CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',
-                                              'Распределяются', 'ВозвратРасхода'));
-            ALTER TABLE odata_category_map
-                ALTER COLUMN expense_ref SET NOT NULL;
+                                              'Распределяются'));
+            ALTER TABLE org_category_map ALTER COLUMN account_code DROP NOT NULL;
+            ALTER TABLE org_category_map ALTER COLUMN expense_ref SET NOT NULL;
+        """)
+
+        # ── 1C-22: ПРАВИЛО ПО ВИДУ РАСХОДА — ОСНОВНОЕ ──────────────────────
+        #
+        # ⚠️ ДЕВЯТЬ СТРОК ВМЕСТО СОРОКА ВОСЬМИ. Ключ — (организация, вид
+        # расхода). `tax_kind` хранится ТОЙ ЖЕ РУССКОЙ СТРОКОЙ, что и в
+        # `categories.tax_kind`, и CHECK здесь — зеркало тамошнего.
+        # Код вида (`material`, `other`, …) в базе не заводится намеренно:
+        # в системе уже три словаря налоговых кодов (режимы организации,
+        # коды СНО чека, режимы профиля), и четвёртый пришлось бы
+        # переводить в наш `tax_kind` при каждом чтении.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS org_expense_kind_map (
+                id             SERIAL PRIMARY KEY,
+                org_id         INTEGER NOT NULL REFERENCES organizations(id),
+                -- Вид расхода — зеркало CHECK у `categories.tax_kind`.
+                tax_kind       TEXT NOT NULL
+                    CHECK (tax_kind IN (
+                        'Материальные расходы','Прочие расходы','Командировочные расходы',
+                        'Представительские расходы','Расходы на рекламу (нормируемые)',
+                        'Транспортные расходы','Оплата труда','Налоги и сборы',
+                        'Не учитываемые в целях налогообложения'
+                    )),
+                expense_ref    TEXT NOT NULL,
+                expense_name   TEXT,
+                -- NULL — счёт берётся из профиля организации.
+                account_code   TEXT,
+                usn_reflection TEXT NOT NULL DEFAULT 'Принимаются'
+                    CHECK (usn_reflection IN ('Принимаются', 'НеПринимаются',
+                                              'Распределяются')),
+                created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            -- Один вид расхода — одно правило внутри организации.
+            CREATE UNIQUE INDEX IF NOT EXISTS org_expense_kind_map_unique
+                ON org_expense_kind_map(org_id, tax_kind);
         """)
 
         # ── 1C-22: ПРОФИЛЬ УЧЁТА ОРГАНИЗАЦИИ ───────────────────────────────
         #
-        # ⚠️ ПОЧЕМУ ОТДЕЛЬНАЯ ТАБЛИЦА, А НЕ КОЛОНКИ В `organizations`
-        # (решение владельца 17.09.2026, Р5). `organizations` описывает сам
-        # аккаунт: кто зарегистрирован и под каким именем. Режим налогообложения,
-        # режим НДС и счёт по умолчанию — это НАСТРОЙКА УЧЁТА, и читать её будет
-        # не только выгрузка в 1С. Профиль лежит на НАШЕЙ стороне, а транспорт
-        # его только читает и ничего своего не хранит.
+        # ⚠️ ПОЧЕМУ ОТДЕЛЬНАЯ ТАБЛИЦА, А НЕ КОЛОНКИ В `organizations`.
+        # `organizations` описывает аккаунт: кто зарегистрирован и под каким
+        # именем. Режим налогообложения, статус по НДС, счёт по умолчанию
+        # и политика проведения — НАСТРОЙКА УЧЁТА, и читать её будет не только
+        # выгрузка по OData: расширение 1С получит те же данные (AOCG-1C-001,
+        # § 9). Профиль лежит у нас, транспорт его только читает.
         #
-        # ⚠️ ПОЧЕМУ СЧЁТ ПО УМОЛЧАНИЮ — НАСТРОЙКА, А НЕ КОНСТАНТА. Константа
-        # «20.01» пришла из пробной записи 1C-20 и оказалась неверной для бюро:
-        # счёт 20.01 требует номенклатурную группу (замер 17.09.2026: у него три
-        # вида субконто — номенклатурные группы, статьи затрат, продукция),
-        # а её у нас нет и не будет. У бюро счёт 26, у следующего клиента будет
-        # свой, и это данные, а не код.
+        # ⚠️ ФОРМА ОРГАНИЗАЦИИ — СВОЁ ПОЛЕ `legal_form`, И ЭТО ПОПРАВКА
+        # ВЛАДЕЛЬЦА 17.09.2026 К ЕГО ЖЕ ПРЕЖНЕМУ СЛОВУ. Сначала решили брать
+        # `organizations.type`, потом отменили: `type` — это person|company,
+        # то есть «личный кабинет или компания», и ИП из него не выводится.
         #
-        # ⚠️ CHECK НА ОБА ПЕРЕЧИСЛЕНИЯ. Оба набора закрыты и заданы не нами:
-        # режимы налогообложения — законом, режимы НДС — тем, как учитывается
-        # входящий налог. Опечатка в режиме тихо сменила бы состав документа.
+        # ⚠️ СТАТУС ПО НДС — ОТДЕЛЬНАЯ ОСЬ, А НЕ СЛЕДСТВИЕ РЕЖИМА
+        # (AOCG-1C-001, § 2.2). С 2026 упрощенец платит НДС при доходе свыше
+        # 20 млн, а на ставках 5 и 7 % входящий налог к вычету НЕ принимается
+        # и садится в стоимость. Вывести это из `tax_regime` нельзя.
+        #
+        # ⚠️ ПРОВЕДЕНИЕ — ПОЛИТИКОЙ, А НЕ ЗАШИТЫМ ПРАВИЛОМ (§ 7). `never` —
+        # всегда черновик, `when_mapped` — только когда у всех чеков есть
+        # соответствие, `always` — всегда. Контрагент, НДС и режим на это
+        # не влияют вовсе: без счёта-фактуры вычета нет и с контрагентом.
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS org_accounting_profile (
                 id                   SERIAL PRIMARY KEY,
                 org_id               INTEGER NOT NULL REFERENCES organizations(id),
-                -- Режим налогообложения организации.
+                -- Форма организации. ⚠️ ОТДЕЛЬНЫМ ПОЛЕМ, А НЕ ИЗ
+                -- `organizations.type` (решение владельца 17.09.2026):
+                -- `type` — это person|company, то есть «личный кабинет или
+                -- компания», и выводить из него ИП нельзя. Форма нужна,
+                -- чтобы отбивать патент и совмещение у ООО.
+                legal_form           TEXT NOT NULL
+                    CHECK (legal_form IN ('ooo', 'ip')),
+                -- Режим налогообложения. НПД здесь нет намеренно: выгрузки
+                -- в 1С у самозанятого не бывает, профиль ему не создаётся.
                 tax_regime           TEXT NOT NULL
-                    CHECK (tax_regime IN ('usn_income_expense', 'usn_income',
-                                          'osno', 'ausn')),
-                -- Что делать с входящим НДС: не плательщик · включён в стоимость
-                -- · принимается к вычету. От этого зависит и состав строк,
-                -- и обязательность контрагента.
+                    CHECK (tax_regime IN ('osno', 'usn_dr', 'usn_d',
+                                          'ausn_dr', 'ausn_d', 'eshn', 'psn')),
+                -- Статус по НДС: не плательщик · налог в стоимости ·
+                -- налог к вычету. От него зависит состав строк документа.
                 vat_mode             TEXT NOT NULL
                     CHECK (vat_mode IN ('not_payer', 'included', 'deductible')),
-                -- Счёт затрат, когда у категории нет своего правила.
+                -- Совмещение УСН и патента: допускает признак «Распределяются».
+                combines_psn         BOOLEAN NOT NULL DEFAULT FALSE,
+                -- Счёт затрат, когда у правила своего нет.
                 default_account_code TEXT NOT NULL,
+                -- Политика проведения документа.
+                auto_post_policy     TEXT NOT NULL DEFAULT 'when_mapped'
+                    CHECK (auto_post_policy IN ('when_mapped', 'never', 'always')),
                 created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                -- ⚠️ СВЯЗКИ ПРОВЕРЯЕТ БАЗА, А НЕ ТОЛЬКО ЭКРАН (§ 5.1):
+                -- патент и совмещение бывают только у ИП. У ООО это
+                -- означало бы документ, разнесённый по чужим правилам.
+                CONSTRAINT org_accounting_profile_psn_only_ip
+                    CHECK (tax_regime <> 'psn' OR legal_form = 'ip'),
+                CONSTRAINT org_accounting_profile_combines_only_ip
+                    CHECK (NOT combines_psn OR legal_form = 'ip')
             );
             -- Профиль у организации ровно один: два означали бы, что состав
             -- документа зависит от порядка выборки.
@@ -914,7 +982,12 @@ async def init_db():
         # ТОЧКА ОТКАТА 1C-22, выполняется РУКАМИ, приложением никогда:
         #   DROP INDEX IF EXISTS org_accounting_profile_unique;
         #   DROP TABLE IF EXISTS org_accounting_profile;
-        #   ALTER TABLE odata_category_map DROP COLUMN IF EXISTS usn_reflection;
+        #   DROP INDEX IF EXISTS org_expense_kind_map_unique;
+        #   DROP TABLE IF EXISTS org_expense_kind_map;
+        #   ALTER TABLE org_category_map DROP COLUMN IF EXISTS usn_reflection;
+        #   ALTER INDEX IF EXISTS org_category_map_unique RENAME TO odata_category_map_unique;
+        #   ALTER TABLE IF EXISTS org_category_map RENAME TO odata_category_map;
+        #   DROP TABLE IF EXISTS org_category_map;
 
         # ⚠️ ЖУРНАЛ ВЫГРУЗОК ХРАНИТ ИСТОРИЮ, А НЕ ПОСЛЕДНЮЮ ПОПЫТКУ, и это
         # ровно тот довод, по которому владелец 16.09.2026 отверг вариант
