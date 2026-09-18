@@ -456,3 +456,63 @@ async def test_профиль_у_организации_ровно_один(db):
     await профиль("26")
     with pytest.raises(asyncpg.UniqueViolationError):
         await профиль("44")
+
+
+@pytest.mark.asyncio
+async def test_политика_проведения_по_умолчанию_никогда(db):
+    """⚠️ ПЛАТФОРМА ДОКУМЕНТЫ НЕ ПРОВОДИТ (решение владельца 18.09.2026).
+    Профиль, заведённый без явного выбора, обязан получить «never»:
+    проведение — бухгалтерское действие в чужом учёте, и брать его на себя
+    по умолчанию значит решать за бухгалтера клиента."""
+    await db.добавить_организацию(id=1)
+    await db.pool.execute(
+        "INSERT INTO org_accounting_profile (org_id, legal_form, tax_regime,"
+        " vat_mode, default_account_code) VALUES (1, 'ooo', 'usn_dr', 'included', '26')"
+    )
+    политика = await db.pool.fetchval(
+        "SELECT auto_post_policy FROM org_accounting_profile WHERE org_id=1"
+    )
+    assert политика == "never", "умолчание политики проведения — %s" % политика
+
+
+@pytest.mark.asyncio
+async def test_первичный_ключ_переименован_вслед_за_таблицей(db):
+    """⚠️ ЛОЖНЫЙ СЛЕД ДОРОЖЕ, ЧЕМ КАЖЕТСЯ. `ALTER TABLE … RENAME` имена
+    ограничений не трогает: индекс `odata_category_map_pkey` у таблицы
+    `org_category_map` отправит следующий разбор искать таблицу, которой
+    в базе нет.
+
+    ⚠️ ПРОВЕРЯЕТСЯ ПУТЬ ПРОДА, А НЕ ЧИСТОЙ БАЗЫ. На чистой базе таблица
+    создаётся сразу новым именем, и ключ получает верное имя сам собой —
+    такой тест был бы зелёным при снятом переименовании. Поэтому таблица
+    СНАЧАЛА возвращается к старому имени, а потом прогоняется миграция,
+    как она пройдёт на проде."""
+    await db.pool.execute("ALTER TABLE org_category_map RENAME TO odata_category_map")
+    await db.pool.execute(
+        "ALTER INDEX org_category_map_unique RENAME TO odata_category_map_unique"
+    )
+    await db.pool.execute(
+        "ALTER INDEX org_category_map_pkey RENAME TO odata_category_map_pkey"
+    )
+    try:
+        for ddl in _рельсы().МИГРАЦИЯ:
+            await db.pool.execute(ddl)
+    finally:
+        # Схема живая и одна на прогон: не вернув имена, уроним соседей.
+        осталась = await db.pool.fetchval(
+            "SELECT 1 FROM information_schema.tables"
+            " WHERE table_name = 'odata_category_map'"
+        )
+        if осталась:
+            await db.pool.execute(
+                "ALTER TABLE odata_category_map RENAME TO org_category_map"
+            )
+
+    имена = {
+        з["indexname"]
+        for з in await db.pool.fetch(
+            "SELECT indexname FROM pg_indexes WHERE tablename = 'org_category_map'"
+        )
+    }
+    assert "org_category_map_pkey" in имена, имена
+    assert "odata_category_map_pkey" not in имена, "старое имя индекса осталось"

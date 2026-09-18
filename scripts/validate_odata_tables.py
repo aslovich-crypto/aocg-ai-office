@@ -58,6 +58,8 @@ import sys
     """ALTER TABLE IF EXISTS odata_category_map RENAME TO org_category_map""",
     """ALTER INDEX IF EXISTS odata_category_map_unique
     RENAME TO org_category_map_unique""",
+    """ALTER INDEX IF EXISTS odata_category_map_pkey
+    RENAME TO org_category_map_pkey""",
     """CREATE TABLE IF NOT EXISTS org_category_map (
     id            SERIAL PRIMARY KEY,
     org_id        INTEGER NOT NULL REFERENCES organizations(id),
@@ -112,7 +114,7 @@ import sys
         CHECK (vat_mode IN ('not_payer', 'included', 'deductible')),
     combines_psn         BOOLEAN NOT NULL DEFAULT FALSE,
     default_account_code TEXT NOT NULL,
-    auto_post_policy     TEXT NOT NULL DEFAULT 'when_mapped'
+    auto_post_policy     TEXT NOT NULL DEFAULT 'never'
         CHECK (auto_post_policy IN ('when_mapped', 'never', 'always')),
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),

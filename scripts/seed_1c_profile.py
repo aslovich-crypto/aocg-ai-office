@@ -69,7 +69,9 @@ import sys
     "vat_mode": "included",
     "combines_psn": False,
     "default_account_code": "26",
-    "auto_post_policy": "when_mapped",
+    # ⚠️ «НИКОГДА» — УМОЛЧАНИЕ ПЛАТФОРМЫ (решение владельца 18.09.2026):
+    # документы проводит бухгалтер, а не мы.
+    "auto_post_policy": "never",
 }
 
 # (вид расхода, имя статьи в 1С, ссылка, признак УСН, альтернатива для человека).

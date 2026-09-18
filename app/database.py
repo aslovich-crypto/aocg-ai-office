@@ -845,6 +845,13 @@ async def init_db():
             ALTER TABLE IF EXISTS odata_category_map RENAME TO org_category_map;
             ALTER INDEX IF EXISTS odata_category_map_unique
                 RENAME TO org_category_map_unique;
+            -- ⚠️ ПЕРВИЧНЫЙ КЛЮЧ ПЕРЕИМЕНОВЫВАЕТСЯ ОТДЕЛЬНО: `ALTER TABLE …
+            -- RENAME` меняет имя таблицы, но имена её ограничений оставляет
+            -- прежними. Индекс `odata_category_map_pkey` у таблицы
+            -- `org_category_map` — не поломка, а ложный след: следующий
+            -- разбор начнётся с поиска таблицы, которой нет.
+            ALTER INDEX IF EXISTS odata_category_map_pkey
+                RENAME TO org_category_map_pkey;
             CREATE TABLE IF NOT EXISTS org_category_map (
                 id            SERIAL PRIMARY KEY,
                 org_id        INTEGER NOT NULL REFERENCES organizations(id),
@@ -961,8 +968,13 @@ async def init_db():
                 combines_psn         BOOLEAN NOT NULL DEFAULT FALSE,
                 -- Счёт затрат, когда у правила своего нет.
                 default_account_code TEXT NOT NULL,
-                -- Политика проведения документа.
-                auto_post_policy     TEXT NOT NULL DEFAULT 'when_mapped'
+                -- ⚠️ ПОЛИТИКА ПРОВЕДЕНИЯ, УМОЛЧАНИЕ «НИКОГДА» (решение
+                -- владельца 18.09.2026). ПЛАТФОРМА ДОКУМЕНТЫ НЕ ПРОВОДИТ:
+                -- проведение — бухгалтерское действие в чужом учёте, и брать
+                -- его на себя по умолчанию значит решать за бухгалтера
+                -- клиента. `when_mapped` и `always` включаются ТОЛЬКО явным
+                -- выбором клиента.
+                auto_post_policy     TEXT NOT NULL DEFAULT 'never'
                     CHECK (auto_post_policy IN ('when_mapped', 'never', 'always')),
                 created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
