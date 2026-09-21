@@ -125,6 +125,10 @@ import sys
 )""",
     """CREATE UNIQUE INDEX IF NOT EXISTS org_accounting_profile_unique
     ON org_accounting_profile(org_id)""",
+    # CAT-FOOD ② (21.09.2026): порог подтверждения — отдельным ALTER, а не
+    # строкой внутри CREATE TABLE (13а.24): на проде таблица уже есть.
+    """ALTER TABLE org_accounting_profile
+    ADD COLUMN IF NOT EXISTS confirm_amount_threshold NUMERIC(15,2) DEFAULT 10000""",
     """CREATE TABLE IF NOT EXISTS odata_exports (
     id           SERIAL PRIMARY KEY,
     org_id       INTEGER NOT NULL REFERENCES organizations(id),
@@ -208,6 +212,7 @@ import sys
         "auto_post_policy",
         "created_at",
         "updated_at",
+        "confirm_amount_threshold",
     ),
     "odata_exports": (
         "id",

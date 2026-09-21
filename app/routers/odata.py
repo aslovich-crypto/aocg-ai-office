@@ -22,7 +22,7 @@ import os
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app import odata_body, odata_client, reports_data
+from app import category_confirm, odata_body, odata_client, reports_data
 from app.auth import can_see_all, get_current_user
 from app.database import get_pool
 
@@ -271,12 +271,23 @@ async def выгрузить_отчёт(id: int, user: dict = Depends(get_curren
     # запретит вторую успешную запись сама (частичный уникальный индекс),
     # но человек получил бы ошибку БАЗЫ вместо объяснения.
     for прошлая in await _прошлые_выгрузки(p, id, user["org_id"]):
+        # ⚠️ Р6 (CAT-FOOD ②): документ, который уже лежит в 1С, мог
+        # разойтись с чеками. Сказать об этом обязаны там же, где отказываем
+        # в повторной выгрузке, — это единственное место, где человек сегодня
+        # видит состояние выгрузки (экрана выгрузок нет, строка 1C-29).
+        if прошлая["outcome"] in ("ok", "partial", "unposted"):
+            устарел = category_confirm.хвост_устаревшего(
+                await category_confirm.изменённые_после_выгрузки(
+                    p, user["org_id"], id, прошлая["started_at"]
+                )
+            )
         if прошлая["outcome"] == "ok":
             raise HTTPException(
                 status_code=409,
                 detail="Отчёт уже выгружен в 1С, документ %s. Если его удалили "
                 "в 1С, отмените выгрузку и повторите."
-                % (прошлая["doc_number"] or прошлая["doc_ref"]),
+                % (прошлая["doc_number"] or прошлая["doc_ref"])
+                + устарел,
             )
         if прошлая["outcome"] in ("partial", "unposted"):
             # ⚠️ ЗАЩИТА ОТ ВТОРОГО ДОКУМЕНТА ПРИ ЧАСТИЧНОМ УСПЕХЕ ЖИВЁТ
@@ -290,7 +301,8 @@ async def выгрузить_отчёт(id: int, user: dict = Depends(get_curren
                 status_code=409,
                 detail="По отчёту уже создан документ %s, но он не проведён. "
                 "Проведите его в 1С или отмените выгрузку."
-                % (прошлая["doc_number"] or прошлая["doc_ref"]),
+                % (прошлая["doc_number"] or прошлая["doc_ref"])
+                + устарел,
             )
 
     ссылки = _ссылки_организации()
@@ -323,6 +335,17 @@ async def выгрузить_отчёт(id: int, user: dict = Depends(get_curren
             status_code=409,
             detail="Профиль учёта организации не настроен: неизвестны режим "
             "налогообложения, режим НДС и счёт затрат по умолчанию.",
+        )
+
+    # ⚠️ Р5 (CAT-FOOD ②): НЕПОДТВЕРЖДЁННАЯ КАТЕГОРИЯ — ОТКАЗ ДО 1С И ДО ЖУРНАЛА.
+    # Отказ обязан быть БЕСПЛАТНЫМ: ни одного запроса в чужую базу, ни строки
+    # в журнале выгрузок. Первое обращение к 1С — чтение справочников ниже,
+    # первая строка журнала — INSERT ещё ниже; здесь пока только наша база.
+    # Довод владельца: лучше заблокировать, чем второй раз выгрузить мусор.
+    не_подтверждены = category_confirm.неподтверждённые(чеки)
+    if не_подтверждены:
+        raise HTTPException(
+            status_code=409, detail=category_confirm.текст_отказа(не_подтверждены)
         )
 
     правила_категорий = await _правила_категорий(p, user["org_id"])

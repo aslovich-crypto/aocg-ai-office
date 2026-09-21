@@ -757,6 +757,45 @@ async def init_db():
             UPDATE receipts SET updated_at = created_at WHERE updated_at IS NULL;
             ALTER TABLE receipts ALTER COLUMN updated_at SET NOT NULL;
             ALTER TABLE receipts ALTER COLUMN updated_at SET DEFAULT NOW();
+            -- ── CAT-FOOD: ВРЕМЯ ПРАВКИ ДВИГАЕТ БАЗА, А НЕ РУЧКИ (Р6, Д3) ──────
+            -- ⚠️ ТРИГГЕР, ПОТОМУ ЧТО ПРАВКИ БЫВАЮТ И ПРЯМЫМ SQL С БАСТИОНА:
+            -- код ручки такую правку не увидит, триггер увидит (решение
+            -- владельца 21.09.2026). Условие — ровно поля, из которых
+            -- собирается документ 1С (app/odata_body.py). Флаг подтверждения,
+            -- ручная отметка и снимок время НЕ двигают: иначе разовый проход
+            -- по флагу «состарил» бы все выгруженные документы.
+            -- ⚠️ Создаётся, только если его нет: DROP+CREATE на каждом старте
+            -- при двух одновременно поднимающихся контейнерах дрался бы сам
+            -- с собой. Поменять условие — завести триггер под новым именем.
+            CREATE OR REPLACE FUNCTION receipts_touch_updated_at() RETURNS trigger
+                LANGUAGE plpgsql AS $fn$
+            BEGIN
+                NEW.updated_at := NOW();
+                RETURN NEW;
+            END
+            $fn$;
+            DO $do$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_trigger
+                     WHERE tgname = 'receipts_touch_updated_at'
+                       AND tgrelid = 'receipts'::regclass
+                ) THEN
+                    CREATE TRIGGER receipts_touch_updated_at
+                        BEFORE UPDATE ON receipts FOR EACH ROW
+                        WHEN (OLD.amount IS DISTINCT FROM NEW.amount
+                           OR OLD.date IS DISTINCT FROM NEW.date
+                           OR OLD.category_id IS DISTINCT FROM NEW.category_id
+                           OR OLD.org IS DISTINCT FROM NEW.org
+                           OR OLD.org_inn IS DISTINCT FROM NEW.org_inn
+                           OR OLD.org_legal IS DISTINCT FROM NEW.org_legal
+                           OR OLD.fd_num IS DISTINCT FROM NEW.fd_num
+                           OR OLD.fpd IS DISTINCT FROM NEW.fpd
+                           OR OLD.vat_breakdown IS DISTINCT FROM NEW.vat_breakdown)
+                        EXECUTE FUNCTION receipts_touch_updated_at();
+                END IF;
+            END
+            $do$;
             CREATE INDEX IF NOT EXISTS idx_receipts_category_id   ON receipts(category_id);
             CREATE INDEX IF NOT EXISTS idx_categories_org_id      ON categories(org_id);
             CREATE INDEX IF NOT EXISTS idx_category_groups_org_id ON category_groups(org_id);
@@ -998,13 +1037,6 @@ async def init_db():
                 -- выбором клиента.
                 auto_post_policy     TEXT NOT NULL DEFAULT 'never'
                     CHECK (auto_post_policy IN ('when_mapped', 'never', 'always')),
-                -- ⚠️ ПОРОГ СУММЫ, ВЫШЕ КОТОРОЙ КАТЕГОРИЮ ПОДТВЕРЖДАЕТ ЧЕЛОВЕК
-                -- (CAT-FOOD, решение владельца 21.09.2026). NULL — «по сумме
-                -- не спрашивать», и это НЕ то же самое, что ноль: у клиента
-                -- с чеками на сто рублей и у клиента с чеками на миллион
-                -- пороги разные, а профиль затем и сделан универсальным,
-                -- чтобы не навязывать свой.
-                confirm_amount_threshold NUMERIC(15,2),
                 created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 -- ⚠️ СВЯЗКИ ПРОВЕРЯЕТ БАЗА, А НЕ ТОЛЬКО ЭКРАН (§ 5.1):
@@ -1019,7 +1051,24 @@ async def init_db():
             -- документа зависит от порядка выборки.
             CREATE UNIQUE INDEX IF NOT EXISTS org_accounting_profile_unique
                 ON org_accounting_profile(org_id);
+            -- ⚠️ ПОРОГ СУММЫ, ВЫШЕ КОТОРОЙ КАТЕГОРИЮ ПОДТВЕРЖДАЕТ ЧЕЛОВЕК
+            -- (CAT-FOOD, решение владельца 21.09.2026). NULL — «по сумме
+            -- не спрашивать», и это НЕ то же самое, что ноль: у клиента
+            -- с чеками на сто рублей и у клиента с чеками на миллион
+            -- пороги разные, а профиль затем и сделан универсальным.
+            -- ⚠️⚠️ ОТДЕЛЬНЫМ ALTER, А НЕ СТРОКОЙ ВНУТРИ CREATE TABLE (13а.24).
+            -- До 21.09.2026 поле стояло внутри блока выше и на проде НЕ
+            -- ПОЯВИЛОСЬ: таблица была создана в 1C-22, и CREATE IF NOT EXISTS
+            -- её не трогал. Умолчание 10 000 ляжет и в уже заведённые профили.
+            ALTER TABLE org_accounting_profile
+                ADD COLUMN IF NOT EXISTS confirm_amount_threshold NUMERIC(15,2) DEFAULT 10000;
         """)
+        # ТОЧКА ОТКАТА CAT-FOOD ② (21.09.2026), выполняется РУКАМИ, приложением никогда:
+        #   DROP TRIGGER IF EXISTS receipts_touch_updated_at ON receipts;
+        #   DROP FUNCTION IF EXISTS receipts_touch_updated_at();
+        #   ALTER TABLE org_accounting_profile DROP COLUMN IF EXISTS confirm_amount_threshold;
+        # Колонки receipts.updated_at и category_confirm_required уехали на прод
+        # с 2c57ca3 и данных не несут; снимать их — только решением владельца.
         # ТОЧКА ОТКАТА 1C-22, выполняется РУКАМИ, приложением никогда:
         #   DROP INDEX IF EXISTS org_accounting_profile_unique;
         #   DROP TABLE IF EXISTS org_accounting_profile;

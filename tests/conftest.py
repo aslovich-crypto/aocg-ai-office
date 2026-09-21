@@ -536,6 +536,14 @@ class FakePool:
 
     async def fetchrow(self, query, *args):
         q = _norm(query)
+        # ─── CAT-FOOD ②: порог подтверждения из профиля учёта ───
+        # Профилей учёта у двойника нет вовсе — ответ «профиля нет», и создание
+        # чека берёт порог по умолчанию. Сам порог и его чтение проверяются
+        # на живой базе (tests/pg/test_cat_food_live.py), а не здесь.
+        if q.startswith(
+            "SELECT confirm_amount_threshold FROM org_accounting_profile WHERE org_id=$1"
+        ):
+            return None
         # ─── S-56 ───
         if q.startswith("SELECT id, user_id, expires_at, used_at FROM password_resets"):
             return next(
@@ -823,6 +831,9 @@ class FakePool:
                 # и перенумеровывать зеркало не пришлось.
                 sum_vat_0=args[32],
                 sum_no_vat=args[33],
+                # CAT-FOOD ②: флаг «категорию подтверждает человек» — последним
+                # параметром INSERT ($37), позиции выше не сдвинулись.
+                category_confirm_required=args[36] if len(args) > 36 else False,
                 card_id=None,
                 created_at=datetime.utcnow(),
             )

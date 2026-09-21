@@ -8,7 +8,13 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 from app.auth import can_delete_any, can_see_all, get_current_user
-from app.categorization import DEFAULT_FALLBACK, categorize
+from app.categorization import (
+    DEFAULT_FALLBACK,
+    НЕ_УКАЗАНО,
+    categorize,
+    нужно_подтверждение,
+)
+from app import category_confirm
 from app.database import get_pool
 from app.sql_builder import собрать_set
 from app.parsers.fns_parser import parse_fns_response
@@ -419,7 +425,7 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
     # Имя категории — промежуточное: резолвим в category_id per-org (канон), саму
     # строку category в колонку больше НЕ пишем (вариант B; DROP COLUMN — отдельный ЧП).
     category = r.category
-    if not category or category == "Не указано":
+    if not category or category == НЕ_УКАЗАНО:
         items = []
         if r.raw_data:
             if source in ("qr_scan", "fns"):
@@ -427,7 +433,25 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
             elif source == "photo_ocr":
                 items = parse_ocr_items(r.raw_data)
         category = categorize(r.org or "", items, brand=parsed.get("org_brand"))
-    category_id = await resolve_category_id(p, org_id, category)
+    # ⚠️ «НЕ УКАЗАНО» ЗАПИСЫВАЕТСЯ ПУСТОТОЙ, А НЕ ФОЛБЭКОМ (CAT-FOOD ②, Д2).
+    # resolve_category_id на незнакомое имя молча отдаёт «Прочие хозрасходы»,
+    # и честное «не знаю» превратилось бы в правдоподобную статью, которую
+    # глаз пропустит. NULL ничего не роняет — замер 21.09.2026: фронт пишет
+    # «Без категории», Excel — пустую ячейку, сборка 1С — «без соответствия».
+    category_id = (
+        None
+        if category == НЕ_УКАЗАНО
+        else await resolve_category_id(p, org_id, category)
+    )
+    # ⚠️ ФЛАГ СЧИТАЕТСЯ ВСЕГДА, ОТКУДА БЫ НИ ПРИШЛА КАТЕГОРИЯ (решение
+    # владельца 21.09.2026). Фронт присылает в теле подсказку, полученную
+    # от сервера при сканировании (web: App.jsx, тело создания), — значит
+    # categorize выше почти никогда не вызывается, и флаг, привязанный
+    # к нему, фронт обходил бы целиком.
+    порог = await category_confirm.порог_подтверждения(p, org_id)
+    confirm_required = нужно_подтверждение(
+        r.org or "", parsed.get("org_brand"), r.amount, порог
+    )
 
     # Надёжный фискальный номер есть только у не-photo_ocr источников с номером.
     # photo_ocr пишет kkt_fn=NULL (Вариант A) — его OCR-номер не считается надёжным.
@@ -654,12 +678,13 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                         kkt_serial, kkt_rn, fd_num, fpd, cashier, category_id, user_id,
                         vat_breakdown, photo_key,
                         sum_vat_0, sum_no_vat,
-                        ocr_fd, ocr_fpd
+                        ocr_fd, ocr_fpd,
+                        category_confirm_required
                     ) VALUES (
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
                         $12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
                         $23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,
-                        $35,$36
+                        $35,$36,$37
                     ) RETURNING *""",
                     user["org_id"],
                     r.date,
@@ -707,6 +732,9 @@ async def create_receipt(r: ReceiptIn, user: dict = Depends(get_current_user)):
                     # и для них есть настоящие fd_num/fpd — реквизиты.
                     r.ocr_fd,
                     r.ocr_fpd,
+                    # CAT-FOOD ②: последним параметром, чтобы позиции остальных
+                    # (и зеркало в tests/conftest.py) не сдвинулись.
+                    confirm_required,
                 )
                 # Позиции — best-effort: вложенная транзакция (SAVEPOINT), чтобы
                 # сбой вставки/парсинга позиций откатывал ТОЛЬКО их, а чек оставался.
@@ -999,6 +1027,17 @@ async def patch_receipt(
 ):
     p = await get_pool()
     org_id = user["org_id"]
+    # ⚠️ «НЕ УКАЗАНО» — ОТСУТСТВИЕ ВЫБОРА, А НЕ СТАТЬЯ (CAT-FOOD ②, Д2). Правка
+    # с этим именем проходила бы через resolve_category_id, а тот МОЛЧА
+    # подставляет «Прочие хозрасходы» — да ещё с отметкой «человек проверил».
+    # То есть подтверждение превратило бы честное «не знаю» ровно в ту
+    # заглушку, от которой отказались. Отказ стоит ДО любой записи.
+    if r.category is not None and r.category.strip() == НЕ_УКАЗАНО:
+        raise HTTPException(
+            status_code=422,
+            detail="Выберите статью расхода: «Не указано» — это отсутствие выбора, "
+            "а не статья.",
+        )
     поля: dict = {}
     for k, v in [("payment", r.payment), ("org", r.org)]:
         if v is not None:
