@@ -54,7 +54,11 @@ async def test_засев_кладёт_профиль_и_шесть_правил
     правил = await db.pool.fetchval(
         "SELECT count(*) FROM org_expense_kind_map WHERE org_id=1"
     )
-    assert правил == len(м.ПРАВИЛА_ВИДОВ)
+    assert правил == len(м.ПРАВИЛА_ВИДОВ) == 9
+    переопределений = await db.pool.fetchval(
+        "SELECT count(*) FROM org_category_map WHERE org_id=1"
+    )
+    assert переопределений == len(м.ПЕРЕОПРЕДЕЛЕНИЯ) == 34
     строка = await db.pool.fetchrow(
         "SELECT expense_ref, expense_name, usn_reflection, account_code"
         " FROM org_expense_kind_map WHERE org_id=1 AND tax_kind='Транспортные расходы'"
@@ -91,6 +95,7 @@ async def test_сухой_прогон_не_оставляет_ни_одной_�
     assert await м.прогнать(адрес_живой_базы, закрепить=False) == 0
     assert await db.pool.fetchval("SELECT count(*) FROM org_accounting_profile") == 0
     assert await db.pool.fetchval("SELECT count(*) FROM org_expense_kind_map") == 0
+    assert await db.pool.fetchval("SELECT count(*) FROM org_category_map") == 0
 
 
 @pytest.mark.asyncio
@@ -100,6 +105,7 @@ async def test_без_организации_засев_отказывается
     м = _засев()
     assert await м.прогнать(адрес_живой_базы, закрепить=True) == 1
     assert await db.pool.fetchval("SELECT count(*) FROM org_expense_kind_map") == 0
+    assert await db.pool.fetchval("SELECT count(*) FROM org_category_map") == 0
 
 
 @pytest.mark.asyncio
@@ -143,6 +149,7 @@ async def test_расхождение_режима_отменяет_засев(d
     assert await м.прогнать(адрес_живой_базы, закрепить=True) == 1
     assert await db.pool.fetchval("SELECT count(*) FROM org_accounting_profile") == 0
     assert await db.pool.fetchval("SELECT count(*) FROM org_expense_kind_map") == 0
+    assert await db.pool.fetchval("SELECT count(*) FROM org_category_map") == 0
 
 
 @pytest.mark.asyncio
