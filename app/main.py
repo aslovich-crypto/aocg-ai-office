@@ -12,7 +12,6 @@ from app.database import get_pool, init_db
 from app import env_check
 from app.routers import (
     receipts,
-    diag_echo_ip,
     reports,
     reports_export,
     integration,
@@ -174,8 +173,6 @@ app.include_router(fns.router)
 app.include_router(cards.router)
 app.include_router(ocr.router)
 app.include_router(consent.router)
-# ⚠️ ВРЕМЕННО, ЗАМЕР S-35 21.09.2026 — снимается этим же заходом.
-app.include_router(diag_echo_ip.router)
 app.include_router(users.router)
 app.include_router(services.router)
 app.include_router(categories.router)
