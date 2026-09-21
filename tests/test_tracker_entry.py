@@ -36,6 +36,15 @@ def test_в_трекере_нет_строк_мимо_решения_владе�
     assert "строк-задач в файле" in р.stdout
 
 
+def test_метки_дорожек_проверены_а_не_пропущены():
+    """T200 ①: «нарушений 0» ничего не значит, если строк проверено ноль."""
+    р = _прогнать("tracker_entry_guard.py")
+    assert р.returncode == 0, р.stdout + р.stderr
+    охват = next(с for с in р.stdout.splitlines() if "метки дорожек (T200 ①)" in с)
+    проверено = int(охват.split("проверено строк ")[1].split(" ")[0])
+    assert проверено > 0, охват
+
+
 def test_сторож_штампов_знает_оба_вида():
     р = _прогнать("audit_stamps.py", "--selfcheck")
     assert р.returncode == 0, р.stdout + р.stderr
