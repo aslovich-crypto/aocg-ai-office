@@ -81,6 +81,28 @@ repos:
         pass_filenames: false
         verbose: true
 
+      # ⚠️ ОЧЕРЕДЬ (T199 ③): две 🔵, отступление без записи в журнале, битая
+      # запись журнала. Здесь — предупреждение, по доводу соседних хуков;
+      # КРАСНОЕ — в CI (`tests/test_tracker_queue.py`).
+      - id: tracker-queue-guard
+        name: очередь — одна в работе, отступление только с записью (предупреждение, не блокировка)
+        entry: bash -c './venv/bin/python tests/tools/tracker_queue.py || true'
+        language: system
+        files: ^docs/TASKS\.md$
+        pass_filenames: false
+        verbose: true
+
+      # ⚠️ О6 (T199 ③): кодовый коммит, а в блоке «▶ ПОРЯДОК» ни одной 🔵 — работа
+      # идёт мимо очереди. Закрывает названную слепоту CI наполовину: видит коммит
+      # без объявленной работы, но не видит коммит про ДРУГУЮ задачу. Предупреждение.
+      - id: tracker-queue-no-work
+        name: кодовый коммит без пункта в работе (предупреждение, не блокировка)
+        entry: bash -c './venv/bin/python tests/tools/tracker_queue.py --pre-commit "$@" || true' --
+        language: system
+        files: ^(app|scripts|tests)/
+        pass_filenames: true
+        verbose: true
+
       # ⚠️ ВХОД В ТРЕКЕР — НОВАЯ СТРОКА ТОЛЬКО ПО РЕШЕНИЮ ВЛАДЕЛЬЦА (T199 ①,
       # решение владельца 22.09.2026, Р3). Здесь — предупреждение, по доводу
       # соседних хуков: блокировка на трекере учит обходить хук. КРАСНОЕ —

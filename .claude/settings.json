@@ -33,6 +33,18 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-/Users/alekseishukalovich/aocg-ai-office}/.claude/hooks/session-queue.sh\"",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   }
 }

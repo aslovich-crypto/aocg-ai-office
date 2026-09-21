@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# ХУК НАЧАЛА СЕССИИ: ОЧЕРЕДЬ ЗАДАЧ (T199 ③, решение владельца 22.09.2026).
+# ТОНКАЯ ОБЁРТКА — вся логика в tests/tools/tracker_queue.py, режим --hook.
+#
+# ⚠️ ХУК НЕ ВПРАВЕ НИ МОЛЧАТЬ, НИ МЕШАТЬ СЕССИИ. Код всегда 0. Если прибор
+# упал, ничего не напечатал или интерпретатора нет — печатаем сами
+# «⚠️ ОЧЕРЕДЬ НЕ ПРОЧИТАНА» в ОБА канала: владельцу (systemMessage) и модели
+# (additionalContext), и модели велено сказать об этом первой строкой ответа.
+# Молчаливый сбой хука неотличим от «очередь в порядке».
+#
+# ⚠️ Текст причины здесь постоянный: вывод прибора в JSON не вставляется —
+# кавычка в нём сломала бы JSON, и хук замолчал бы ровно при поломке.
+#
+# Имена переменных только латиницей — bash не принимает кириллические
+# идентификаторы и молча оставляет переменную пустой (CLAUDE.md, 15–17.08).
+set -uo pipefail
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+root=$(cd "$here/../.." && pwd)
+
+fail() {
+  msg="⚠️ ОЧЕРЕДЬ НЕ ПРОЧИТАНА: $1"
+  printf '{"systemMessage": "%s", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "%s. Скажи владельцу об этом ПЕРВОЙ строкой ответа и не работай молча: без очереди нельзя проверить, та ли задача берётся."}}\n' "$msg" "$msg"
+  exit 0
+}
+
+for candidate in "$root/venv/bin/python" "$(command -v python3 || true)"; do
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    out=$("$candidate" -B "$root/tests/tools/tracker_queue.py" --hook)
+    code=$?
+    if [ "$code" -eq 0 ] && [ -n "$out" ]; then
+      printf '%s\n' "$out"
+      exit 0
+    fi
+    fail "прибор очереди упал или промолчал (код $code)"
+  fi
+done
+
+fail "интерпретатор python не найден"
