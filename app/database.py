@@ -735,6 +735,28 @@ async def init_db():
             -- Смена категории чека: TRUE после ручного выбора пользователем — будущий
             -- батч-пересчёт (Фикс №4) такие чеки не трогает (WHERE category_manual=FALSE).
             ALTER TABLE receipts ADD COLUMN IF NOT EXISTS category_manual BOOLEAN DEFAULT FALSE;
+            -- ── CAT-FOOD: ТРЕБОВАНИЕ ПОДТВЕРДИТЬ КАТЕГОРИЮ ──────────────────
+            -- ⚠️ ВТОРОЕ ПОЛЕ, А НЕ `category_manual = FALSE` (решение владельца
+            -- 21.09.2026). «Человек не трогал» верно почти для всех чеков,
+            -- включая те, где машина права и спрашивать нечего: приняв это
+            -- за «требует подтверждения», выгрузка отказывала бы всегда,
+            -- и правило умерло бы в первый же день. Здесь ответ на другой
+            -- вопрос — НУЖНО ЛИ спрашивать, и он ставится по правилам
+            -- в момент заведения чека.
+            ALTER TABLE receipts
+                ADD COLUMN IF NOT EXISTS category_confirm_required BOOLEAN NOT NULL DEFAULT FALSE;
+            -- ── CAT-FOOD: ВРЕМЯ ПРАВКИ ЧЕКА (Р6) ────────────────────────────
+            -- ⚠️⚠️ ЧЕТЫРЕ ШАГА, И ПОРЯДОК ЗДЕСЬ — ВЕСЬ СМЫСЛ (решение владельца
+            -- 21.09.2026). `NOT NULL DEFAULT NOW()` одной строкой проставил бы
+            -- момент миграции ВСЕМ существующим чекам, и назавтра каждый уже
+            -- выгруженный документ оказался бы «устаревшим»: прибор покраснел
+            -- бы везде и перестал значить что-либо. Поэтому сначала пустая
+            -- колонка, потом перенос `created_at`, и только потом NOT NULL
+            -- и умолчание для будущих строк.
+            ALTER TABLE receipts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+            UPDATE receipts SET updated_at = created_at WHERE updated_at IS NULL;
+            ALTER TABLE receipts ALTER COLUMN updated_at SET NOT NULL;
+            ALTER TABLE receipts ALTER COLUMN updated_at SET DEFAULT NOW();
             CREATE INDEX IF NOT EXISTS idx_receipts_category_id   ON receipts(category_id);
             CREATE INDEX IF NOT EXISTS idx_categories_org_id      ON categories(org_id);
             CREATE INDEX IF NOT EXISTS idx_category_groups_org_id ON category_groups(org_id);
@@ -976,6 +998,13 @@ async def init_db():
                 -- выбором клиента.
                 auto_post_policy     TEXT NOT NULL DEFAULT 'never'
                     CHECK (auto_post_policy IN ('when_mapped', 'never', 'always')),
+                -- ⚠️ ПОРОГ СУММЫ, ВЫШЕ КОТОРОЙ КАТЕГОРИЮ ПОДТВЕРЖДАЕТ ЧЕЛОВЕК
+                -- (CAT-FOOD, решение владельца 21.09.2026). NULL — «по сумме
+                -- не спрашивать», и это НЕ то же самое, что ноль: у клиента
+                -- с чеками на сто рублей и у клиента с чеками на миллион
+                -- пороги разные, а профиль затем и сделан универсальным,
+                -- чтобы не навязывать свой.
+                confirm_amount_threshold NUMERIC(15,2),
                 created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 -- ⚠️ СВЯЗКИ ПРОВЕРЯЕТ БАЗА, А НЕ ТОЛЬКО ЭКРАН (§ 5.1):
