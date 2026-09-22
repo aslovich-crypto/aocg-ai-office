@@ -12,12 +12,15 @@
 проверять зеркало.
 """
 
+import asyncio
+
 import pytest
 
 from app import odata_client
 
 ВЫГРУЗКА = "/api/odata/reports/%d/export"
 ОТМЕНА = "/api/odata/reports/%d/cancel-export"
+СОСТОЯНИЕ = "/api/odata/reports/%d/export-state"
 
 
 class ПоддельнаяОдинЭс:
@@ -269,10 +272,19 @@ async def _отчёт(
 
 @pytest.mark.asyncio
 async def test_сотруднику_выгрузка_закрыта(client, as_role, db, настроено, monkeypatch):
+    """⚠️ 403 САМ ПО СЕБЕ НЕ ДОКАЗЫВАЕТ НИЧЕГО (CLAUDE.md, 1C-29 В5): отказ
+    мог прийти ПОСЛЕ обращения к 1С. Поэтому сверяется состояние — в подделке
+    1С ни одного вызова, в журнале ни одной строки — и рядом положительная
+    половина: бухгалтер, ради которого ручка, проходит как раньше."""
     await _отчёт(db)
-    monkeypatch.setattr(odata_client, "запросить", ПоддельнаяОдинЭс())
+    одинэс = ПоддельнаяОдинЭс()
+    monkeypatch.setattr(odata_client, "запросить", одинэс)
     as_role("employee", user_id=1)
     assert (await client.post(ВЫГРУЗКА % 1)).status_code == 403
+    assert одинэс.вызовы == [], "после отказа в подделку 1С всё же ходили"
+    assert await db.pool.fetchval("SELECT count(*) FROM odata_exports") == 0
+    as_role("accountant", user_id=1)
+    assert (await client.post(ВЫГРУЗКА % 1)).status_code == 200
 
 
 @pytest.mark.asyncio
@@ -427,9 +439,19 @@ async def test_отмена_выпускает_из_тупика(client, db, н�
 
 @pytest.mark.asyncio
 async def test_сотруднику_отмена_закрыта(client, as_role, db, настроено, monkeypatch):
+    """Та же пара, что у выгрузки (1C-29 В5): отказ И нетронутая запись.
+    Прежняя редакция отменяла ПУСТОЙ журнал — 403 пришёл бы и там, где гейта
+    нет, а отменять нечего."""
     await _отчёт(db)
+    monkeypatch.setattr(odata_client, "запросить", ПоддельнаяОдинЭс())
+    assert (await client.post(ВЫГРУЗКА % 1)).status_code == 200
     as_role("employee", user_id=1)
     assert (await client.post(ОТМЕНА % 1)).status_code == 403
+    assert await db.pool.fetchval("SELECT outcome FROM odata_exports") == "ok", (
+        "сотрудник получил 403, а запись о выгрузке всё равно отменилась"
+    )
+    as_role("accountant", user_id=1)
+    assert (await client.post(ОТМЕНА % 1)).status_code == 200
 
 
 # ── ЧАСТИЧНЫЙ УСПЕХ ──────────────────────────────────────────────────────
@@ -1008,3 +1030,316 @@ async def test_содержание_и_комментарий_уезжают_в_
     комментарий = тело_документа["Комментарий"]
     assert комментарий.startswith("AOCG AI Офис · отчёт №1 · ")
     assert "token" not in комментарий.lower()
+
+
+# ── 1C-29: ДВОЙНОЕ НАЖАТИЕ, ПРЕРВАННАЯ ОТПРАВКА, СОСТОЯНИЕ, ЧУЖАЯ ОРГАНИЗАЦИЯ ─
+
+
+class ОдинЭсСоШлагбаумом(ПоддельнаяОдинЭс):
+    """Держит каждый запрос на чтении плана счетов, пока туда не придут оба.
+
+    ⚠️ СОСТОЯНИЕ ГОНКИ СОЗДАЁТСЯ, А НЕ ПОДЛАВЛИВАЕТСЯ (CLAUDE.md, раздел про
+    сторожей). Чтение справочников идёт ПОСЛЕ проверки журнала и ДО записи
+    `running`. Значит, пройдя шлагбаум, оба запроса уже видели журнал пустым,
+    и дальше их разводит только база. Без шлагбаума второй запрос мог
+    прочитать журнал после записи первого и получить отказ от проверки
+    в коде — тест был бы зелёным, ни разу не дойдя до индекса.
+    """
+
+    def __init__(self, **прочее):
+        super().__init__(**прочее)
+        self.дошли = 0
+        self.оба_здесь = asyncio.Event()
+
+    async def __call__(self, путь, *, метод="GET", параметры=None, тело=None):
+        if метод == "GET" and путь == "ChartOfAccounts_Хозрасчетный":
+            self.дошли += 1
+            if self.дошли >= 2:
+                self.оба_здесь.set()
+            try:
+                await asyncio.wait_for(self.оба_здесь.wait(), 5)
+            except asyncio.TimeoutError:
+                pass  # тест ниже проверит `дошли` и назовёт несостоявшуюся гонку
+        return await super().__call__(путь, метод=метод, параметры=параметры, тело=тело)
+
+
+class ПадающаяОдинЭс(ПоддельнаяОдинЭс):
+    """Бросает исключение на создании документа или на проведении —
+    так выглядит поломка НА НАШЕЙ стороне, а не отказ 1С кодом ответа."""
+
+    def __init__(self, где, **прочее):
+        super().__init__(**прочее)
+        self.где = где
+
+    async def __call__(self, путь, *, метод="GET", параметры=None, тело=None):
+        if метод == "POST":
+            на_проведении = путь.endswith("/Post")
+            if (self.где == "проведение") == на_проведении:
+                self.вызовы.append((метод, путь, параметры, тело))
+                raise RuntimeError("поломка на нашей стороне")
+        return await super().__call__(путь, метод=метод, параметры=параметры, тело=тело)
+
+
+def _документов(одинэс):
+    return sum(
+        1 for в in одинэс.вызовы if в[0] == "POST" and в[1] == "Document_АвансовыйОтчет"
+    )
+
+
+async def _исходы(db):
+    return [
+        с["outcome"]
+        for с in await db.pool.fetch(
+            "SELECT outcome FROM odata_exports WHERE report_id=1 ORDER BY id"
+        )
+    ]
+
+
+async def _идущая(db, минут_назад):
+    """Запись `running`, начатая столько-то минут назад: идущая или прерванная."""
+    await db.pool.execute(
+        "INSERT INTO odata_exports (org_id, report_id, user_id, outcome, started_at)"
+        " VALUES (1, 1, 1, 'running', NOW() - make_interval(mins => $1))",
+        минут_назад,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "политика, исход", [("never", "unposted"), ("when_mapped", "ok")]
+)
+async def test_два_одновременных_нажатия_дают_один_документ(
+    client, db, настроено, monkeypatch, политика, исход
+):
+    """⚠️⚠️ ГЛАВНОЕ ТРЕБОВАНИЕ ЗАХОДА ① (1C-29 В1). Замер 22.09.2026 до правки:
+    при боевой политике «никогда» — два документа в подделке 1С и два 200;
+    при «когда сопоставлено» — два документа, 500 и `running` навсегда.
+    Боевая политика идёт ПЕРВОЙ: на ней индекс успехов не работал вовсе."""
+    await _отчёт(db, политика=политика)
+    одинэс = ОдинЭсСоШлагбаумом()
+    monkeypatch.setattr(odata_client, "запросить", одинэс)
+    ответы = await asyncio.gather(
+        client.post(ВЫГРУЗКА % 1), client.post(ВЫГРУЗКА % 1), return_exceptions=True
+    )
+    assert одинэс.дошли == 2, (
+        "гонка не создана: до чтения справочников дошёл %d запрос из 2" % одинэс.дошли
+    )
+    коды = sorted(str(getattr(о, "status_code", type(о).__name__)) for о in ответы)
+    assert коды == ["200", "409"], "ответы на двойное нажатие: %s" % коды
+    отказ = next(о for о in ответы if о.status_code == 409)
+    assert "уже отправляется" in отказ.json()["detail"]
+    assert _документов(одинэс) == 1, (
+        "в подделке 1С создано документов: %d" % _документов(одинэс)
+    )
+    assert await _исходы(db) == [исход], "журнал после гонки: %s" % await _исходы(db)
+
+
+@pytest.mark.asyncio
+async def test_идущая_отправка_отбивается_текстом_до_1с_и_не_отменяется(
+    client, db, настроено, monkeypatch
+):
+    """Второе нажатие ПОСЛЕ первого, пока первое ещё едет. Отказ обязан
+    прийти от проверки журнала — ДО чтения справочников: от индекса пришёл
+    бы тоже 409, но уже после обращений к 1С и с другим текстом."""
+    await _отчёт(db, политика="never")
+    await _идущая(db, минут_назад=0)
+    одинэс = ПоддельнаяОдинЭс()
+    monkeypatch.setattr(odata_client, "запросить", одинэс)
+    ответ = await client.post(ВЫГРУЗКА % 1)
+    assert ответ.status_code == 409
+    assert "уже отправляется в 1С. Дождитесь" in ответ.json()["detail"]
+    assert одинэс.вызовы == [], "при идущей отправке ходили в подделку 1С"
+    отмена = await client.post(ОТМЕНА % 1)
+    assert отмена.status_code == 409 and "идёт прямо сейчас" in отмена.json()["detail"]
+    assert await _исходы(db) == ["running"], "идущую отправку всё-таки тронули"
+
+
+@pytest.mark.asyncio
+async def test_прерванная_отправка_не_снимается_сама_но_отменяется_человеком(
+    client, db, настроено, monkeypatch
+):
+    """`running` старше десяти минут — процесс умер посреди отправки. Создан
+    ли документ в 1С, неизвестно: сама запись не снимается (иначе второй
+    документ), отмена её снимает, после отмены отправка проходит."""
+    await _отчёт(db, политика="never")
+    await _идущая(db, минут_назад=11)
+    одинэс = ПоддельнаяОдинЭс()
+    monkeypatch.setattr(odata_client, "запросить", одинэс)
+    ответ = await client.post(ВЫГРУЗКА % 1)
+    assert ответ.status_code == 409 and "прервалась" in ответ.json()["detail"]
+    assert одинэс.вызовы == []
+    assert await _исходы(db) == ["running"], "прерванная снялась без человека"
+    assert (await client.post(ОТМЕНА % 1)).status_code == 200
+    assert (await client.post(ВЫГРУЗКА % 1)).status_code == 200
+    assert await _исходы(db) == ["cancelled", "unposted"]
+
+
+@pytest.mark.asyncio
+async def test_сбой_на_нашей_стороне_при_отправке_не_оставляет_running(
+    client, db, настроено, monkeypatch
+):
+    """Исключение вместо ответа 1С: запись закрывается `error`, отчёт не
+    заперт — следующая отправка проходит."""
+    await _отчёт(db, политика="never")
+    monkeypatch.setattr(odata_client, "запросить", ПадающаяОдинЭс("создание"))
+    try:
+        ответ = await client.post(ВЫГРУЗКА % 1)
+    except RuntimeError:
+        ответ = None
+    assert ответ is None or ответ.status_code == 500
+    записано = await db.pool.fetchrow("SELECT outcome, error_note FROM odata_exports")
+    assert записано["outcome"] == "error", "после сбоя запись осталась %s" % dict(
+        записано
+    )
+    assert "RuntimeError" in записано["error_note"]
+    monkeypatch.setattr(odata_client, "запросить", ПоддельнаяОдинЭс())
+    assert (await client.post(ВЫГРУЗКА % 1)).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_сбой_на_проведении_оставляет_ссылку_на_созданный_документ(
+    client, db, настроено, monkeypatch
+):
+    """Документ в 1С уже лежит — исключение на проведении обязано дать
+    `partial` со ссылкой, а не `running` без неё."""
+    await _отчёт(db, политика="when_mapped")
+    monkeypatch.setattr(odata_client, "запросить", ПадающаяОдинЭс("проведение"))
+    ответ = await client.post(ВЫГРУЗКА % 1)
+    assert ответ.status_code == 200 and ответ.json()["проведён"] is False
+    записано = await db.pool.fetchrow("SELECT outcome, doc_ref FROM odata_exports")
+    assert записано["outcome"] == "partial" and записано["doc_ref"] == "doc-guid"
+
+
+@pytest.mark.asyncio
+async def test_боевая_политика_повтор_отбит_отмена_выпускает(
+    client, db, настроено, monkeypatch
+):
+    """1C-29 В5: фикстура по умолчанию `when_mapped`, а на проде `never` —
+    полный круг проверяется и на боевой. Умолчание фикстуры не меняется."""
+    await _отчёт(db, политика="never")
+    monkeypatch.setattr(odata_client, "запросить", ПоддельнаяОдинЭс())
+    assert (await client.post(ВЫГРУЗКА % 1)).status_code == 200
+    второй = ПоддельнаяОдинЭс()
+    monkeypatch.setattr(odata_client, "запросить", второй)
+    повтор = await client.post(ВЫГРУЗКА % 1)
+    assert повтор.status_code == 409 and "не проведён" in повтор.json()["detail"]
+    assert второй.вызовы == []
+    assert (await client.post(ОТМЕНА % 1)).status_code == 200
+    assert (await client.post(ВЫГРУЗКА % 1)).status_code == 200
+    assert await _исходы(db) == ["cancelled", "unposted"]
+
+
+@pytest.mark.asyncio
+async def test_чужая_организация_не_видит_и_не_трогает_выгрузку(
+    client, as_role, db, настроено, monkeypatch
+):
+    """1C-29 В5: у всех трёх ручек — отказ И нетронутое состояние, рядом
+    положительная половина: своя организация видит ту же запись."""
+    await _отчёт(db)
+    monkeypatch.setattr(odata_client, "запросить", ПоддельнаяОдинЭс())
+    assert (await client.post(ВЫГРУЗКА % 1)).status_code == 200
+    await db.добавить_организацию(id=2, name="Чужая")
+    чужая = ПоддельнаяОдинЭс()
+    monkeypatch.setattr(odata_client, "запросить", чужая)
+    as_role("admin", user_id=5, org_id=2)
+    assert (await client.post(ВЫГРУЗКА % 1)).status_code == 404
+    состояние = await client.get(СОСТОЯНИЕ % 1)
+    assert состояние.status_code == 404 and "живая" not in состояние.json()
+    assert (await client.post(ОТМЕНА % 1)).status_code == 409
+    assert чужая.вызовы == [], "по чужому отчёту ходили в подделку 1С"
+    assert await _исходы(db) == ["ok"], "чужая организация тронула запись"
+    as_role("admin", user_id=1, org_id=1)
+    assert (await client.get(СОСТОЯНИЕ % 1)).json()["живая"]["исход"] == "ok"
+
+
+# ── 1C-29: РУЧКА СОСТОЯНИЯ ────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_состояние_до_отправки(client, db, настроено):
+    await _отчёт(db, политика="never")
+    ответ = await client.get(СОСТОЯНИЕ % 1)
+    assert ответ.status_code == 200
+    assert ответ.json() == {
+        "отчёт": 1,
+        "статус_отчёта": "Одобрен",
+        "живая": None,
+        "последняя_неудача": None,
+        "можно_отправить": True,
+        "можно_отменить": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_состояние_после_отправки_по_боевой_политике(
+    client, db, настроено, monkeypatch
+):
+    await _отчёт(db, политика="never")
+    monkeypatch.setattr(odata_client, "запросить", ПоддельнаяОдинЭс())
+    assert (await client.post(ВЫГРУЗКА % 1)).status_code == 200
+    т = (await client.get(СОСТОЯНИЕ % 1)).json()
+    ж = т["живая"]
+    assert ж["исход"] == "unposted" and ж["проведён"] is False
+    assert ж["документ"] == "0000-000010" and ж["прервана"] is False
+    assert ж["начата"] and ж["закончена"], "время отправки не отдано"
+    assert "никогда" in ж["заметка"] or "never" in ж["заметка"]
+    assert ж["категории_по_умолчанию"] == []
+    assert т["последняя_неудача"] is None
+    assert т["можно_отправить"] is False and т["можно_отменить"] is True
+
+
+@pytest.mark.asyncio
+async def test_состояние_неудача_видна_пока_нет_живой(
+    client, db, настроено, monkeypatch
+):
+    """Неудача рядом с живой выгрузкой — история: строка «последняя попытка
+    не удалась» под отправленным документом соврала бы человеку."""
+    await _отчёт(db, политика="never")
+    monkeypatch.setattr(odata_client, "запросить", ПоддельнаяОдинЭс(запись_код=500))
+    assert (await client.post(ВЫГРУЗКА % 1)).status_code == 502
+    т = (await client.get(СОСТОЯНИЕ % 1)).json()
+    assert т["живая"] is None and т["можно_отправить"] is True
+    assert т["последняя_неудача"]["исход"] == "error"
+    monkeypatch.setattr(odata_client, "запросить", ПоддельнаяОдинЭс())
+    assert (await client.post(ВЫГРУЗКА % 1)).status_code == 200
+    т = (await client.get(СОСТОЯНИЕ % 1)).json()
+    assert т["живая"]["исход"] == "unposted"
+    assert т["последняя_неудача"] is None, "старая неудача показана под живой"
+
+
+@pytest.mark.asyncio
+async def test_состояние_неодобренного_отправить_нельзя(client, db, настроено):
+    await _отчёт(db, статус="На проверке", политика="never")
+    т = (await client.get(СОСТОЯНИЕ % 1)).json()
+    assert т["статус_отчёта"] == "На проверке" and т["можно_отправить"] is False
+
+
+@pytest.mark.asyncio
+async def test_состояние_идущей_и_прерванной_и_ручка_ничего_не_пишет(
+    client, db, настроено
+):
+    await _отчёт(db, политика="never")
+    await _идущая(db, минут_назад=0)
+    т = (await client.get(СОСТОЯНИЕ % 1)).json()
+    assert т["живая"]["исход"] == "running" and т["живая"]["прервана"] is False
+    assert т["можно_отправить"] is False and т["можно_отменить"] is False
+    await db.pool.execute(
+        "UPDATE odata_exports SET started_at = NOW() - make_interval(mins => 11)"
+    )
+    т = (await client.get(СОСТОЯНИЕ % 1)).json()
+    assert т["живая"]["прервана"] is True and т["можно_отменить"] is True
+    assert await _исходы(db) == ["running"], "ручка чтения закрыла прерванную сама"
+
+
+@pytest.mark.asyncio
+async def test_состояние_только_бухгалтеру_и_администратору(
+    client, as_role, db, настроено
+):
+    """Обе половины: у сотрудника в ответе нет журнала, у бухгалтера он есть."""
+    await _отчёт(db, политика="never")
+    as_role("employee", user_id=1)
+    ответ = await client.get(СОСТОЯНИЕ % 1)
+    assert ответ.status_code == 403 and "живая" not in ответ.json()
+    as_role("accountant", user_id=1)
+    ответ = await client.get(СОСТОЯНИЕ % 1)
+    assert ответ.status_code == 200 and "живая" in ответ.json()

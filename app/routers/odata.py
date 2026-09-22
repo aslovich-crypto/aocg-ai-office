@@ -18,8 +18,10 @@
 интеграции, а не бухгалтерский документ. Гейты соседних ручек не тронуты.
 """
 
+import logging
 import os
 
+import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 
 from app import category_confirm, odata_body, odata_client, reports_data
@@ -27,6 +29,7 @@ from app.auth import can_see_all, get_current_user
 from app.database import get_pool
 
 router = APIRouter(prefix="/api/odata", tags=["odata"])
+logger = logging.getLogger(__name__)
 
 
 def _только_администратор(user: dict) -> None:
@@ -227,12 +230,33 @@ def _сопоставить(индекс: dict, значения: set) -> dict:
     return найдено
 
 
+# ⚠️ «ЖИВАЯ» ВЫГРУЗКА — ИДУЩАЯ ИЛИ ЗАКОНЧЕННАЯ С ДОКУМЕНТОМ. Тот же набор
+# стоит в условии индекса `odata_exports_one_live` (app/database.py), и
+# расходиться им нельзя: код и база обязаны считать живым одно и то же.
+ЖИВЫЕ = ("running", "ok", "partial", "unposted")
+НЕУДАЧИ = ("error", "unavailable")
+
+# ⚠️ ЧЕРЕЗ СКОЛЬКО МИНУТ `running` СЧИТАЕТСЯ ПРЕРВАННОЙ (1C-29). Довод
+# числом: между записью `running` и итогом стоят ровно два обращения к 1С —
+# создание и проведение, по 20 с таймаута и без повторов, то есть меньше
+# минуты даже в худшем случае. Десять минут `running` значат одно: процесс
+# умер посреди отправки (перезапуск контейнера при деплое). Создан ли
+# документ в 1С — неизвестно, поэтому прерванная НЕ снимается сама:
+# её снимает человек отменой, посмотрев в 1С.
+ПРЕРВАНА_ЧЕРЕЗ_МИНУТ = 10
+
+
 async def _прошлые_выгрузки(p, report_id: int, org_id: int):
     return await p.fetch(
-        "SELECT id, outcome, doc_ref, doc_number, started_at FROM odata_exports"
-        " WHERE report_id=$1 AND org_id=$2 ORDER BY started_at DESC",
+        "SELECT id, outcome, doc_ref, doc_number, started_at, finished_at,"
+        " error_note, defaulted_categories,"
+        " (outcome = 'running' AND started_at < NOW() - make_interval(mins => $3))"
+        " AS прервана"
+        " FROM odata_exports WHERE report_id=$1 AND org_id=$2"
+        " ORDER BY started_at DESC, id DESC",
         report_id,
         org_id,
+        ПРЕРВАНА_ЧЕРЕЗ_МИНУТ,
     )
 
 
@@ -271,6 +295,22 @@ async def выгрузить_отчёт(id: int, user: dict = Depends(get_curren
     # запретит вторую успешную запись сама (частичный уникальный индекс),
     # но человек получил бы ошибку БАЗЫ вместо объяснения.
     for прошлая in await _прошлые_выгрузки(p, id, user["org_id"]):
+        # ⚠️ ИДУЩАЯ ОТПРАВКА — ОТКАЗ ТЕКСТОМ (1C-29). Это вежливая половина
+        # защиты от двойного нажатия: второй ПОСЛЕДОВАТЕЛЬНЫЙ запрос узнаёт
+        # правду словами. ОДНОВРЕМЕННЫЙ сюда не попадёт — оба читают журнал
+        # до записи и оба видят его пустым; его держит индекс, см. INSERT.
+        if прошлая["outcome"] == "running":
+            if прошлая["прервана"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Прошлая отправка этого отчёта в 1С прервалась, не "
+                    "закончившись: создан ли документ, неизвестно. Проверьте в 1С "
+                    "и отмените отправку — после этого отчёт можно отправить снова.",
+                )
+            raise HTTPException(
+                status_code=409,
+                detail="Этот отчёт уже отправляется в 1С. Дождитесь результата.",
+            )
         # ⚠️ Р6 (CAT-FOOD ②): документ, который уже лежит в 1С, мог
         # разойтись с чеками. Сказать об этом обязаны там же, где отказываем
         # в повторной выгрузке, — это единственное место, где человек сегодня
@@ -285,7 +325,7 @@ async def выгрузить_отчёт(id: int, user: dict = Depends(get_curren
             raise HTTPException(
                 status_code=409,
                 detail="Отчёт уже выгружен в 1С, документ %s. Если его удалили "
-                "в 1С, отмените выгрузку и повторите."
+                "в 1С, отмените отправку в 1С и повторите."
                 % (прошлая["doc_number"] or прошлая["doc_ref"])
                 + устарел,
             )
@@ -300,7 +340,7 @@ async def выгрузить_отчёт(id: int, user: dict = Depends(get_curren
             raise HTTPException(
                 status_code=409,
                 detail="По отчёту уже создан документ %s, но он не проведён. "
-                "Проведите его в 1С или отмените выгрузку."
+                "Проведите его в 1С или отмените отправку в 1С."
                 % (прошлая["doc_number"] or прошлая["doc_ref"])
                 + устарел,
             )
@@ -410,20 +450,47 @@ async def выгрузить_отчёт(id: int, user: dict = Depends(get_curren
             % ", ".join(собранное_тело["нет_счёта"]),
         )
 
-    запись = await p.fetchval(
-        "INSERT INTO odata_exports (org_id, report_id, user_id, outcome,"
-        " defaulted_categories) VALUES ($1,$2,$3,'running',$4::text[]) RETURNING id",
-        user["org_id"],
-        id,
-        user["id"],
-        собранное_тело["без_соответствия"],
-    )
+    # ⚠️⚠️ ЗАПИСЬ `running` — ЗАМОК ОТ ДВОЙНОГО НАЖАТИЯ (1C-29, часть 1C-23).
+    # Индекс `odata_exports_one_live` пускает у отчёта одну живую запись,
+    # и второй одновременный запрос спотыкается ЗДЕСЬ — до единого обращения
+    # к 1С. Замер 22.09.2026 до этой правки: два одновременных нажатия давали
+    # ДВА документа в подделке 1С, а при политике «проводить, когда всё
+    # сопоставлено» — ещё и 500 с записью `running`, зависшей навсегда.
+    try:
+        запись = await p.fetchval(
+            "INSERT INTO odata_exports (org_id, report_id, user_id, outcome,"
+            " defaulted_categories) VALUES ($1,$2,$3,'running',$4::text[])"
+            " RETURNING id",
+            user["org_id"],
+            id,
+            user["id"],
+            собранное_тело["без_соответствия"],
+        )
+    except asyncpg.exceptions.UniqueViolationError:
+        raise HTTPException(
+            status_code=409,
+            detail="Этот отчёт уже отправляется в 1С или уже отправлен. "
+            "Обновите карточку отчёта.",
+        )
 
-    код, ответ = await odata_client.запросить(
-        "Document_АвансовыйОтчет",
-        метод="POST",
-        тело=собранное_тело["тело"],
-    )
+    # ⚠️ СБОЙ НА НАШЕЙ СТОРОНЕ НЕ ОСТАВЛЯЕТ `running` (1C-29). Транспортные
+    # ошибки клиент превращает в код ответа сам; исключение отсюда — наша
+    # поломка до или вместо отправки. Без этой ветки запись осталась бы
+    # `running` и заперла отчёт на десять минут, а потом до отмены руками.
+    try:
+        код, ответ = await odata_client.запросить(
+            "Document_АвансовыйОтчет",
+            метод="POST",
+            тело=собранное_тело["тело"],
+        )
+    except Exception as сбой:
+        await p.execute(
+            "UPDATE odata_exports SET outcome='error', finished_at=NOW(),"
+            " error_note=$2 WHERE id=$1",
+            запись,
+            "сбой на нашей стороне при отправке (%s)" % type(сбой).__name__,
+        )
+        raise
     if код != 200:
         await p.execute(
             "UPDATE odata_exports SET outcome=$2, finished_at=NOW(), error_note=$3"
@@ -468,11 +535,20 @@ async def выгрузить_отчёт(id: int, user: dict = Depends(get_curren
         # ⚠️ ПРОВЕДЕНИЕ — ОТДЕЛЬНЫЙ ВЫЗОВ, И ОН МОЖЕТ УПАСТЬ ПОСЛЕ УСПЕШНОЙ
         # ЗАПИСИ. Замер 1C-20: `Post` возвращает 200 с ПУСТЫМ телом, результат
         # читается полем `Posted`.
-        код_п, _ответ_п = await odata_client.запросить(
-            "Document_АвансовыйОтчет(guid'%s')/Post" % ссылка,
-            метод="POST",
-            параметры={"PostingModeOperational": "false"},
-        )
+        # ⚠️ ДОКУМЕНТ УЖЕ СОЗДАН — ИСКЛЮЧЕНИЕ ЗДЕСЬ ЗНАЧИТ «НЕ ПРОВЕДЁН»,
+        # А НЕ ПАДЕНИЕ РУЧКИ (1C-29). Иначе журнал остался бы `running` без
+        # ссылки на документ, который в 1С уже лежит, — ровно тот случай,
+        # когда второй документ появляется после «отмены и повтора».
+        try:
+            код_п, _ответ_п = await odata_client.запросить(
+                "Document_АвансовыйОтчет(guid'%s')/Post" % ссылка,
+                метод="POST",
+                параметры={"PostingModeOperational": "false"},
+            )
+        except Exception as сбой:
+            # В журнал — тип, а не текст: текст может нести адрес чужой базы.
+            logger.warning("OData: проведение упало (%s)", type(сбой).__name__)
+            код_п = None
         проведён = код_п == 200
 
     # ⚠️⚠️ РЕШЕНИЕ ПО ЧАСТИЧНОМУ УСПЕХУ, НАЗВАНО ЯВНО: ДОКУМЕНТ НЕ УДАЛЯЕМ.
@@ -557,13 +633,21 @@ async def отменить_выгрузку(id: int, user: dict = Depends(get_cu
     _бухгалтер_или_администратор(user)
     p = await get_pool()
     строки = await _прошлые_выгрузки(p, id, user["org_id"])
-    живая = next(
-        (с for с in строки if с["outcome"] in ("ok", "partial", "unposted")), None
-    )
+    живая = next((с for с in строки if с["outcome"] in ЖИВЫЕ), None)
     if живая is None:
         raise HTTPException(
             status_code=409,
             detail="По этому отчёту нет выгрузки, которую можно отменить",
+        )
+    # ⚠️ ИДУЩУЮ ОТПРАВКУ НЕ ОТМЕНЯЕМ, ПРЕРВАННУЮ — ОТМЕНЯЕМ (1C-29). Отмена
+    # идущей освободила бы замок, пока документ ещё едет в 1С, и следом
+    # за ней прошла бы вторая отправка. Прерванная — единственный выход
+    # из неё, и по той же причине, что у удалённого в 1С документа.
+    if живая["outcome"] == "running" and not живая["прервана"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Отправка в 1С идёт прямо сейчас — отменять пока нечего. "
+            "Дождитесь результата.",
         )
     await p.execute(
         "UPDATE odata_exports SET outcome='cancelled', finished_at=NOW(),"
@@ -577,4 +661,64 @@ async def отменить_выгрузку(id: int, user: dict = Depends(get_cu
         "заметка": "Запись о выгрузке отменена. Документ в 1С, если он там есть, "
         "остался — удалите его в 1С сами, иначе после повторной выгрузки "
         "их станет два.",
+    }
+
+
+@router.get("/reports/{id}/export-state")
+async def состояние_выгрузки(id: int, user: dict = Depends(get_current_user)):
+    """Что с отправкой отчёта в 1С — для строки состояния в карточке (1C-29).
+
+    ⚠️ ДВЕ ЗАПИСИ, А НЕ ИСТОРИЯ (решение владельца 22.09.2026, В7): живая
+    выгрузка и последняя неудачная попытка. Журнал целиком — не сейчас.
+
+    ⚠️ НЕУДАЧА ПОКАЗЫВАЕТСЯ, ТОЛЬКО ЕСЛИ ЖИВОЙ НЕТ. Пока живая есть, новая
+    попытка до журнала не доходит (отказ 409 до записи), значит любая
+    неудача рядом с живой — СТАРШЕ её: это история, а не состояние, и
+    строка «последняя попытка не удалась» под отправленным документом
+    соврала бы человеку.
+
+    ⚠️ ТОЛЬКО ЧТЕНИЕ. Прерванную отправку ручка называет прерванной, но
+    не закрывает: закрывает её человек отменой, посмотрев в 1С.
+    """
+    _бухгалтер_или_администратор(user)
+    p = await get_pool()
+    отчёт = await p.fetchrow(
+        "SELECT status FROM reports WHERE id=$1 AND org_id=$2", id, user["org_id"]
+    )
+    if отчёт is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    строки = await _прошлые_выгрузки(p, id, user["org_id"])
+    живая = next((с for с in строки if с["outcome"] in ЖИВЫЕ), None)
+    неудача = (
+        None if живая else next((с for с in строки if с["outcome"] in НЕУДАЧИ), None)
+    )
+    return {
+        "отчёт": id,
+        "статус_отчёта": отчёт["status"],
+        "живая": None
+        if живая is None
+        else {
+            "исход": живая["outcome"],
+            "прервана": bool(живая["прервана"]),
+            "проведён": живая["outcome"] == "ok",
+            "документ": живая["doc_number"] or живая["doc_ref"],
+            "начата": живая["started_at"],
+            "закончена": живая["finished_at"],
+            "категории_по_умолчанию": list(живая["defaulted_categories"] or []),
+            "заметка": живая["error_note"],
+        },
+        "последняя_неудача": None
+        if неудача is None
+        else {
+            "исход": неудача["outcome"],
+            "начата": неудача["started_at"],
+            "заметка": неудача["error_note"],
+        },
+        # ⚠️ «МОЖНО» ЗДЕСЬ — ПРО ЖУРНАЛ И СТАТУС, А НЕ ПРО НАСТРОЙКИ ОБМЕНА.
+        # Не настроен человек или профиль — это скажет сама отправка, своим
+        # 409 с текстом; повторять её проверки здесь значило бы завести
+        # вторую копию правил, которая разойдётся с первой.
+        "можно_отправить": отчёт["status"] == "Одобрен" and живая is None,
+        "можно_отменить": живая is not None
+        and (живая["outcome"] != "running" or bool(живая["прервана"])),
     }

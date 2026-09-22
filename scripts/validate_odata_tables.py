@@ -146,6 +146,9 @@ import sys
     ON odata_exports(report_id) WHERE outcome = 'ok'""",
     """CREATE INDEX IF NOT EXISTS idx_odata_exports_org
     ON odata_exports(org_id, started_at DESC)""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS odata_exports_one_live
+    ON odata_exports(report_id)
+    WHERE outcome IN ('running', 'ok', 'partial', 'unposted')""",
     """CREATE TABLE IF NOT EXISTS odata_user_map (
     id          SERIAL PRIMARY KEY,
     org_id      INTEGER NOT NULL REFERENCES organizations(id),
@@ -169,6 +172,7 @@ import sys
     "DROP TABLE IF EXISTS org_expense_kind_map",
     "DROP INDEX IF EXISTS odata_user_map_unique",
     "DROP TABLE IF EXISTS odata_user_map",
+    "DROP INDEX IF EXISTS odata_exports_one_live",
     "DROP INDEX IF EXISTS idx_odata_exports_org",
     "DROP INDEX IF EXISTS odata_exports_one_success",
     "DROP TABLE IF EXISTS odata_exports",
@@ -244,16 +248,36 @@ import sys
     "org_accounting_profile_unique",
     "odata_exports_one_success",
     "idx_odata_exports_org",
+    "odata_exports_one_live",
+)
+
+# ⚠️ ИСХОДЫ «ЖИВОЙ» ВЫГРУЗКИ — ТЕ ЖЕ, ЧТО В УСЛОВИИ ИНДЕКСА ВЫШЕ (1C-29).
+# Уникальный индекс на проде НЕ СОЗДАСТСЯ, если у какого-то отчёта таких
+# записей уже две, и `init_db` упадёт на старте — вместе с Примой. Поэтому
+# валидация сперва ПЕРЕЧИСЛЯЕТ такие отчёты: пустой ответ — индекс ляжет,
+# непустой — стоп, разбирать записи до выката.
+ЖИВЫЕ_ИСХОДЫ = ("running", "ok", "partial", "unposted")
+ЗАПРОС_ДВОЙНЫХ = (
+    "SELECT report_id, count(*) AS живых FROM odata_exports\n"
+    " WHERE outcome IN (%s)\n"
+    " GROUP BY report_id HAVING count(*) > 1 ORDER BY report_id"
+    % ", ".join("'%s'" % и for и in ЖИВЫЕ_ИСХОДЫ)
 )
 
 
 def напечатать_sql() -> None:
     """SQL для бастиона: BEGIN, миграция, замер, ROLLBACK. Ни одного COMMIT."""
     print(
-        "-- ВАЛИДАЦИЯ МИГРАЦИИ «таблицы обмена с 1С» (1C-21 ②③ · 1C-22 (AOCG-1C-001 v0.1))"
+        "-- ВАЛИДАЦИЯ МИГРАЦИИ «таблицы обмена с 1С»"
+        " (1C-21 ②③ · 1C-22 (AOCG-1C-001 v0.1) · 1C-29 ①)"
     )
     print("-- ⚠️ ЗАКРЕПЛЕНИЯ НЕТ: в конце ROLLBACK, база останется как была.")
     print("BEGIN;")
+    # ⚠️ ДО МИГРАЦИИ: ОТЧЁТЫ С ДВУМЯ ЖИВЫМИ ВЫГРУЗКАМИ. Ожидается ноль строк.
+    # Найдётся хоть одна — CREATE UNIQUE INDEX ниже упадёт, и так же упадёт
+    # `init_db` на старте прода (1C-29).
+    print("-- ожидается 0 строк; иначе индекс odata_exports_one_live не ляжет")
+    print(ЗАПРОС_ДВОЙНЫХ + ";")
     for команда in МИГРАЦИЯ:
         print(команда.strip() + ";")
     print("-- повтор целиком: init_db выполняется на КАЖДОМ старте контейнера")
@@ -318,6 +342,19 @@ async def прогнать(адрес: str) -> int:
         }
         if было:
             print("  (таблицы уже есть в базе: %s)" % ", ".join(sorted(было)))
+        # ⚠️ ДВОЙНЫЕ ЖИВЫЕ ВЫГРУЗКИ — ДО DDL, см. `ЗАПРОС_ДВОЙНЫХ` (1C-29).
+        # Таблицы может ещё не быть (чистая база) — тогда и двойных нет.
+        if "odata_exports" in было:
+            двойные = await соединение.fetch(ЗАПРОС_ДВОЙНЫХ)
+            if двойные:
+                print(
+                    "  ✗ у отчётов по две живые выгрузки, индекс не ляжет: %s"
+                    % ", ".join(
+                        "%s (%s)" % (з["report_id"], з["живых"]) for з in двойные
+                    )
+                )
+                return 1
+            print("  ✓ отчётов с двумя живыми выгрузками нет")
         сделка = соединение.transaction()
         await сделка.start()
         try:

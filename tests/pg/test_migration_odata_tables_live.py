@@ -34,6 +34,7 @@ import pytest
     "DROP TABLE IF EXISTS org_category_map",
     "DROP INDEX IF EXISTS odata_user_map_unique",
     "DROP TABLE IF EXISTS odata_user_map",
+    "DROP INDEX IF EXISTS odata_exports_one_live",
     "DROP INDEX IF EXISTS idx_odata_exports_org",
     "DROP INDEX IF EXISTS odata_exports_one_success",
     "DROP TABLE IF EXISTS odata_exports",
@@ -163,7 +164,12 @@ async def test_init_db_поднимает_все_таблицы_обмена(db)
 async def test_успешная_выгрузка_у_отчёта_ровно_одна(db):
     """⚠️ ИДЕМПОТЕНТНОСТЬ ДЕРЖИТ БАЗА, А НЕ ТОЛЬКО КОД (строка 1C-23).
     Вторая успешная запись по тому же отчёту обязана упасть на индексе —
-    даже если код о ней не знает, например при гонке двух выгрузок."""
+    даже если код о ней не знает.
+
+    ⚠️ ГОНКУ ДВУХ ВЫГРУЗОК ЭТОТ ИНДЕКС НЕ ДЕРЖИТ, хотя прежняя редакция
+    докстроки обещала обратное (замер аудита 1C-29, 22.09.2026): он видит
+    только `ok`, а при боевой политике «никогда» исход `unposted`. Гонку
+    держит `odata_exports_one_live` — тест ниже."""
     import asyncpg
 
     await db.добавить_организацию(id=1)
@@ -189,6 +195,81 @@ async def test_успешная_выгрузка_у_отчёта_ровно_од
         "SELECT count(*) FROM odata_exports WHERE report_id=$1", ид
     )
     assert всего == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("первая", ["running", "ok", "partial", "unposted"])
+@pytest.mark.parametrize("вторая", ["running", "unposted"])
+async def test_живая_выгрузка_у_отчёта_одна(db, первая, вторая):
+    """⚠️ ДВОЙНОЕ НАЖАТИЕ ДЕРЖИТ БАЗА (1C-29, часть 1C-23). Любая живая
+    запись — идущая или с документом — запрещает вторую идущую и вторую
+    непроведённую. Индекс успехов выше этого не умел: при боевой политике
+    «никогда» обе записи были бы `unposted`, и он их пропускал."""
+    import asyncpg
+
+    await db.добавить_организацию(id=1)
+    await db.обеспечить_пользователя(id=1, first_name="А", role="admin")
+    await db.добавить_отчёт(id=1, title="Июль", user_id=1, org_id=1)
+
+    async def записать(исход):
+        return await db.pool.fetchval(
+            "INSERT INTO odata_exports (org_id, report_id, user_id, outcome)"
+            " VALUES (1, 1, 1, $1) RETURNING id",
+            исход,
+        )
+
+    живая = await записать(первая)
+    with pytest.raises(asyncpg.UniqueViolationError):
+        await записать(вторая)
+    # История не держит замок: неудачи и отмены — сколько угодно.
+    for исход in ("error", "unavailable", "cancelled", "cancelled"):
+        await записать(исход)
+    # ⚠️ ОТМЕНА ВЫПУСКАЕТ (путь из тупика 1C-23): после неё живая снова одна.
+    await db.pool.execute(
+        "UPDATE odata_exports SET outcome='cancelled' WHERE id=$1", живая
+    )
+    await записать(вторая)
+
+
+@pytest.mark.asyncio
+async def test_валидация_называет_отчёты_с_двумя_живыми_выгрузками(
+    db, адрес_живой_базы
+):
+    """⚠️ ПРИБОР С ИЗВЕСТНЫМ ОТВЕТОМ, ОБЕ ПОЛОВИНЫ (CLAUDE.md). На проде
+    уникальный индекс НЕ ЛЯЖЕТ, если у отчёта уже две живые записи, и
+    `init_db` упадёт на старте вместе с Примой. Валидация обязана назвать
+    такой отчёт — и НЕ поднимать тревогу, когда живая одна, а рядом история.
+
+    Двойные записи можно завести только без индекса, поэтому он снимается
+    на время теста и возвращается в `finally`."""
+    await db.добавить_организацию(id=1)
+    await db.обеспечить_пользователя(id=1, first_name="А", role="admin")
+    await db.добавить_отчёт(id=1, title="Июль", user_id=1, org_id=1)
+
+    async def записать(исход):
+        await db.pool.execute(
+            "INSERT INTO odata_exports (org_id, report_id, user_id, outcome)"
+            " VALUES (1, 1, 1, $1)",
+            исход,
+        )
+
+    await записать("unposted")
+    await записать("error")
+    await записать("cancelled")
+    здоровая = _прогнать(адрес_живой_базы)
+    assert здоровая.returncode == 0, здоровая.stdout + здоровая.stderr
+    assert "двумя живыми выгрузками нет" in здоровая.stdout, здоровая.stdout
+
+    await db.pool.execute("DROP INDEX IF EXISTS odata_exports_one_live")
+    try:
+        await записать("unposted")
+        больная = _прогнать(адрес_живой_базы)
+        assert больная.returncode == 1, больная.stdout + больная.stderr
+        assert "две живые выгрузки" in больная.stdout, больная.stdout
+        assert "1 (2)" in больная.stdout, "отчёт и число записей не названы"
+    finally:
+        await db.pool.execute("DELETE FROM odata_exports")
+        await _вернуть(db)
 
 
 @pytest.mark.asyncio
