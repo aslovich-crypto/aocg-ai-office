@@ -39,6 +39,9 @@ def test_очередь_в_трекере_без_нарушений():
     assert р.returncode == 0, р.stdout + р.stderr
     # Вторая половина: прибор ОТРАБОТАЛ — разобрал блок и назвал следующую.
     assert "следующая" in р.stdout and "пунктов в блоке" in р.stdout
+    # T200 ②: счётчик короткой дорожки напечатан — прибор прочёл метки, на которых
+    # стоит правило ⑬.
+    assert "короткая дорожка (🚀)" in р.stdout
 
 
 def test_хук_отдаёт_оба_канала_и_пишет_метку(tmp_path):
@@ -49,6 +52,10 @@ def test_хук_отдаёт_оба_канала_и_пишет_метку(tmp_pa
     assert данные["systemMessage"].startswith("▶ следующая:")
     assert данные["hookSpecificOutput"]["hookEventName"] == "SessionStart"
     assert "ПРАВИЛО ОЧЕРЕДИ" in данные["hookSpecificOutput"]["additionalContext"]
+    # T200 ⑤, В6: строка хука — ПЕРВОЙ строкой канала модели, слово в слово.
+    контекст = данные["hookSpecificOutput"]["additionalContext"]
+    assert контекст.split("\n")[0] == данные["systemMessage"]
+    assert "короткая: открыто" in данные["systemMessage"]
     # Метка ушла во временный файл, с источником — а не в настоящую метку.
     assert "· pytest ·" in метка.read_text(encoding="utf-8")
 
