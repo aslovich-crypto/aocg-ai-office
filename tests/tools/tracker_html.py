@@ -24,13 +24,17 @@
 import collections
 import html
 import importlib.util
+import os
 import pathlib
 import re
 import sys
 
 КОРЕНЬ = pathlib.Path(__file__).resolve().parents[2]
 ТРЕКЕР = КОРЕНЬ / "docs/TASKS.md"
-ВЫХОД = pathlib.Path("/tmp/aocg-tracker.html")
+# ⚠️ ПУТЬ ВИТРИНЫ ЗАДАЁТСЯ СНАРУЖИ (T200 ③), умолчание прежнее. Тест и прогон
+# мутантов пишут свою витрину во временный каталог: иначе в /tmp оставалась бы
+# страница последнего мутанта, и её открыли бы как настоящую.
+ВЫХОД = pathlib.Path(os.environ.get("AOCG_TRACKER_HTML") or "/tmp/aocg-tracker.html")
 
 
 def _модуль(имя):
@@ -209,7 +213,7 @@ def порядок_выполнения(текст):
     ]
 
 
-def блок_порядка(пункты):
+def блок_порядка(пункты, причины=()):
     """HTML-навигация порядка. Каждый [[ид]] — ссылка на карточку #ид.
 
     ⚠️ ЭТО НЕ КАРТОЧКИ И НЕ <article> — сторож НАЙДЕНО/НАПЕЧАТАНО их не
@@ -234,9 +238,22 @@ def блок_порядка(пункты):
     строки = []
     for номер, иды, текст in пункты:
         строки.append(f"<li>{ссылки_на_карточки(разметка_строки(текст))}</li>")
+    # ⚠️ СИГНАЛ — ТОТ ЖЕ, ЧТО В ХУКЕ (T200 ③): причины приходят из
+    # `tracker_queue.сигнал_разбора`, своей копии правила здесь нет.
+    причина = "; ".join(причины)
+    сигнал = (
+        f'<p class="signal" data-signal="{html.escape(причина, quote=True)}">'
+        f"⚠️ Пора разбирать черновики — {html.escape(причина)}</p>"
+        if причины
+        else ""
+    )
     return (
         '<nav class="order" aria-label="Порядок выполнения">'
-        "<h2>▶ Порядок выполнения</h2><ol>" + "".join(строки) + "</ol></nav>"
+        "<h2>▶ Порядок выполнения</h2><ol>"
+        + "".join(строки)
+        + "</ol>"
+        + сигнал
+        + "</nav>"
     )
 
 
@@ -367,6 +384,106 @@ def сводка(задачи):
         "</p></div>",
         пр,
     )
+
+
+ИМЕНА_ДОРОЖЕК = (("🚀", "короткая"), ("🛠", "средняя"), ("✨", "длинная"))
+
+
+def плитки_дорожек(счёт, до_дорожек):
+    """Третья группа сводки — дорожки, в форме строки хука (T200 ③, В1).
+
+    ⚠️ ЧИСЛА — ИЗ ТОЙ ЖЕ ФУНКЦИИ, ЧТО У ХУКА (`tracker_queue.счёт_дорожек`):
+    плитка и первая строка ответа агента не вправе разойтись. «Закрыто» — только
+    закрытое после введения дорожек; закрытые до них — серой строкой под плитками."""
+    плитки = []
+    for метка, имя in ИМЕНА_ДОРОЖЕК:
+        открыто, ждёт, закрыто = счёт[метка]
+        плитки.append(
+            f'<div class="stat track" data-track="{метка}" data-open="{открыто}" '
+            f'data-hold="{ждёт}" data-closed="{закрыто}"><span class="tline">'
+            f"{метка} {имя}: открыто {открыто} (⏸ {ждёт}) · закрыто {закрыто}"
+            "</span></div>"
+        )
+    return (
+        '<div class="statgroup"><h3>Дорожки · закрыто — после их введения</h3>'
+        f'<div class="stats">{"".join(плитки)}</div>'
+        f'<p class="statnote before" data-before="{до_дорожек}">'
+        f"до дорожек закрыто {до_дорожек}</p></div>"
+    )
+
+
+ДАТА_ЗАПИСИ = re.compile(r"^\*\*(\d{2})\.(\d{2})\.(\d{4})\*\* · ")
+# ⚠️ СВОЙ ТЕГ И СВОЙ КЛАСС РАЗДЕЛА, И ЭТО НЕ ВКУСОВЩИНА (T200 ③). Сторож считает
+# задачи по карточкам <article class="task">, а фильтр прячет каждый section.sec
+# без такой карточки. Запись журнала, нарисованная <article> или положенная
+# в section.sec, либо развела бы число задач, либо исчезла бы при загрузке.
+ТЕГ_ЗАПИСИ = "li"
+КЛАСС_РАЗДЕЛА = "log"
+
+
+def _раздел(ид, заголовок, пункты):
+    return (
+        f'<section class="{КЛАСС_РАЗДЕЛА}" id="{ид}">'
+        f'<h2 class="sec-h">{заголовок}</h2><ol class="entries">'
+        + "".join(пункты)
+        + "</ol></section>"
+    )
+
+
+def журналы(текст, вход):
+    """Три раздела внизу — журнал отступлений, черновики, улики (T200 ③).
+
+    Порядок разделов — как в файле. Записи читает `вход.записи_раздела`: одно
+    место на сторожа входа, витрину и её сторожа."""
+    отступления = вход.записи_раздела(текст, "## ↪ ЖУРНАЛ ОТСТУПЛЕНИЙ") or []
+    черновики = вход.записи_раздела(текст, вход.РАЗДЕЛ_ЧЕРНОВИКОВ) or []
+    улики = вход.записи_раздела(текст, "## 🔎 ЖУРНАЛ УЛИК") or []
+
+    # журнал отступлений — как в файле, без переворота (В5)
+    пункты = []
+    for запись in отступления:
+        пункты.append(
+            f'<{ТЕГ_ЗАПИСИ} class="dev">{разметка_строки(запись)}</{ТЕГ_ЗАПИСИ}>'
+        )
+    отступления_html = _раздел("deviations", "↪ Журнал отступлений", пункты)
+
+    # черновик — одна строка ~100 знаков и полный текст под «раскрыть» (В2);
+    # без номера, без статуса, без плитки
+    пункты = []
+    for запись in черновики:
+        с = запись.replace(вход.ВАРИАНТ, "")
+        м = вход.МЕТКА_У_ЧЕРНОВИКА.match(с)
+        дата = ДАТА_ЗАПИСИ.match(с)
+        метка = м.group(1) if м else "без метки"
+        хвост = с[м.end() :] if м else с[дата.end() :]
+        # ⚠️ КРАТКАЯ СТРОКА РЕЖЕТСЯ ПО ТЕКСТУ БЕЗ РАЗМЕТКИ: разрез посреди ** или
+        # [[…]] оставил бы на странице сырой знак.
+        кратко = без_разметки(хвост.split(" · опора:")[0])
+        if len(кратко) > 100:
+            кратко = кратко[:99].rstrip() + "…"
+        пункты.append(
+            f'<{ТЕГ_ЗАПИСИ} class="draft" data-track="{метка}"><details><summary>'
+            f'<span class="ldate">{дата.group(1)}.{дата.group(2)}.{дата.group(3)}</span>'
+            f" · {метка} · {html.escape(кратко)}</summary>"
+            f'<div class="note">{разметка_примечания(хвост)}</div></details></{ТЕГ_ЗАПИСИ}>'
+        )
+    черновики_html = _раздел("drafts", "✏️ Черновики", пункты)
+
+    # ⚠️ УЛИКИ — НОВЫЕ СВЕРХУ, И ТОЛЬКО ЗДЕСЬ (решение владельца 22.09.2026, В3):
+    # свежая читается первой перед аудитом, порядок в файле не трогается.
+    # Внутри одной даты — позже записанная выше.
+    улики = sorted(
+        reversed(улики), key=lambda з: ДАТА_ЗАПИСИ.match(з).groups()[::-1], reverse=True
+    )
+    пункты = []
+    for запись in улики:
+        д, м_, г = ДАТА_ЗАПИСИ.match(запись).groups()
+        пункты.append(
+            f'<{ТЕГ_ЗАПИСИ} class="ev" data-date="{г}-{м_}-{д}">'
+            f"{разметка_строки(запись)}</{ТЕГ_ЗАПИСИ}>"
+        )
+    улики_html = _раздел("evidence", "🔎 Журнал улик", пункты)
+    return отступления_html + черновики_html + улики_html
 
 
 def панель(разделы, пр, всего):
@@ -619,6 +736,21 @@ code{
   color:var(--cherry);
   border-bottom:1px dotted color-mix(in srgb,var(--cherry) 50%,transparent);
 }
+.stat.track{min-width:0}
+.track .tline{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-size:13px;
+  color:var(--ink); text-transform:none; letter-spacing:0; font-variant-numeric:tabular-nums}
+.statnote.before{color:var(--faint)}
+.order .signal{margin:10px 0 0; padding:8px 10px; border-left:2px solid var(--cherry);
+  background:var(--cherry-soft); color:var(--ink); font-size:13.5px}
+.log{margin:48px 0 0}
+.log h2{font:600 15px/1.3 "IBM Plex Sans","Helvetica Neue",Arial,sans-serif;
+  margin:0 0 12px; padding-bottom:7px; border-bottom:1px solid var(--line)}
+.log .entries{margin:0; padding-left:22px}
+.log .entries>li{margin:0 0 10px; max-width:88ch; overflow-wrap:anywhere}
+.log .entries>li.draft summary{cursor:pointer}
+.log .entries>li.draft .note{margin-top:8px}
+.log .ldate{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace; font-size:12.5px;
+  color:var(--muted)}
 @media (max-width:720px){
   .row{grid-template-columns:14px 1fr; gap:0 10px}
   .tid,.meta{grid-column:2}
@@ -690,6 +822,19 @@ def main():
         )
 
     блок_сводки, пр = сводка(задачи)
+    # ⚠️ ПРИБОР ОЧЕРЕДИ И СТОРОЖ ВХОДА — ВНУТРИ main, А НЕ В ШАПКЕ: оба сами
+    # импортируют эту витрину (разбор блока порядка живёт здесь), и импорт
+    # в шапке замкнул бы круг.
+    sys.path.insert(0, str(pathlib.Path(__file__).parent))
+    import tracker_entry_guard as вход  # noqa: E402
+    import tracker_queue as очередь  # noqa: E402
+
+    закрытые_до = вход.прочитать_список(вход.ФАЙЛЫ["закрытые"])
+    дорожки = вход.дорожки(текст)
+    счёт = очередь.счёт_дорожек(дорожки, закрытые_до)
+    до_дорожек = sum(
+        1 for ид, (_, ст) in дорожки.items() if ст == "✅" and ид in закрытые_до
+    )
     ВЫХОД.write_text(
         "<!doctype html><html lang=ru><head><meta charset=utf-8>"
         '<meta name=viewport content="width=device-width,initial-scale=1">'
@@ -703,10 +848,12 @@ def main():
         f"<span>задач {len(задачи)} · собрано командой make tracker</span>"
         "<span>представление, а не копия — в git не хранится</span></div>"
         + блок_сводки
+        + плитки_дорожек(счёт, до_дорожек)
         + "</header>"
-        + блок_порядка(порядок_выполнения(текст))
+        + блок_порядка(порядок_выполнения(текст), очередь.сигнал_разбора(текст))
         + панель(разделы, пр, len(задачи))
         + в_html(разделы)
+        + журналы(текст, вход)
         + f"<script>{СКРИПТ}</script></body></html>",
         encoding="utf-8",
     )
