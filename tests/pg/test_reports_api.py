@@ -1228,3 +1228,31 @@ async def test_create_report_nonexistent_receipt_403(client, db):
     assert resp.status_code == 403
     assert await db.отчёты() == []
     assert await db.связи_отчётов() == []
+
+
+# ─── REP-SWIPE1C: признак «уже в 1С» в ответах отчёта ──────────────────
+@pytest.mark.asyncio
+async def test_in_1c_flag_says_what_list_cannot_ask(client, db):
+    """Список обязан знать про 1С САМ (REP-SWIPE1C).
+
+    ⚠️ ЗАЧЕМ ПРИЗНАК ВООБЩЕ. Свайп «В 1С» показывается только там, где
+    отправка ещё возможна. Ручка состояния отвечает ПРО ОДИН отчёт, и
+    спрашивать её построчно значило бы слать столько запросов, сколько
+    строк на экране, — на главном экране и при общем пределе 60 в минуту.
+    """
+    await _report(db, 730, user_id=1, title="Уехал", status="Одобрен")
+    await _report(db, 731, user_id=1, title="Не уехал", status="Одобрен")
+    await _выгрузка(db, 730, "ok")
+    # Отменённая выгрузка живой не считается: отчёт снова можно отправить.
+    await _report(db, 732, user_id=1, title="Отменён", status="Одобрен")
+    await _выгрузка(db, 732, "cancelled")
+
+    список = {р["id"]: р for р in (await client.get("/api/reports/")).json()}
+    assert список[730]["in_1c"] is True
+    assert список[731]["in_1c"] is False
+    assert список[732]["in_1c"] is False
+
+    # Форма одна на все ответы: договор «POST == PATCH == элемент списка»
+    # стерегут соседние тесты, и признак обязан быть во всех.
+    один = await client.get("/api/reports/730")
+    assert один.json()["in_1c"] is True

@@ -247,6 +247,25 @@ async def _recalc_total(conn, report_id: int, org_id: int):
     )
 
 
+async def _в_1с(conn, org_id: int, report_id: int) -> bool:
+    """Есть ли у отчёта ЖИВАЯ выгрузка в 1С — признак `in_1c` в ответах.
+
+    ⚠️ ОДНО ИМЯ И ОДНО МЕСТО, ПОТОМУ ЧТО ФОРМ ОТВЕТА ПЯТЬ. Список, создание,
+    чтение одного, смена статуса и общий сборщик строят словарь каждый сам,
+    и признак, добавленный в одну форму, развалил бы договор «POST == PATCH ==
+    элемент списка» — его стерегут тесты формы.
+    """
+    return bool(
+        await conn.fetchval(
+            "SELECT 1 FROM odata_exports"
+            " WHERE org_id=$1 AND report_id=$2 AND outcome = ANY($3::text[]) LIMIT 1",
+            org_id,
+            report_id,
+            list(ЖИВЫЕ),
+        )
+    )
+
+
 async def _with_receipt_ids(conn, rep) -> dict:
     """Отчёт + receiptIds — форма элемента GET-списка (и ответа PATCH/POST)."""
     items = await conn.fetch(
@@ -255,6 +274,7 @@ async def _with_receipt_ids(conn, rep) -> dict:
     )
     d = dict(rep)
     d["receiptIds"] = [i["receipt_id"] for i in items]
+    d["in_1c"] = await _в_1с(conn, rep["org_id"], rep["id"])
     return d
 
 
@@ -318,12 +338,33 @@ async def get_reports(user: dict = Depends(get_current_user)):
             user["org_id"],
             user["id"],
         )
+    # ⚠️ ПРИЗНАК «УЖЕ В 1С» — ОДНИМ ЗАПРОСОМ НА ВЕСЬ СПИСОК (REP-SWIPE1C).
+    # Свайп «В 1С» показывается только там, где отправка ещё возможна, а знать
+    # это списку неоткуда: ручка состояния отвечает ПРО ОДИН отчёт, и спрашивать
+    # её построчно значило бы слать столько запросов, сколько строк на экране —
+    # на главном экране приложения и при общем пределе 60 запросов в минуту.
+    # Поэтому здесь один запрос по всем живым выгрузкам организации.
+    #
+    # ⚠️ ЭТО НЕ [[1C-03]] И ЕЁ НЕ ЗАКРЫВАЕТ: там нужны отметка и ДАТА выгрузки
+    # на самом отчёте для машинного опроса «только новые», здесь — булев признак
+    # для одной кнопки. Смежное, не то же самое.
+    живые = {
+        з["report_id"]
+        for з in await p.fetch(
+            "SELECT DISTINCT report_id FROM odata_exports"
+            " WHERE org_id=$1 AND outcome = ANY($2::text[])",
+            user["org_id"],
+            list(ЖИВЫЕ),
+        )
+    }
     result = []
     for rep in reports:
         d = dict(rep)
         d["receiptIds"] = [
             i["receipt_id"] for i in items if i["report_id"] == rep["id"]
         ]
+        # Имя как у чеков (`in_report`): признак принадлежности, тем же складом.
+        d["in_1c"] = rep["id"] in живые
         result.append(d)
     return result
 
@@ -373,6 +414,7 @@ async def create_report(r: ReportIn, user: dict = Depends(get_current_user)):
             rep = await _recalc_total(conn, rep["id"], user["org_id"])
     d = dict(rep)
     d["receiptIds"] = r.receiptIds
+    d["in_1c"] = False  # только что созданный отчёт в 1С не уезжал
     return d
 
 
@@ -433,6 +475,13 @@ async def get_report(id: int, user: dict = Depends(get_current_user)):
             )
     d = dict(row)
     d["receiptIds"] = ids
+    d["in_1c"] = await p.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM odata_exports WHERE org_id=$1"
+        " AND report_id=$2 AND outcome = ANY($3::text[]))",
+        user["org_id"],
+        id,
+        list(ЖИВЫЕ),
+    )
     # ⚠️ ТА ЖЕ ФОРМА, ЧТО У СПИСКА ЧЕКОВ (T132). Сторож
     # `test_get_report_detail_has_list_fields_plus_receipts` требует совпадения,
     # и он прав: чек внутри отчёта — тот же чек, и кнопка дозапроса на нём
@@ -649,6 +698,7 @@ async def update_status(
     )
     d = dict(row)
     d["receiptIds"] = [i["receipt_id"] for i in items]
+    d["in_1c"] = await _в_1с(p, user["org_id"], id)
     if not повтор:
         await _сказать_о_статусе(p, d, user, причина, background)
     return d
