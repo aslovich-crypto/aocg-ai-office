@@ -1343,3 +1343,24 @@ async def test_состояние_только_бухгалтеру_и_адми�
     as_role("accountant", user_id=1)
     ответ = await client.get(СОСТОЯНИЕ % 1)
     assert ответ.status_code == 200 and "живая" in ответ.json()
+
+
+@pytest.mark.asyncio
+async def test_снимки_отчёта_пишутся_в_журнал_при_отправке(
+    client, db, настроено, monkeypatch
+):
+    """REP-EXPDEL: номер и название отчёта ложатся в журнал В МОМЕНТ отправки.
+
+    ⚠️ ПОЧЕМУ НЕ «ПОТОМ, ПРИ УДАЛЕНИИ». Строку журнала читают и до удаления,
+    а после удаления брать название будет неоткуда — соединять не с чем.
+    Запись идёт ДО обращения к 1С, значит снимок остаётся и у той отправки,
+    которая сорвалась на полпути.
+    """
+    await _отчёт(db)
+    monkeypatch.setattr(odata_client, "запросить", ПоддельнаяОдинЭс())
+    await client.post(ВЫГРУЗКА % 1)
+    строка = await db.pool.fetchrow(
+        "SELECT report_number, report_title FROM odata_exports WHERE report_id=1"
+    )
+    assert строка["report_number"] == 1
+    assert строка["report_title"] == "Июль"

@@ -279,33 +279,166 @@ async def test_delete_report_rejected_ok(client, db):
     assert await db.отчёт(rid) is None
 
 
-@pytest.mark.asyncio
-async def test_delete_report_in_review_409_says_recall_first(client, db):
-    created = await client.post(
-        "/api/reports/", json={"title": "На проверке", "receiptIds": []}
+# ─── REP-EXPDEL заход ①: удаление из любого статуса ───────────────────
+# ⚠️ ДВА ТЕСТА ЗДЕСЬ ПЕРЕПИСАНЫ, А НЕ ДОБАВЛЕНЫ: прежние закрепляли запрет
+# («на проверке» → 409 «сначала отзовите», одобренный → 409 «принят к учёту»).
+# Решение владельца 22.09.2026 (В1) этот запрет снимает: удаляются все четыре
+# статуса. Старый текст сохранён в этом комментарии, чтобы через месяц было
+# видно, что правило сменилось намеренно, а не тест «подогнали под код».
+
+
+async def _выгрузка(db, rid, outcome, *, минут_назад=0, org_id=ORG):
+    """Строка журнала выгрузок под отчётом — сырьё для проверок В3.
+
+    ⚠️ СНИМКИ ЗДЕСЬ НЕ ЗАПОЛНЯЮТСЯ НАМЕРЕННО. Заполни их засев — и проверка
+    «после удаления строка осталась читаемой» зеленела бы при сломанном
+    коде: она читала бы то, что положил сам тест.
+    """
+    return await db.pool.fetchval(
+        "INSERT INTO odata_exports (org_id, report_id, outcome, started_at,"
+        " doc_number)"
+        " VALUES ($1,$2,$3, NOW() - make_interval(mins => $4), '0000-14')"
+        " RETURNING id",
+        org_id,
+        rid,
+        outcome,
+        минут_назад,
     )
-    rid = created.json()["id"]
-    await client.patch(f"/api/reports/{rid}", json={"status": "На проверке"})
-
-    resp = await client.delete(f"/api/reports/{rid}")
-    assert resp.status_code == 409
-    assert "отзовите" in resp.json()["detail"]  # текст объясняет следующий шаг
-    assert await db.отчёт(rid) is not None  # отчёт на месте
 
 
 @pytest.mark.asyncio
-async def test_delete_report_approved_409(client, db):
-    created = await client.post(
-        "/api/reports/", json={"title": "Одобренный", "receiptIds": []}
-    )
-    rid = created.json()["id"]
-    await client.patch(f"/api/reports/{rid}", json={"status": "На проверке"})
-    await client.patch(f"/api/reports/{rid}", json={"status": "Одобрен"})
+async def test_delete_report_in_review_ok_for_accountant(client_accountant, db):
+    await _report(db, 710, user_id=2, title="На проверке", status="На проверке")
 
-    resp = await client.delete(f"/api/reports/{rid}")
+    resp = await client_accountant.delete("/api/reports/710")
+    assert resp.status_code == 204
+    assert await db.отчёт(710) is None
+
+
+@pytest.mark.asyncio
+async def test_delete_report_approved_ok_for_admin(client, db):
+    await _report(db, 711, user_id=1, title="Одобренный", status="Одобрен")
+
+    resp = await client.delete("/api/reports/711")
+    assert resp.status_code == 204
+    assert await db.отчёт(711) is None
+
+
+@pytest.mark.asyncio
+async def test_employee_deletes_own_draft_ok(client_employee, db):
+    # Положительная половина: без неё «сотруднику нельзя» читалось бы как
+    # успех и при ручке, сломанной для всех.
+    await _report(db, 712, user_id=2, title="Свой черновик")
+
+    resp = await client_employee.delete("/api/reports/712")
+    assert resp.status_code == 204
+    assert await db.отчёт(712) is None
+
+
+@pytest.mark.asyncio
+async def test_employee_ne_udalyaet_otdannyy_na_proverku(client_employee, db):
+    # В2: сотрудник не сносит то, что уже лежит у бухгалтера или принято
+    # к учёту. Своё нетронутое он удаляет сам — тест ниже.
+    for рид, статус in ((713, "На проверке"), (714, "Одобрен")):
+        await _report(db, рид, user_id=2, title=статус, status=статус)
+        resp = await client_employee.delete(f"/api/reports/{рид}")
+        assert resp.status_code == 403, статус
+        assert "бухгалтер или администратор" in resp.json()["detail"]
+        # 403 — это отказ, а не «отказ, но всё равно удалил» (проверка
+        # доступа подтверждается СОСТОЯНИЕМ, а не кодом ответа).
+        assert await db.отчёт(рид) is not None, статус
+
+
+@pytest.mark.asyncio
+async def test_employee_deletes_own_rejected_ok(client_employee, db):
+    """⚠️ ПОПРАВКА ВЛАДЕЛЬЦА 22.09.2026: СУЖАТЬ ЗДЕСЬ НЕЛЬЗЯ. Отчёт вернули
+    на доработку — человек вправе снести его и завести заново, как сегодня.
+    Первая редакция захода оставляла сотруднику один черновик и отняла бы
+    эту дорогу молча; тест стоит, чтобы её не отняли снова."""
+    await _report(db, 715, user_id=2, title="Вернули", status="Отклонён")
+
+    resp = await client_employee.delete("/api/reports/715")
+    assert resp.status_code == 204
+    assert await db.отчёт(715) is None
+
+
+@pytest.mark.asyncio
+async def test_delete_report_exported_409_says_cancel_first(client, db):
+    # ⚠️ ЭТОГО ТЕСТА НЕ БЫЛО НИ ОДНОГО (замер 22.09.2026): удаление отчёта
+    # с записью в журнале выгрузок не проверялось, и обещанный строкой
+    # REP-EXPDEL «500 вместо ответа» никем не был замерен.
+    await _report(db, 716, user_id=1, title="Уехавший", status="Одобрен")
+    запись = await _выгрузка(db, 716, "ok")
+
+    resp = await client.delete("/api/reports/716")
     assert resp.status_code == 409
-    assert "принят к учёту" in resp.json()["detail"]
-    assert await db.отчёт(rid) is not None
+    assert resp.json()["detail"] == (
+        "Отчёт отправлен в 1С. Сначала отмените отправку, потом удаляйте"
+    )
+    assert await db.отчёт(716) is not None
+    assert (
+        await db.pool.fetchval(
+            "SELECT report_id FROM odata_exports WHERE id=$1", запись
+        )
+        == 716
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_report_running_export_409(client, db):
+    await _report(db, 717, user_id=1, title="Уезжает", status="Одобрен")
+    await _выгрузка(db, 717, "running")
+
+    resp = await client.delete("/api/reports/717")
+    assert resp.status_code == 409
+    assert resp.json()["detail"].startswith("Отчёт отправляется в 1С.")
+
+
+@pytest.mark.asyncio
+async def test_delete_report_interrupted_export_409_says_interrupted(client, db):
+    # Прерванная (running дольше десяти минут) — тот же путь, руками:
+    # автоматики нет, потому что создан ли документ в 1С, знает только человек.
+    await _report(db, 718, user_id=1, title="Прервалась", status="Одобрен")
+    await _выгрузка(db, 718, "running", минут_назад=11)
+
+    resp = await client.delete("/api/reports/718")
+    assert resp.status_code == 409
+    assert resp.json()["detail"].startswith("Отправка отчёта в 1С прервалась.")
+
+
+@pytest.mark.asyncio
+async def test_delete_report_after_cancel_ok_journal_survives(client, db):
+    # ГЛАВНОЕ ПО СТРОКЕ: отчёт удаляется, а журнал остаётся ЧИТАЕМЫМ —
+    # ссылка обнулена, снимки номера и названия на месте, номер документа 1С
+    # никуда не делся. Именно ради этого снято NOT NULL и заведён SET NULL.
+    await _report(db, 719, user_id=1, title="Отменённая отправка", status="Одобрен")
+    запись = await _выгрузка(db, 719, "cancelled")
+
+    resp = await client.delete("/api/reports/719")
+    assert resp.status_code == 204
+    assert await db.отчёт(719) is None
+
+    строка = await db.pool.fetchrow(
+        "SELECT report_id, report_number, report_title, doc_number, outcome"
+        " FROM odata_exports WHERE id=$1",
+        запись,
+    )
+    assert строка is not None, "журнал выгрузок пережил удаление отчёта"
+    assert строка["report_id"] is None
+    assert строка["report_number"] == 719
+    assert строка["report_title"] == "Отменённая отправка"
+    assert строка["doc_number"] == "0000-14"
+    assert строка["outcome"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_delete_report_failed_export_ok(client, db):
+    # Неудачная попытка живой не считается: она история, а не состояние.
+    await _report(db, 720, user_id=1, title="Неудача", status="Одобрен")
+    await _выгрузка(db, 720, "error")
+
+    assert (await client.delete("/api/reports/720")).status_code == 204
+    assert await db.отчёт(720) is None
 
 
 # ─── REP-AUTHOR ЧП1: автор отчёта ─────────────────────────────────────

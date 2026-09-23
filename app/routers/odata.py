@@ -457,12 +457,17 @@ async def выгрузить_отчёт(id: int, user: dict = Depends(get_curren
     # ДВА документа в подделке 1С, а при политике «проводить, когда всё
     # сопоставлено» — ещё и 500 с записью `running`, зависшей навсегда.
     try:
+        # ⚠️ СНИМКИ ОТЧЁТА ПИШУТСЯ СРАЗУ (REP-EXPDEL, 22.09.2026): отчёт можно
+        # удалить, и тогда ссылка обнулится, а строка журнала обязана остаться
+        # читаемой глазами. Номер — id отчёта, другого номера у отчёта нет.
         запись = await p.fetchval(
-            "INSERT INTO odata_exports (org_id, report_id, user_id, outcome,"
-            " defaulted_categories) VALUES ($1,$2,$3,'running',$4::text[])"
-            " RETURNING id",
+            "INSERT INTO odata_exports (org_id, report_id, report_number,"
+            " report_title, user_id, outcome, defaulted_categories)"
+            " VALUES ($1,$2,$3,$4,$5,'running',$6::text[]) RETURNING id",
             user["org_id"],
             id,
+            id,
+            отчёт.get("title"),
             user["id"],
             собранное_тело["без_соответствия"],
         )

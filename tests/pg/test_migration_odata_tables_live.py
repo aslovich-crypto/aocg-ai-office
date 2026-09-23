@@ -597,3 +597,176 @@ async def test_первичный_ключ_переименован_вслед_�
     }
     assert "org_category_map_pkey" in имена, имена
     assert "odata_category_map_pkey" not in имена, "старое имя индекса осталось"
+
+
+@pytest.mark.asyncio
+async def test_журнал_переживает_удаление_отчёта_после_миграции(db):
+    """REP-EXPDEL заход ①: СТАРАЯ форма таблицы → миграция → новая, и отчёт
+    удаляется, а строка журнала остаётся читаемой.
+
+    ⚠️ ИЗВЕСТНЫЙ ОТВЕТ С ОБЕИХ СТОРОН. До миграции ссылка обязательна и без
+    правила на удаление — удаление отчёта обязано отбиться нарушением
+    внешнего ключа; после — обнулиться, а снимки номера и названия обязаны
+    оказаться заполненными у СТАРОЙ строки, заведённой до правки. Без первой
+    половины «после миграции всё хорошо» не отличить от «миграция не нужна
+    была вовсе».
+
+    ⚠️ И ТРЕТЬЯ ПРОВЕРКА — ПОВТОР: `init_db` идёт при КАЖДОМ старте
+    контейнера, поэтому замена внешнего ключа обязана быть безвредной
+    на второй раз. Голый ADD CONSTRAINT здесь уронил бы приложение.
+    """
+    import asyncpg
+
+    await db.добавить_организацию(id=1)
+    await db.обеспечить_пользователя(id=1, first_name="А", role="admin")
+    await db.добавить_отчёт(id=1, title="Июль", user_id=1, org_id=1)
+
+    async def правило_удаления():
+        return await db.pool.fetchval(
+            "SELECT confdeltype::text FROM pg_constraint"
+            " WHERE conrelid = 'odata_exports'::regclass"
+            "   AND conname = 'odata_exports_report_id_fkey'"
+        )
+
+    async def ссылка_необязательна():
+        return await db.pool.fetchval(
+            "SELECT is_nullable FROM information_schema.columns"
+            " WHERE table_name='odata_exports' AND column_name='report_id'"
+        )
+
+    # ⓪ СХЕМА, ПОДНЯТАЯ `init_db` (app/database.py), уже нужной формы. Без
+    # этой половины проверялись бы только рельсы, а на прод схему кладёт
+    # именно init_db — и разойдись они, тест остался бы зелёным.
+    assert await ссылка_необязательна() == "YES", "init_db: ссылка обязательна"
+    assert await правило_удаления() == "n", "init_db: нет правила на удаление"
+
+    # ── старая форма: ссылка обязательна, правила на удаление нет
+    await _снести(db)
+    await db.pool.execute("""
+        CREATE TABLE odata_exports (
+            id           SERIAL PRIMARY KEY,
+            org_id       INTEGER NOT NULL REFERENCES organizations(id),
+            report_id    INTEGER NOT NULL REFERENCES reports(id),
+            user_id      INTEGER REFERENCES users(id),
+            started_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            finished_at  TIMESTAMPTZ,
+            outcome      TEXT NOT NULL,
+            doc_ref      TEXT,
+            doc_number   TEXT,
+            error_note   TEXT,
+            defaulted_categories TEXT[] NOT NULL DEFAULT '{}'
+        )
+    """)
+    запись = await db.pool.fetchval(
+        "INSERT INTO odata_exports (org_id, report_id, outcome, doc_number)"
+        " VALUES (1, 1, 'cancelled', '0000-14') RETURNING id"
+    )
+
+    # ДО: известный ответ — обязательна, правила нет, удаление отбивается
+    assert await ссылка_необязательна() == "NO"
+    assert await правило_удаления() == "a"
+    with pytest.raises(asyncpg.ForeignKeyViolationError):
+        await db.pool.execute("DELETE FROM reports WHERE id=1")
+
+    # ── миграция
+    for ddl in _рельсы().МИГРАЦИЯ:
+        await db.pool.execute(ddl)
+
+    # ПОСЛЕ: необязательна, обнуляется, снимки у СТАРОЙ строки заполнены
+    assert await ссылка_необязательна() == "YES"
+    assert await правило_удаления() == "n"
+    строка = await db.pool.fetchrow(
+        "SELECT report_number, report_title FROM odata_exports WHERE id=$1", запись
+    )
+    assert строка["report_number"] == 1
+    assert строка["report_title"] == "Июль"
+
+    # повтор миграции безвреден — init_db идёт при каждом старте контейнера
+    for ddl in _рельсы().МИГРАЦИЯ:
+        await db.pool.execute(ddl)
+    assert await правило_удаления() == "n"
+
+    # и теперь отчёт удаляется, а журнал остаётся читаемым
+    await db.pool.execute("DELETE FROM reports WHERE id=1")
+    осталась = await db.pool.fetchrow(
+        "SELECT report_id, report_number, report_title, doc_number, outcome"
+        " FROM odata_exports WHERE id=$1",
+        запись,
+    )
+    assert осталась is not None
+    assert осталась["report_id"] is None
+    assert осталась["report_number"] == 1
+    assert осталась["report_title"] == "Июль"
+    assert осталась["doc_number"] == "0000-14"
+
+
+@pytest.mark.asyncio
+async def test_init_db_чинит_старую_форму_журнала(db):
+    """⚠️ НА ПРОД СХЕМУ КЛАДЁТ `init_db`, А НЕ РЕЛЬСЫ — И ЭТОТ ПУТЬ ПРОВЕРЯЕТСЯ
+    ЗДЕСЬ, ОТДЕЛЬНО. Тест выше гоняет МИГРАЦИЮ из `scripts/validate_odata_tables.py`,
+    то есть вторую копию DDL; сам `app/database.py` при этом остаётся
+    непроверенным на пути «таблица уже есть в старой форме».
+
+    ⚠️ ДЫРУ НАШЛА МУТАЦИЯ, А НЕ ЧТЕНИЕ (ED-09, 22.09.2026): снятие строки
+    `ALTER COLUMN report_id DROP NOT NULL` из `app/database.py` не покраснело
+    ни на одном тесте. Разбор: в тестовой базе таблица создаётся С НУЛЯ, а
+    в `CREATE TABLE` ссылка уже необязательна — значит ALTER там ничего не
+    меняет и разницу увидеть негде. На проде таблица СУЩЕСТВУЕТ, и работает
+    ровно этот ALTER. Сценарий просто не проходил через мутированную ветку.
+    """
+    from app.database import init_db
+
+    await db.добавить_организацию(id=1)
+    await db.обеспечить_пользователя(id=1, first_name="А", role="admin")
+    await db.добавить_отчёт(id=1, title="Июль", user_id=1, org_id=1)
+
+    await _снести(db)
+    await db.pool.execute("""
+        CREATE TABLE odata_exports (
+            id           SERIAL PRIMARY KEY,
+            org_id       INTEGER NOT NULL REFERENCES organizations(id),
+            report_id    INTEGER NOT NULL REFERENCES reports(id),
+            user_id      INTEGER REFERENCES users(id),
+            started_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            finished_at  TIMESTAMPTZ,
+            outcome      TEXT NOT NULL,
+            doc_ref      TEXT,
+            doc_number   TEXT,
+            error_note   TEXT,
+            defaulted_categories TEXT[] NOT NULL DEFAULT '{}'
+        )
+    """)
+    запись = await db.pool.fetchval(
+        "INSERT INTO odata_exports (org_id, report_id, outcome)"
+        " VALUES (1, 1, 'cancelled') RETURNING id"
+    )
+
+    # ⚠️ ТОТ ЖЕ ВЫЗОВ, ЧТО НА СТАРТЕ КОНТЕЙНЕРА. Пул уже есть — init_db берёт
+    # его сам, подменять ничего не нужно.
+    await init_db()
+
+    forma = await db.pool.fetchrow(
+        "SELECT (SELECT is_nullable FROM information_schema.columns"
+        "         WHERE table_name='odata_exports' AND column_name='report_id')"
+        "        AS необязательна,"
+        "       (SELECT confdeltype::text FROM pg_constraint"
+        "         WHERE conrelid='odata_exports'::regclass"
+        "           AND conname='odata_exports_report_id_fkey') AS правило"
+    )
+    assert forma["необязательна"] == "YES", "init_db не снял обязательность ссылки"
+    assert forma["правило"] == "n", "init_db не поставил обнуление при удалении"
+    снимки = await db.pool.fetchrow(
+        "SELECT report_number, report_title FROM odata_exports WHERE id=$1", запись
+    )
+    assert снимки["report_number"] == 1, "init_db не заполнил снимок номера"
+    assert снимки["report_title"] == "Июль", "init_db не заполнил снимок названия"
+
+    # повтор — init_db идёт при КАЖДОМ старте контейнера
+    await init_db()
+    await db.pool.execute("DELETE FROM reports WHERE id=1")
+    assert (
+        await db.pool.fetchval(
+            "SELECT report_id FROM odata_exports WHERE id=$1", запись
+        )
+        is None
+    )

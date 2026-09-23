@@ -132,7 +132,9 @@ import sys
     """CREATE TABLE IF NOT EXISTS odata_exports (
     id           SERIAL PRIMARY KEY,
     org_id       INTEGER NOT NULL REFERENCES organizations(id),
-    report_id    INTEGER NOT NULL REFERENCES reports(id),
+    report_id    INTEGER REFERENCES reports(id) ON DELETE SET NULL,
+    report_number INTEGER,
+    report_title  TEXT,
     user_id      INTEGER REFERENCES users(id),
     started_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     finished_at  TIMESTAMPTZ,
@@ -162,6 +164,39 @@ import sys
     ON odata_user_map(org_id, user_id)""",
     """ALTER TABLE odata_exports
     ADD COLUMN IF NOT EXISTS defaulted_categories TEXT[] NOT NULL DEFAULT '{}'""",
+    # REP-EXPDEL (22.09.2026): отчёт удаляется, журнал остаётся — ссылка
+    # обнуляется, снимки номера и названия остаются. Зеркало ALTER-ов
+    # из app/database.py; разбор и обратный DDL — там же.
+    """ALTER TABLE odata_exports
+    ADD COLUMN IF NOT EXISTS report_number INTEGER""",
+    """ALTER TABLE odata_exports
+    ADD COLUMN IF NOT EXISTS report_title TEXT""",
+    """ALTER TABLE odata_exports ALTER COLUMN report_id DROP NOT NULL""",
+    """DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid = 'odata_exports'::regclass
+           AND conname  = 'odata_exports_report_id_fkey'
+           AND confdeltype <> 'n'
+    ) THEN
+        ALTER TABLE odata_exports DROP CONSTRAINT odata_exports_report_id_fkey;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conrelid = 'odata_exports'::regclass
+           AND conname  = 'odata_exports_report_id_fkey'
+    ) THEN
+        ALTER TABLE odata_exports
+            ADD CONSTRAINT odata_exports_report_id_fkey
+            FOREIGN KEY (report_id) REFERENCES reports(id) ON DELETE SET NULL;
+    END IF;
+END $$""",
+    """UPDATE odata_exports э
+   SET report_number = о.id, report_title = о.title
+  FROM reports о
+ WHERE э.report_id = о.id
+   AND (э.report_number IS NULL OR э.report_title IS NULL)""",
 ]
 
 # ОБРАТНЫЙ DDL — точка отката. Выполняется РУКАМИ, приложением никогда.
@@ -222,6 +257,8 @@ import sys
         "id",
         "org_id",
         "report_id",
+        "report_number",
+        "report_title",
         "user_id",
         "started_at",
         "finished_at",

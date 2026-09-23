@@ -1101,7 +1101,16 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS odata_exports (
                 id           SERIAL PRIMARY KEY,
                 org_id       INTEGER NOT NULL REFERENCES organizations(id),
-                report_id    INTEGER NOT NULL REFERENCES reports(id),
+                -- ⚠️ ССЫЛКА НЕОБЯЗАТЕЛЬНАЯ И ОБНУЛЯЕТСЯ ПРИ УДАЛЕНИИ ОТЧЁТА
+                -- (REP-EXPDEL, решение владельца 22.09.2026). Разбор — ниже,
+                -- у идемпотентных ALTER: здесь форма для НОВОЙ базы, там —
+                -- та же форма для уже созданных.
+                report_id    INTEGER REFERENCES reports(id) ON DELETE SET NULL,
+                -- Снимки отчёта на момент отправки: после удаления отчёта
+                -- соединять будет не с чем, а строку журнала читают глазами.
+                -- Номер — id отчёта, другого номера у отчёта нет.
+                report_number INTEGER,
+                report_title  TEXT,
                 -- Кто нажал. Без него на вопрос «кто отправил это в 1С»
                 -- ответить нечем, а отвечать придётся бухгалтеру клиента.
                 user_id      INTEGER REFERENCES users(id),
@@ -1160,6 +1169,69 @@ async def init_db():
             -- базы, машины разработчика), колонка приедет только так.
             ALTER TABLE odata_exports
                 ADD COLUMN IF NOT EXISTS defaulted_categories TEXT[] NOT NULL DEFAULT '{}';
+            -- ⚠️ REP-EXPDEL, РЕШЕНИЕ ВЛАДЕЛЬЦА 22.09.2026: ОТЧЁТ УДАЛЯЕТСЯ,
+            -- ЖУРНАЛ ОСТАЁТСЯ. Было: ссылка обязательна и без правила на
+            -- удаление, то есть база отбивала удаление отчёта нарушением
+            -- внешнего ключа, а приложение эту ошибку не ловило — человек
+            -- получал 500 вместо слов. Каскад здесь запрещён ПО СУЩЕСТВУ:
+            -- журнал — улика «что ушло в чужой учёт», и документ в базе
+            -- клиента живёт дальше, даже когда наш отчёт удалён. Поэтому
+            -- ссылка ОБНУЛЯЕТСЯ, а то, ради чего строку читают глазами,
+            -- лежит рядом снимками.
+            --
+            -- ⚠️ ОБА УНИКАЛЬНЫХ ИНДЕКСА ВЫШЕ ОТ ЭТОГО НЕ ЛОМАЮТСЯ: в уникальном
+            -- индексе пустые значения считаются РАЗНЫМИ, поэтому осиротевших
+            -- строк с пустой ссылкой может быть сколько угодно, а правило
+            -- «одна живая выгрузка у отчёта» продолжает работать для живых.
+            --
+            -- Откат (обратный DDL):
+            --   ALTER TABLE odata_exports DROP CONSTRAINT odata_exports_report_id_fkey;
+            --   ALTER TABLE odata_exports ADD CONSTRAINT odata_exports_report_id_fkey
+            --       FOREIGN KEY (report_id) REFERENCES reports(id);
+            --   ALTER TABLE odata_exports ALTER COLUMN report_id SET NOT NULL;
+            --   ALTER TABLE odata_exports DROP COLUMN report_title;
+            --   ALTER TABLE odata_exports DROP COLUMN report_number;
+            -- ⚠️ Откат SET NOT NULL пройдёт только пока нет осиротевших строк.
+            ALTER TABLE odata_exports ADD COLUMN IF NOT EXISTS report_number INTEGER;
+            ALTER TABLE odata_exports ADD COLUMN IF NOT EXISTS report_title TEXT;
+            ALTER TABLE odata_exports ALTER COLUMN report_id DROP NOT NULL;
+            -- ⚠️ ПРАВИЛО НА УДАЛЕНИЕ МЕНЯЕТСЯ ТОЛЬКО ЗАМЕНОЙ ОГРАНИЧЕНИЯ, а
+            -- ADD CONSTRAINT не идемпотентен: init_db идёт при КАЖДОМ старте
+            -- контейнера, и голый ADD уронил бы приложение со второго запуска.
+            -- Поэтому проверка по системному каталогу: 'n' в confdeltype —
+            -- это и есть «обнулять при удалении»; стоит оно — не трогаем.
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM pg_constraint
+                     WHERE conrelid = 'odata_exports'::regclass
+                       AND conname  = 'odata_exports_report_id_fkey'
+                       AND confdeltype <> 'n'
+                ) THEN
+                    ALTER TABLE odata_exports
+                        DROP CONSTRAINT odata_exports_report_id_fkey;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                     WHERE conrelid = 'odata_exports'::regclass
+                       AND conname  = 'odata_exports_report_id_fkey'
+                ) THEN
+                    ALTER TABLE odata_exports
+                        ADD CONSTRAINT odata_exports_report_id_fkey
+                        FOREIGN KEY (report_id) REFERENCES reports(id)
+                        ON DELETE SET NULL;
+                END IF;
+            END $$;
+            -- ⚠️ СТАРЫЕ СТРОКИ ЖУРНАЛА СНИМКОВ НЕ ИМЕЮТ — заполняем из живых
+            -- отчётов, пока они живы. Сделать это ПОЗЖЕ нельзя: после первого
+            -- же удаления связывать будет нечем, и строка останется безымянной
+            -- навсегда. Условие по пустым полям делает повтор безвредным.
+            UPDATE odata_exports э
+               SET report_number = о.id,
+                   report_title  = о.title
+              FROM reports о
+             WHERE э.report_id = о.id
+               AND (э.report_number IS NULL OR э.report_title IS NULL);
         """)
         # ⚠️ ТРЕТЬЯ ТАБЛИЦА ОБМЕНА: КТО ЕСТЬ КТО. Решение 1C-08 от 16.09.2026 —
         # сопоставление людей СПРАВОЧНИКОМ СООТВЕТСТВИЙ, а не автоподбором.
