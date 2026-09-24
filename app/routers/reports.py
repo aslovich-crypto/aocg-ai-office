@@ -111,6 +111,26 @@ def _ensure_can_delete(status: str, user: dict) -> None:
         )
 
 
+def _ensure_can_rename(status: str, user: dict) -> None:
+    """Кто может переименовать отчёт в этом статусе (REP-RENAME, 23.09.2026).
+
+    ⚠️ НАБОР СТАТУСОВ ТОТ ЖЕ, ЧТО У УДАЛЕНИЯ, И ЭТО НЕ СОВПАДЕНИЕ: и то
+    и другое — правка ЧУЖОГО ГЛАЗАМИ документа. Пока отчёт не показан
+    бухгалтеру, он целиком свой; показан или принят к учёту — менять его
+    имя за спиной проверяющего нельзя, это делает тот, кто за учёт отвечает.
+    Отдельная константа здесь завела бы вторую копию правила, которая
+    разошлась бы с первой молча.
+    """
+    if status in СОТРУДНИК_УДАЛЯЕТ:
+        return
+    if not can_see_all(user["role"]):
+        raise HTTPException(
+            status_code=403,
+            detail="Отчёт в статусе «%s» переименовывает бухгалтер или администратор"
+            % status,
+        )
+
+
 async def _fetch_report_for_update(conn, id: int, user: dict):
     """Тот же отбор, что `_fetch_report`, но строка берётся под замок.
 
@@ -133,7 +153,9 @@ async def _fetch_report_for_update(conn, id: int, user: dict):
     )
 
 
-async def _ensure_no_live_export(conn, id: int, org_id: int) -> None:
+async def _ensure_no_live_export(
+    conn, id: int, org_id: int, действие="удаляйте"
+) -> None:
     """Отчёт с живой отправкой в 1С удаляется только после отмены (В3).
 
     ⚠️ ПОЧЕМУ НЕ ОТМЕНЯТЬ САМИ, ХОТЯ ЭТО БЫЛО БЫ УДОБНЕЕ. Отмена у нас значит
@@ -169,7 +191,7 @@ async def _ensure_no_live_export(conn, id: int, org_id: int) -> None:
         что = "Отчёт отправлен в 1С"
     raise HTTPException(
         status_code=409,
-        detail="%s. Сначала отмените отправку, потом удаляйте" % что,
+        detail="%s. Сначала отмените отправку, потом %s" % (что, действие),
     )
 
 
@@ -190,6 +212,13 @@ class StatusIn(BaseModel):
     # не экономит ему ничего». Проверка ниже в обработчике, а не в модели:
     # ответ должен быть человеческим 400 с объяснением, а не 422 со схемой.
     reason: Optional[str] = None
+
+
+class TitleIn(BaseModel):
+    # ⚠️ БЕЗ ОГРАНИЧЕНИЙ PYDANTIC НАМЕРЕННО. Схема ответила бы 422 своими
+    # словами про «string_too_long», а человеку нужен текст про отчёт.
+    # Проверка — в обработчике, ответ — 422 с нашим объяснением.
+    title: str
 
 
 class ReceiptsIn(BaseModel):
@@ -488,6 +517,59 @@ async def get_report(id: int, user: dict = Depends(get_current_user)):
     # должна быть видна по тому же признаку.
     d["receipts"] = [с_признаком_дозапроса(r) for r in receipts]
     return d
+
+
+# ⚠️ ДЛИНА НАЗВАНИЯ — 255, ПОТОМУ ЧТО СТОЛЬКО ДЕРЖИТ КОЛОНКА
+# (`reports.title VARCHAR(255)`). Проверять надо ДО записи: без проверки
+# длинное имя упало бы ошибкой базы, то есть человек получил бы 500 вместо
+# слов — ровно тот класс, который чинили в [[REP-EXPDEL]].
+ДЛИНА_НАЗВАНИЯ = 255
+
+
+@router.patch("/{id}/title")
+async def переименовать(id: int, r: TitleIn, user: dict = Depends(get_current_user)):
+    """Переименовать отчёт (REP-RENAME, решение владельца 23.09.2026).
+
+    ⚠️ ОТДЕЛЬНЫЙ ПУТЬ, А НЕ ПОЛЕ В `PATCH /{id}`. Тот PATCH принимает
+    `StatusIn` со ОБЯЗАТЕЛЬНЫМ статусом и тянет за собой уведомления, письма
+    и гейт утверждения. Название к этому отношения не имеет: смешав их, мы
+    получили бы ручку, которая на переименование шлёт письма о смене статуса.
+
+    ⚠️ ПОЧЕМУ ДО ОТПРАВКИ В 1С. Название уезжает В ДОКУМЕНТ 1С и остаётся
+    снимком в журнале выгрузок ([[REP-EXPDEL]]): переименовав отчёт после
+    отправки, мы развели бы наше имя и имя в чужой бухгалтерии — и человек,
+    ищущий документ по названию, не нашёл бы его.
+
+    ⚠️ ОДНА ТРАНЗАКЦИЯ И ЗАМОК, как у удаления: между проверкой статуса
+    и записью статус может смениться.
+    """
+    название = (r.title or "").strip()
+    if not название:
+        raise HTTPException(
+            status_code=422, detail="Название отчёта не может быть пустым"
+        )
+    if len(название) > ДЛИНА_НАЗВАНИЯ:
+        raise HTTPException(
+            status_code=422,
+            detail="Название длиннее %d знаков — сократите" % ДЛИНА_НАЗВАНИЯ,
+        )
+    p = await get_pool()
+    async with p.acquire() as conn:
+        async with conn.transaction():
+            row = await _fetch_report_for_update(conn, id, user)
+            if not row:
+                raise HTTPException(status_code=404, detail="Not found")
+            _ensure_can_rename(row["status"], user)
+            await _ensure_no_live_export(
+                conn, id, user["org_id"], действие="переименовывайте"
+            )
+            обновлён = await conn.fetchrow(
+                "UPDATE reports SET title=$1 WHERE id=$2 AND org_id=$3 RETURNING *",
+                название,
+                id,
+                user["org_id"],
+            )
+            return await _with_receipt_ids(conn, обновлён)
 
 
 @router.delete("/{id}", status_code=204)

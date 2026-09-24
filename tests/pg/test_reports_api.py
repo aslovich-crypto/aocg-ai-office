@@ -1256,3 +1256,91 @@ async def test_in_1c_flag_says_what_list_cannot_ask(client, db):
     # стерегут соседние тесты, и признак обязан быть во всех.
     один = await client.get("/api/reports/730")
     assert один.json()["in_1c"] is True
+
+
+# ─── REP-RENAME: переименование отчёта ─────────────────────────────────
+ИМЯ = "/api/reports/%d/title"
+
+
+@pytest.mark.asyncio
+async def test_rename_draft_ok(client, db):
+    await _report(db, 740, user_id=1, title="Старое имя")
+
+    ответ = await client.patch(ИМЯ % 740, json={"title": "  Новое имя  "})
+    assert ответ.status_code == 200
+    # Пробелы по краям срезаются: «Отчёт » и «Отчёт» — одно и то же имя,
+    # а в списке они встали бы порознь.
+    assert ответ.json()["title"] == "Новое имя"
+    assert (await db.отчёт(740))["title"] == "Новое имя"
+    # Форма ответа та же, что у остальных ручек отчёта.
+    assert "receiptIds" in ответ.json() and "in_1c" in ответ.json()
+
+
+@pytest.mark.asyncio
+async def test_rename_employee_own_rejected_ok(client_employee, db):
+    await _report(db, 741, user_id=2, title="Вернули", status="Отклонён")
+    assert (
+        await client_employee.patch(ИМЯ % 741, json={"title": "Второй заход"})
+    ).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_rename_employee_ne_trogaet_otdannyy(client_employee, db):
+    # На проверке и одобренный сотруднику закрыты — тот же набор, что
+    # у удаления: правка чужого глазами документа.
+    for рид, статус in ((742, "На проверке"), (743, "Одобрен")):
+        await _report(db, рид, user_id=2, title=статус, status=статус)
+        ответ = await client_employee.patch(ИМЯ % рид, json={"title": "Чужими руками"})
+        assert ответ.status_code == 403, статус
+        assert "переименовывает бухгалтер или администратор" in ответ.json()["detail"]
+        # Отказ подтверждается СОСТОЯНИЕМ, а не кодом ответа.
+        assert (await db.отчёт(рид))["title"] == статус, статус
+
+
+@pytest.mark.asyncio
+async def test_rename_approved_ok_for_admin(client, db):
+    await _report(db, 744, user_id=1, title="Одобренный", status="Одобрен")
+    assert (
+        await client.patch(ИМЯ % 744, json={"title": "Июль, поправлено"})
+    ).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_rename_with_live_export_409(client, db):
+    """Имя уехало в документ 1С и лежит снимком в журнале — разводить нельзя."""
+    await _report(db, 745, user_id=1, title="Уехавший", status="Одобрен")
+    await _выгрузка(db, 745, "ok")
+
+    ответ = await client.patch(ИМЯ % 745, json={"title": "Другое имя"})
+    assert ответ.status_code == 409
+    assert ответ.json()["detail"] == (
+        "Отчёт отправлен в 1С. Сначала отмените отправку, потом переименовывайте"
+    )
+    assert (await db.отчёт(745))["title"] == "Уехавший"
+
+
+@pytest.mark.asyncio
+async def test_rename_empty_and_too_long_422(client, db):
+    await _report(db, 746, user_id=1, title="Целое")
+
+    пусто = await client.patch(ИМЯ % 746, json={"title": "   "})
+    assert пусто.status_code == 422 and "не может быть пустым" in пусто.json()["detail"]
+
+    длинно = await client.patch(ИМЯ % 746, json={"title": "я" * 256})
+    assert длинно.status_code == 422 and "сократите" in длинно.json()["detail"]
+    # ⚠️ 255 ЗНАКОВ — ГРАНИЦА КОЛОНКИ, и она проходит: без проверки длины
+    # человек получил бы 500 от базы вместо слов.
+    ровно = await client.patch(ИМЯ % 746, json={"title": "я" * 255})
+    assert ровно.status_code == 200
+
+    assert len((await db.отчёт(746))["title"]) == 255
+
+
+@pytest.mark.asyncio
+async def test_rename_foreign_org_404(client, db):
+    await db.добавить_организацию(id=ЧУЖАЯ_ОРГ)
+    чужой = await _чужой_автор(db)
+    await _report(db, 747, user_id=чужой, title="Чужой", org_id=ЧУЖАЯ_ОРГ)
+
+    assert (await client.patch(ИМЯ % 747, json={"title": "Моё"})).status_code == 404
+    assert (await db.отчёт(747))["title"] == "Чужой"

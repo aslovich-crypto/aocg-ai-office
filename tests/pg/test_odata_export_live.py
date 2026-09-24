@@ -1416,7 +1416,7 @@ async def test_проведённый_документ_не_трогаем_во�
 
     строка = await db.pool.fetchrow("SELECT outcome, error_note FROM odata_exports")
     assert строка["outcome"] == "cancelled", "отмена не прошла"
-    assert "проведён бухгалтером, пометка не поставлена" in строка["error_note"]
+    assert "документ проведён, пометка не поставлена" in строка["error_note"]
 
 
 @pytest.mark.asyncio
