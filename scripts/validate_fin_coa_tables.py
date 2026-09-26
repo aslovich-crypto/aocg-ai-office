@@ -76,7 +76,7 @@ def печать_sql() -> int:
         " WHERE table_name = '%s' ORDER BY ordinal_position;" % ТАБЛИЦА
     )
     print("SELECT indexname FROM pg_indexes WHERE tablename = '%s';" % ТАБЛИЦА)
-    print("SELECT count(*) AS статей_после_отката_будет_ноль FROM %s;" % ТАБЛИЦА)
+    print("SELECT count(*) AS статей_до_отката FROM %s;" % ТАБЛИЦА)
     print("ROLLBACK;")
     print("-- откат выполнен: таблицы нет, как и не было")
     return 0
