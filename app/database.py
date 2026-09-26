@@ -4,6 +4,7 @@ import logging
 import os
 
 from app.categories_seed import seed_default_categories
+from app.finance.schema import init_finance_schema
 
 logger = logging.getLogger(__name__)
 
@@ -1300,3 +1301,12 @@ async def init_db():
             ]
             for org_id in org_ids:
                 await seed_default_categories(conn, org_id)
+
+        # ── Финансы, модуль «Бюджет проекта» (FIN-01) ──
+        # ОДНО из двух разрешённых касаний ядра со стороны Финансов (CLAUDE.md,
+        # раздел «Приложение „Финансы“»). Весь DDL таблиц `fin_*` и засев
+        # справочника CoA лежат в `app/finance/schema.py`; здесь только вызов.
+        # Стоит ПОСЛЕ засева категорий: обе функции идут по всем организациям,
+        # и порядок между ними не важен, а вот до создания `organizations`
+        # ставить нельзя — засев читает эту таблицу.
+        await init_finance_schema(conn)
