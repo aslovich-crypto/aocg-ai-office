@@ -10,6 +10,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from app.database import get_pool, init_db
 from app import env_check
+from app.finance import router as finance_router
 from app.routers import (
     receipts,
     reports,
@@ -180,6 +181,7 @@ app.include_router(organizations.router)
 app.include_router(max_relay.router)
 app.include_router(search.router)
 app.include_router(notifications.router)
+app.include_router(finance_router.router)
 
 
 @app.get("/")
