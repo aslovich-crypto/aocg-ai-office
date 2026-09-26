@@ -135,6 +135,7 @@ import sys
     report_id    INTEGER REFERENCES reports(id) ON DELETE SET NULL,
     report_number INTEGER,
     report_title  TEXT,
+    attempt_ref  TEXT,
     user_id      INTEGER REFERENCES users(id),
     started_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     finished_at  TIMESTAMPTZ,
@@ -171,6 +172,8 @@ import sys
     ADD COLUMN IF NOT EXISTS report_number INTEGER""",
     """ALTER TABLE odata_exports
     ADD COLUMN IF NOT EXISTS report_title TEXT""",
+    """ALTER TABLE odata_exports
+    ADD COLUMN IF NOT EXISTS attempt_ref TEXT""",
     """ALTER TABLE odata_exports ALTER COLUMN report_id DROP NOT NULL""",
     """DO $$
 BEGIN
@@ -259,6 +262,7 @@ END $$""",
         "report_id",
         "report_number",
         "report_title",
+        "attempt_ref",
         "user_id",
         "started_at",
         "finished_at",

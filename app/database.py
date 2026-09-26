@@ -1111,6 +1111,13 @@ async def init_db():
                 -- Номер — id отчёта, другого номера у отчёта нет.
                 report_number INTEGER,
                 report_title  TEXT,
+                -- ⚠️ НАШ КЛЮЧ ПОПЫТКИ (1C-23 ②). Пишется ДО обращения к 1С
+                -- и уходит в тело документа как `Ref_Key`. Нужен ровно затем,
+                -- чтобы после ОБРЫВА СВЯЗИ спросить у 1С «а документ с этим
+                -- ключом у вас есть?» — без него «не дошло» и «дошло, ответ
+                -- потерялся» неотличимы, и повтор создаёт второй документ
+                -- в чужой бухгалтерии.
+                attempt_ref  TEXT,
                 -- Кто нажал. Без него на вопрос «кто отправил это в 1С»
                 -- ответить нечем, а отвечать придётся бухгалтеру клиента.
                 user_id      INTEGER REFERENCES users(id),
@@ -1194,6 +1201,9 @@ async def init_db():
             -- ⚠️ Откат SET NOT NULL пройдёт только пока нет осиротевших строк.
             ALTER TABLE odata_exports ADD COLUMN IF NOT EXISTS report_number INTEGER;
             ALTER TABLE odata_exports ADD COLUMN IF NOT EXISTS report_title TEXT;
+            -- 1C-23 ②: ключ попытки, см. комментарий в CREATE TABLE выше.
+            -- Откат: ALTER TABLE odata_exports DROP COLUMN attempt_ref;
+            ALTER TABLE odata_exports ADD COLUMN IF NOT EXISTS attempt_ref TEXT;
             ALTER TABLE odata_exports ALTER COLUMN report_id DROP NOT NULL;
             -- ⚠️ ПРАВИЛО НА УДАЛЕНИЕ МЕНЯЕТСЯ ТОЛЬКО ЗАМЕНОЙ ОГРАНИЧЕНИЯ, а
             -- ADD CONSTRAINT не идемпотентен: init_db идёт при КАЖДОМ старте
